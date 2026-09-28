@@ -37,7 +37,6 @@ Registers the generic `router` provider (discovers models via `GET /v1/models`, 
 ### sub — subscription-usage footer
 
 A status footer showing subscription/provider usage (5-hour, weekly, monthly windows, credits) for known providers, plus the **Yardmaster usage display** below. Commands: `/sub` (usage detail), `/context` (context-window detail).
-
 ### Yardmaster usage
 
 If your `router.baseUrl` points at a yardmaster instance, the sub footer shows your proxy usage directly: it polls `GET <router.baseUrl>/usage?provider=<prefix>` (falling back to the aggregate `GET /usage`, and to OmniRoute's `om-usage` endpoint when the JSON form isn't served) and renders remaining % per window plus credit balance, e.g.
@@ -47,6 +46,13 @@ Router · command-code 5h:82% W:64% M:31% M:$12.40
 ```
 
 This needs a yardmaster API key with the **usage** permission (Admin → usage api → allowed) — the same key you `/login router` with works if it has that permission.
+
+### ponytail — lazy-senior-dev mode
+
+Lazy mode for the agent itself: `/ponytail off|lite|full|ultra|review` switches the over-engineering discipline level (persisted per session, restored on resume); `stop ponytail` / `normal mode` deactivates. The active level is injected into the system prompt each turn, shown in the status bar, and inherited by subagents. Ships the six `ponytail*` skills in-package (`/ponytail`, `/ponytail-review|audit|gain|debt|help`).
+
+- Config: `~/.config/ponytail/config.json` (`defaultMode`, `quietStartup`, `hideStatus`) — or env: `PONYTAIL_DEFAULT_MODE`, `PONYTAIL_QUIET_STARTUP`, `PONYTAIL_HIDE_STATUS`, `PONYTAIL_SUBAGENT_SCOPE=off` to disable subagent injection
+- Command: `/ponytail [mode|status|default <mode>]` (review is session-only)
 
 ## Kill-switches
 
@@ -60,7 +66,7 @@ Disabled modules don't register anything; `/ceulen` lists what's active and disa
 
 ## Roadmap
 
-Wave 1 ships router + sub. Later waves consolidate the remaining pi-extensions fleet (notify, cron, references, ponytail, …).
+Wave 1 ships router + sub; wave 2 adds ponytail (skills included). Later waves consolidate the remaining pi-extensions fleet (notify, cron, references, …).
 
 ## License
 

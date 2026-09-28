@@ -1,6 +1,6 @@
 {
   "name": "ceulen",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Ceulen — the Pi coding agent, fully dressed: one bundle extension carrying the full toolkit with a single /ceulen config command.",
   "type": "module",
   "license": "MIT",
@@ -13,7 +13,7 @@
     "cli"
   ],
   "engines": {
-    "node": ">=20"
+    "node": ">=22.19.0"
   },
   "files": [
     "extensions",
@@ -29,7 +29,7 @@
   "homepage": "https://github.com/ceulen-dev/ceulen#readme",
   "bugs": "https://github.com/ceulen-dev/ceulen/issues",
   "scripts": {
-    "test": "node --import tsx --test extensions/modules/router/test/unit.test.ts extensions/modules/sub/test/*.test.ts",
+    "test": "node --import tsx --test extensions/modules/router/test/unit.test.ts extensions/modules/sub/test/*.test.ts extensions/modules/ponytail/test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {

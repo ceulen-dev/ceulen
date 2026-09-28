@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 import routerModule from "./modules/router/index.ts";
 import subModule from "./modules/sub/index.ts";
+import ponytailModule from "./modules/ponytail/index.ts";
 
 // ponytail: module registry grows by append — one object per module, loader
 // stays ~10 lines forever, no plugin framework
@@ -22,6 +23,7 @@ const MODULES = [
   // Router first: sub reads the `router` provider for usage display.
   { name: "router", load: routerModule },
   { name: "sub", load: subModule },
+  { name: "ponytail", load: ponytailModule },
   // { name: "notify", load: notifyModule },  // later wave
 ];
 

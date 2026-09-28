@@ -4,7 +4,8 @@
   ],
   "exclude": [
     "node_modules",
-    "extensions/modules/sub/test"
+    "extensions/modules/sub/test",
+    "extensions/modules/ponytail/test"
   ],
   "compilerOptions": {
     "target": "ES2022",
