@@ -1,0 +1,1998 @@
+import { DEFAULT_COMPACTION_SETTINGS, estimateTokens, readStoredCredential, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createHash } from "node:crypto";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+/** Single source of truth for User-Agent strings — matches package.json version. */
+const PI_SUB_VERSION: string = (() => {
+  try {
+    return JSON.parse(fs.readFileSync(new URL("../../../package.json", import.meta.url), "utf8")).version; // ceulen bundle root
+  } catch {
+    return "unknown"; // ponytail: partial installs must not kill extension load
+  }
+})();
+
+/** Parse .env-style text into KEY→VALUE entries: `export ` prefix allowed,
+ *  single/double quotes stripped, comment/blank/non-assignment lines ignored.
+ *  No inline-comment stripping (a `#` in the value stays part of the value).
+ *  Exported for tests. */
+export function parseEnvText(text: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const line of text.split(/\r?\n/)) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!m) continue;
+    let v = m[2].trim();
+    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
+    out[m[1]] = v;
+  }
+  return out;
+}
+
+/** Pi config dirs + .env.local/.env discovery (pi-munin convention, stdlib parse). */
+function loadEnvFiles(): void {
+  const dirs = process.env.PI_CODING_AGENT_DIR
+    ? [process.env.PI_CODING_AGENT_DIR]
+    : [path.join(os.homedir(), ".pi", "agent"), path.join(os.homedir(), ".pi", "agents")];
+  const candidates = [path.resolve(process.cwd(), ".env.local"), path.resolve(process.cwd(), ".env")]
+    .concat(dirs.flatMap((d) => [path.join(d, ".env.local"), path.join(d, ".env")]));
+  for (const file of candidates) {
+    try {
+      const text = fs.readFileSync(file, "utf8");
+      for (const [key, value] of Object.entries(parseEnvText(text))) {
+        if (process.env[key] === undefined) process.env[key] = value;
+      }
+    } catch { /* optional file */ }
+  }
+}
+loadEnvFiles();
+
+const STATUS_KEY = "pi-sub";
+const MESSAGE_TYPE = "pi-sub-status";
+/** /context panel message type — rendered inline in the transcript (OMP-style). */
+const MESSAGE_TYPE_CONTEXT = "pi-sub-context";
+const USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
+export const REFRESH_INTERVAL_MS = 60_000;
+const REFRESH_TTL_MS = 30_000;
+export const REFRESH_DEBOUNCE_MS = 2_000;
+const CODEX_PROVIDER = "openai-codex";
+const OPC_PROVIDER = "opencode-go";
+const OPC_USAGE_URL = "https://opencode.ai/zen/go/v1/usage";
+const ZAI_PROVIDER = "zai";
+const ZAI_USAGE_URL = "https://api.z.ai/api/monitor/usage/quota/limit";
+const ZAI_CODING_CN_PROVIDER = "zai-coding-cn";
+const ZAI_CODING_CN_USAGE_URL = "https://open.bigmodel.cn/api/monitor/usage/quota/limit";
+// GLM via the Anthropic-compatible endpoint (pi-model-tools `zai-anthropic`
+// provider). Same api.z.ai host and quota monitor as the `zai` provider.
+// ponytail: usage URL is fixed to api.z.ai — if ZAI_ANTHROPIC_BASE_URL is
+// overridden to BigModel/zcode-plan, quota still reads from api.z.ai (correct
+// for the z.ai coding-plan key; BigModel-plan keys should use zai-coding-cn).
+const ZAI_ANTHROPIC_PROVIDER = "zai-anthropic";
+const ZAI_ANTHROPIC_USAGE_URL = ZAI_USAGE_URL;
+const ROUTER_PROVIDER = "router";
+const LEGACY_9ROUTER_PROVIDER = "9router";
+// pi-router (formerly pi-9router): URL lives in settings.json `router.baseUrl`
+// (env override ROUTER_BASE_URL), key in auth.json `router` credential.
+const ROUTER_SETTINGS_PATH = path.join(os.homedir(), ".pi", "agent", "settings.json");
+const COMMAND_CODE_PROVIDER = "commandcode";
+const COMMAND_CODE_USAGE_URL = "https://api.commandcode.ai/alpha/billing/credits";
+
+type ModelLike = { provider?: string; id?: string } | undefined;
+
+type UsageApiWindow = {
+  used_percent?: number;
+  reset_at?: number;
+};
+
+type UsageApiSnapshot = {
+  primary?: UsageApiWindow;
+  secondary?: UsageApiWindow;
+  plan_type?: string;
+};
+
+type OpcUsageWindowApi = {
+  status?: string;
+  percent?: number;
+  resetsAt?: string;
+};
+
+type OpcUsageApiResponse = {
+  usage?: {
+    rolling?: OpcUsageWindowApi;
+    weekly?: OpcUsageWindowApi;
+    monthly?: OpcUsageWindowApi;
+  };
+};
+
+type PiAuthEntry = {
+  type?: string;
+  access?: string;
+  refresh?: string;
+  expires?: number;
+  accountId?: string;
+  key?: string;
+  email?: string;
+  label?: string;
+  name?: string;
+  env?: Record<string, string>;
+};
+
+interface UsageWindow {
+  percent?: number;
+  remaining?: number;
+  remainingLabel?: string;
+  resetLabel?: string;
+}
+
+interface SubscriptionAccountSnapshot {
+  id?: string;
+  isActive?: boolean;
+  accountLabel?: string;
+  plan?: string;
+  fiveHour?: UsageWindow;
+  weekly?: UsageWindow;
+  monthly?: UsageWindow; // OpenCode Go 30d window
+  // Command Code-only: monthly credit balance (not a rolling window).
+  monthlyCredits?: number;
+  // Balance currency — only "CNY" is special-cased (¥); undefined = USD ($).
+  creditsCurrency?: string;
+  // Z.ai-only extras surfaced in the /sub detail view.
+  mcpMonthly?: UsageWindow; // from TIME_LIMIT already present in the quota response
+  usageBreakdown?: string; // per-model / per-tool summary line(s)
+  lastActivity?: string;
+}
+
+interface SubscriptionUsageSnapshot {
+  providerDisplayName: string;
+  accounts: SubscriptionAccountSnapshot[];
+  activeAccount?: SubscriptionAccountSnapshot;
+  fetchedAt: number;
+  error?: string;
+}
+
+type SubscriptionProviderAdapter = {
+  id: string;
+  displayName: string;
+  fetchUsage(signal?: AbortSignal): Promise<SubscriptionUsageSnapshot>;
+};
+
+export interface State {
+  model?: ModelLike;
+  adapter?: SubscriptionProviderAdapter;
+  adapterId?: string;
+  ctx?: ExtensionContext;
+  snapshot?: SubscriptionUsageSnapshot;
+  lastRefreshAt: number;
+  refreshGeneration: number;
+  inFlight?: Promise<SubscriptionUsageSnapshot>;
+  refreshTimer?: NodeJS.Timeout;
+  debounceTimer?: NodeJS.Timeout;
+  responseStartTime?: number;
+  lastTokPerSec?: number;
+  lastTokPerSecLabel?: string;
+  cumulativeOutput: number;
+  cumulativeDurationMs: number;
+  cumulativeCost: number;
+}
+
+function isCodexModel(model: ModelLike): boolean {
+  const provider = model?.provider?.toLowerCase() ?? "";
+  return provider === CODEX_PROVIDER || provider.includes(CODEX_PROVIDER);
+}
+
+function isOpenCodeGoModel(model: ModelLike): boolean {
+  return (model?.provider?.toLowerCase() ?? "") === OPC_PROVIDER;
+}
+
+function isZaiModel(model: ModelLike): boolean {
+  return (model?.provider?.toLowerCase() ?? "") === ZAI_PROVIDER;
+}
+
+function isZaiCodingCnModel(model: ModelLike): boolean {
+  return (model?.provider?.toLowerCase() ?? "") === ZAI_CODING_CN_PROVIDER;
+}
+
+function isZaiAnthropicModel(model: ModelLike): boolean {
+  return (model?.provider?.toLowerCase() ?? "") === ZAI_ANTHROPIC_PROVIDER;
+}
+
+function isRouterModel(model: ModelLike, provider: string = ROUTER_PROVIDER): boolean {
+  return (model?.provider?.toLowerCase() ?? "") === provider;
+}
+
+function isCommandCodeModel(model: ModelLike): boolean {
+  return (model?.provider?.toLowerCase() ?? "") === COMMAND_CODE_PROVIDER;
+}
+
+function piAuthPath(): string {
+  const configDir = process.env.PI_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), ".pi", "agent");
+  return path.join(configDir, "auth.json");
+}
+
+function decodeJwtPayload(token: string | undefined): Record<string, any> | undefined {
+  if (!token) return undefined;
+  const parts = token.split(".");
+  if (parts.length < 2) return undefined;
+  try {
+    return JSON.parse(Buffer.from(parts[1], "base64url").toString("utf8")) as Record<string, any>;
+  } catch {
+    return undefined;
+  }
+}
+
+function accountFromPiAuth(entry: PiAuthEntry): SubscriptionAccountSnapshot {
+  const claims = decodeJwtPayload(entry.access);
+  const profile = claims?.["https://api.openai.com/profile"];
+  const auth = claims?.["https://api.openai.com/auth"];
+  const email = typeof profile?.email === "string" ? profile.email : undefined;
+  const plan = typeof auth?.chatgpt_plan_type === "string" ? planLabel(auth.chatgpt_plan_type) : undefined;
+  const accountId = typeof entry.accountId === "string" ? entry.accountId : typeof auth?.chatgpt_account_id === "string" ? auth.chatgpt_account_id : undefined;
+  return {
+    id: accountId,
+    isActive: true,
+    accountLabel: email ?? accountId ?? "openai-codex account",
+    plan,
+    lastActivity: "Now",
+  };
+}
+
+function firstString(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed.length > 0) return trimmed;
+  }
+  return undefined;
+}
+
+function authEntryLabel(entry: PiAuthEntry | undefined): string | undefined {
+  return firstString(entry?.email, entry?.label, entry?.name, entry?.accountId);
+}
+
+function keyFingerprint(key: string | undefined): string | undefined {
+  if (!key) return undefined;
+  return createHash("sha256").update(key).digest("hex").slice(0, 8);
+}
+
+function authAccountLabel(providerLabel: string, entry: PiAuthEntry | undefined): string {
+  const label = authEntryLabel(entry);
+  if (label) return label;
+  const fingerprint = keyFingerprint(entry?.key);
+  return fingerprint ? `${providerLabel} key#${fingerprint}` : `${providerLabel} account`;
+}
+
+function authAccountSnapshot(providerLabel: string, entry: PiAuthEntry | undefined, defaults: Partial<SubscriptionAccountSnapshot> = {}): SubscriptionAccountSnapshot {
+  return {
+    id: firstString(entry?.accountId),
+    isActive: true,
+    accountLabel: authAccountLabel(providerLabel, entry),
+    lastActivity: "Now",
+    ...defaults,
+  };
+}
+
+function formatFooterAccount(account: SubscriptionAccountSnapshot | undefined): string | undefined {
+  const label = firstString(account?.accountLabel);
+  return label ? `(${label})` : undefined;
+}
+
+function getCodexAccountId(entry: PiAuthEntry | undefined): string | undefined {
+  if (!entry) return undefined;
+  if (typeof entry.accountId === "string" && entry.accountId.length > 0) return entry.accountId;
+  const claims = decodeJwtPayload(entry.access);
+  const auth = claims?.["https://api.openai.com/auth"];
+  return typeof auth?.chatgpt_account_id === "string" ? auth.chatgpt_account_id : undefined;
+}
+
+function planLabel(plan: string | undefined): string | undefined {
+  if (!plan) return undefined;
+  const normalized = plan.toLowerCase().replace(/[_-]+/g, " ");
+  const labels: Record<string, string> = {
+    free: "Free",
+    plus: "Plus",
+    prolite: "Pro Lite",
+    "pro lite": "Pro Lite",
+    pro: "Pro",
+    team: "Business",
+    business: "Business",
+    enterprise: "Enterprise",
+    edu: "Edu",
+    unknown: "Unknown",
+  };
+  return labels[normalized] ?? plan;
+}
+
+function formatRemainingTime(resetAtSec: number | undefined): string | undefined {
+  if (!resetAtSec) return undefined;
+  const nowSec = Date.now() / 1000;
+  const remainingSec = resetAtSec - nowSec;
+  if (remainingSec <= 0) return "0M";
+  const remainingMin = Math.ceil(remainingSec / 60);
+  if (remainingMin < 60) return `${remainingMin}M`;
+  const remainingH = Math.ceil(remainingSec / 3600);
+  if (remainingH < 24) return `${remainingH}H`;
+  const remainingD = Math.ceil(remainingSec / 86400);
+  return `${remainingD}D`;
+}
+
+function formatReset(timestampSeconds: number | undefined): string | undefined {
+  if (!timestampSeconds) return undefined;
+  const date = new Date(timestampSeconds * 1000);
+  const now = new Date();
+  const time = date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", hour12: false });
+  if (date.toDateString() === now.toDateString()) return time;
+  const day = date.toLocaleDateString(undefined, { day: "numeric" });
+  const month = date.toLocaleDateString(undefined, { month: "short" });
+  return `${time} on ${day} ${month}`;
+}
+
+function usageWindowFromApi(window: UsageApiWindow | undefined): UsageWindow | undefined {
+  if (!window || typeof window.used_percent !== "number") return undefined;
+  const percent = Math.round(window.used_percent);
+  const remaining = Math.max(0, 100 - percent);
+  const resetLabel = formatReset(window.reset_at);
+  const remainingLabel = formatRemainingTime(window.reset_at);
+  return {
+    percent,
+    remaining,
+    remainingLabel,
+    resetLabel,
+  };
+}
+
+function mergeUsageIntoAccount(account: SubscriptionAccountSnapshot, usage: UsageApiSnapshot | undefined): SubscriptionAccountSnapshot {
+  if (!usage) return account;
+  return {
+    ...account,
+    plan: planLabel(usage.plan_type) ?? account.plan,
+    fiveHour: usageWindowFromApi(usage.primary) ?? account.fiveHour,
+    weekly: usageWindowFromApi(usage.secondary) ?? account.weekly,
+  };
+}
+
+function parseUsageResponse(body: unknown): UsageApiSnapshot | undefined {
+  if (!body || typeof body !== "object") return undefined;
+  const root = body as any;
+  const rateLimit = root.rate_limit;
+  if (!rateLimit || typeof rateLimit !== "object") return undefined;
+  const parseWindow = (window: any): UsageApiWindow | undefined => {
+    if (!window || typeof window !== "object" || typeof window.used_percent !== "number") return undefined;
+    return {
+      used_percent: window.used_percent,
+      reset_at: typeof window.reset_at === "number" ? window.reset_at : undefined,
+    };
+  };
+  return {
+    primary: parseWindow(rateLimit.primary_window),
+    secondary: parseWindow(rateLimit.secondary_window),
+    plan_type: typeof root.plan_type === "string" ? root.plan_type : undefined,
+  };
+}
+
+async function readPiCodexAuth(): Promise<PiAuthEntry & { accountId: string }> {
+  const entry = readStoredCredential(CODEX_PROVIDER, piAuthPath()) as PiAuthEntry | undefined;
+  const accountId = getCodexAccountId(entry);
+  if (!entry?.access || !accountId) throw new Error("Missing openai-codex OAuth entry in Pi auth");
+  return { ...entry, accountId };
+}
+
+async function readOpenCodeGoAuth(): Promise<{ key?: string; account: SubscriptionAccountSnapshot }> {
+  const entry = readStoredCredential(OPC_PROVIDER, piAuthPath()) as PiAuthEntry | undefined;
+  if (!entry?.key && !entry?.accountId) throw new Error("Missing opencode-go API key or accountId in Pi auth");
+  return { key: entry.key, account: authAccountSnapshot("OpenCode Go", entry, { plan: "Go" }) };
+}
+
+// Zen Go returns percent (0-100, used) per window; resetsAt is ISO 8601
+// (fractional seconds fine for Date.parse). Helpers expect epoch seconds.
+// Undocumented API: percent is clamped to 0-100 both raw and post-derivation.
+export function opcWindowToUsageWindow(w: OpcUsageWindowApi | undefined): UsageWindow | undefined {
+  if (!w || typeof w.percent !== "number") return undefined;
+  const percent = Math.min(100, Math.max(0, Math.round(w.percent)));
+  const resetAtSec = w.resetsAt ? Date.parse(w.resetsAt) / 1000 : undefined;
+  return {
+    percent,
+    remaining: 100 - percent,
+    remainingLabel: formatRemainingTime(resetAtSec),
+    resetLabel: formatReset(resetAtSec),
+  };
+}
+
+async function readZaiAuth(providerId: string, label: string): Promise<{ key: string; account: SubscriptionAccountSnapshot }> {
+  const entry = readStoredCredential(providerId, piAuthPath()) as PiAuthEntry | undefined;
+  if (!entry?.key) throw new Error(`Missing ${providerId} API key in Pi auth`);
+  return { key: entry.key, account: authAccountSnapshot(label, entry) };
+}
+
+// ponytail: duplicated from pi-router — no shared config lib, ~12 lines, acceptable
+function readRouterConfig(): { baseUrl: string } | null {
+  try {
+    let baseUrl = process.env.ROUTER_BASE_URL || process.env.NINE_ROUTER_BASE_URL;
+    if (!baseUrl && fs.statSync(ROUTER_SETTINGS_PATH).isFile()) {
+      const settings = JSON.parse(fs.readFileSync(ROUTER_SETTINGS_PATH, "utf8")) as Record<string, unknown>;
+      const router = settings.router as { baseUrl?: unknown } | undefined;
+      if (typeof router?.baseUrl === "string" && router.baseUrl) baseUrl = router.baseUrl;
+    }
+    return baseUrl ? { baseUrl } : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Router API key: auth.json `router` credential (via /login), then env. */
+function readRouterApiKey(): string | undefined {
+  const stored = readStoredCredential(ROUTER_PROVIDER, piAuthPath()) as PiAuthEntry | undefined;
+  if (stored?.key) return stored.key;
+  return process.env.ROUTER_API_KEY || process.env.NINE_ROUTER_API_KEY || undefined;
+}
+
+/** Strip a `/v1` suffix so management routes (under the origin) can be
+ *  derived from the OpenAI-compatible baseUrl. */
+function routerOrigin(baseUrl: string): string {
+  return baseUrl.replace(/\/v1\/?$/, "");
+}
+
+/** OmniRoute management credential (manage-scope key or oma_ CLI token) from
+ *  env — optional override. The router key itself works when it holds the
+ *  `manage` scope (API Keys dashboard), which unlocks
+ *  /api/usage/<connectionId> carrying the raw USD balance for credit-based
+ *  upstreams (deepseek) that the key-authable endpoints normalize away. */
+function readRouterMgmtToken(apiKey: string | undefined): string | undefined {
+  return process.env.ROUTER_MGMT_TOKEN || process.env.OMNIROUTE_MGMT_TOKEN || apiKey;
+}
+
+/** Parse OmniRoute's `/api/usage/om-usage` plain-text report into windows.
+ *  Sections: "Personal quota" (per-key USD budgets: Daily/Weekly) and
+ *  "Provider quota" (connection session/weekly). Lines: `<Label>`,
+ *  `NN% left`, `⏱ reset in <countdown>`. Robust to missing/unknown blocks. */
+/** Convert OmniRoute's "reset in 2h 55m" countdown into the compact footer
+ *  label (e.g. 3H), matching the direct Z.ai display (R:99%/4H). */
+function countdownToLabel(text: string): string | undefined {
+  const m = text.match(/(?:(\d+)\s*d)?\s*(?:(\d+)\s*h)?\s*(?:(\d+)\s*m)?/);
+  if (!m || (!m[1] && !m[2] && !m[3])) return undefined;
+  const secs = Number(m[1] || 0) * 86400 + Number(m[2] || 0) * 3600 + Number(m[3] || 0) * 60;
+  return secs ? formatRemainingTime(Date.now() / 1000 + secs) : undefined;
+}
+
+/** Human countdown from an epoch-ms reset timestamp: "2h 55m" / "1d 4h". */
+export function msCountdown(resetAtMs: number | undefined): string | undefined {
+  if (!resetAtMs) return undefined;
+  const s = Math.round((resetAtMs - Date.now()) / 1000);
+  if (s <= 0) return undefined;
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const parts = [d ? `${d}d` : "", h ? `${h}h` : "", m ? `${m}m` : ""].filter(Boolean);
+  return parts.length ? parts.join(" ") : "0m";
+}
+
+interface GenericUsage {
+  fiveHour?: UsageWindow;
+  weekly?: UsageWindow;
+  monthly?: UsageWindow; // OpenCode Go 30d pct window (router /v1/usage windows.monthly)
+  monthlyCredits?: number;
+  creditsCurrency?: string;
+  breakdown?: string;
+}
+
+/** Parse the general router usage API (GET <baseUrl>/usage, JSON —
+ *  yardmaster) into windows + credits: `{windows: {session, weekly, monthly}:
+ *  {remaining_pct, reset_at}, credits: {currency, balance}, providers: []}`.
+ *  Robust to missing sections; `{}` when nothing usable is present. */
+export function parseGenericUsage(data: unknown): GenericUsage {
+  const body = data as {
+    windows?: Record<string, { remaining_pct?: number; reset_at?: number }>;
+    credits?: { currency?: string; balance?: number };
+  } | null;
+  if (!body || typeof body !== "object") return {};
+  const toWindow = (w: { remaining_pct?: number; reset_at?: number } | undefined): UsageWindow | undefined => {
+    if (!w || typeof w.remaining_pct !== "number" || !Number.isFinite(w.remaining_pct)) return undefined;
+    const out: UsageWindow = { remaining: Math.max(0, Math.min(100, Math.round(w.remaining_pct))) };
+    if (w.reset_at) {
+      out.remainingLabel = formatRemainingTime(w.reset_at / 1000);
+      out.resetLabel = `⏱ reset in ${msCountdown(w.reset_at) ?? "unknown"}`;
+    }
+    return out;
+  };
+  const fiveHour = toWindow(body.windows?.session);
+  const weekly = toWindow(body.windows?.weekly);
+  const monthly = toWindow(body.windows?.monthly);
+  const monthlyCredits = typeof body.credits?.balance === "number" && Number.isFinite(body.credits.balance)
+    ? body.credits.balance : undefined;
+  const creditsCurrency = body.credits?.currency ?? "USD";
+  const lines: string[] = [];
+  if (fiveHour) lines.push(`Session ${fiveHour.remaining}% left${fiveHour.resetLabel ? ` ${fiveHour.resetLabel}` : ""}`);
+  if (weekly) lines.push(`Weekly ${weekly.remaining}% left${weekly.resetLabel ? ` ${weekly.resetLabel}` : ""}`);
+  if (monthly) lines.push(`Monthly ${monthly.remaining}% left${monthly.resetLabel ? ` ${monthly.resetLabel}` : ""}`);
+  if (monthlyCredits !== undefined) {
+    const amt = creditsCurrency === "CNY" ? `¥${monthlyCredits.toFixed(2)} CNY` : `$${monthlyCredits.toFixed(2)}`;
+    lines.push(`🪙 Balance (${creditsCurrency}) ${amt}`);
+  }
+  const out: GenericUsage = {};
+  if (fiveHour) out.fiveHour = fiveHour;
+  if (weekly) out.weekly = weekly;
+  if (monthly) out.monthly = monthly;
+  if (monthlyCredits !== undefined) {
+    out.monthlyCredits = monthlyCredits;
+    out.creditsCurrency = creditsCurrency;
+  }
+  if (lines.length) out.breakdown = lines.join("\n");
+  return out;
+}
+
+export function parseOmniUsageText(text: string): {
+  personalDaily?: UsageWindow;
+  personalWeekly?: UsageWindow;
+  session?: UsageWindow;
+  providerWeekly?: UsageWindow;
+} {
+  const out: {
+    personalDaily?: UsageWindow;
+    personalWeekly?: UsageWindow;
+    session?: UsageWindow;
+    providerWeekly?: UsageWindow;
+  } = {};
+  const lines = text.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  let inPersonal = false;
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+    if (line.toLowerCase() === "personal quota") { inPersonal = true; continue; }
+    if (line.toLowerCase() === "provider quota") { inPersonal = false; continue; }
+    const usedMatch = line.match(/^(\d+)%\s*left$/);
+    if (!usedMatch) continue;
+    const label = (lines[i - 1] ?? "").toLowerCase();
+    const resetMatch = lines[i + 1]?.match(/reset in (.+)$/);
+    const remaining = Number(usedMatch[1]);
+    if (remaining < 0 || remaining > 100) continue;
+    const window: UsageWindow = { remaining };
+      if (resetMatch) {
+        window.resetLabel = `⏱ ${resetMatch[1].trim()}`;
+        window.remainingLabel = countdownToLabel(resetMatch[1]);
+      }
+    if (inPersonal) {
+      if (label.includes("daily")) out.personalDaily = window;
+      else if (label.includes("weekly")) out.personalWeekly = window;
+    } else {
+      if (label.includes("session")) out.session = window;
+      else if (label.includes("weekly")) out.providerWeekly = window;
+    }
+  }
+  return out;
+}
+
+// ponytail: parser assertions live in extensions/test/parsers.test.ts
+
+async function fetchUsageFromPiAuth(entry: PiAuthEntry, signal?: AbortSignal): Promise<UsageApiSnapshot | undefined> {
+  const accountId = getCodexAccountId(entry) ?? entry.accountId;
+  if (!accountId) throw new Error("Missing openai-codex OAuth entry in Pi auth");
+  const timeoutSignal = AbortSignal.timeout(7_000);
+  const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+  const response = await fetch(USAGE_ENDPOINT, {
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${entry.access}`,
+      "ChatGPT-Account-Id": accountId,
+      "User-Agent": `pi-sub/${PI_SUB_VERSION}`,
+    },
+    signal: combinedSignal,
+  });
+  if (!response.ok) throw new Error(`usage request failed with HTTP ${response.status}`);
+  return parseUsageResponse(await response.json());
+}
+
+// ponytail: shared redaction — show provider + failure class, never leak keys.
+// Structured API errors carry the server's own message (e.g. Z.ai's
+// "Internal service error" outage); auth-looking messages were already
+// redacted above, so surface the rest verbatim for diagnosability.
+export function redactedError(error: unknown, provider = "Codex"): string {
+  const message = error instanceof Error ? error.message : String(error || "Unknown error");
+  if (/ENOENT|no such file/i.test(message)) return "Pi auth not found";
+  if (/missing openai-codex/i.test(message)) return "openai-codex auth not found";
+  if (/missing opencode-go/i.test(message)) return "opencode-go auth not found";
+  if (/missing zai/i.test(message)) return "zai auth not found";
+  if (/missing commandcode/i.test(message)) return "commandcode auth not found";
+  if (/timed out|timeout|aborted/i.test(message)) return `${provider} usage refresh timed out`;
+  if (/401|403|auth|token|unauthorized|forbidden/i.test(message)) return `${provider} auth unavailable`;
+  const apiMatch = / API error: (.+)$/.exec(message);
+  if (!apiMatch) return `${provider} usage unavailable`;
+  // Trust boundary: the msg is remote-controlled — scrub credential-shaped
+  // material and cap length before it reaches the status bar.
+  const scrubbed = apiMatch[1]
+    .replace(/sk-[A-Za-z0-9_-]+|Bearer\s+\S+|eyJ[A-Za-z0-9._-]+/g, "[REDACTED]")
+    .slice(0, 120);
+  return scrubbed ? `${provider} API error: ${scrubbed}` : `${provider} usage unavailable`;
+}
+
+async function fetchCodexUsage(signal?: AbortSignal): Promise<SubscriptionUsageSnapshot> {
+  try {
+    const entry = await readPiCodexAuth();
+    let activeAccount = accountFromPiAuth(entry);
+    const usage = await fetchUsageFromPiAuth(entry, signal);
+    activeAccount = mergeUsageIntoAccount(activeAccount, usage);
+    return {
+      providerDisplayName: "Codex",
+      accounts: [activeAccount],
+      activeAccount,
+      fetchedAt: Date.now(),
+    };
+  } catch (error) {
+    return {
+      providerDisplayName: "Codex",
+      accounts: [],
+      fetchedAt: Date.now(),
+      error: redactedError(error),
+    };
+  }
+}
+
+export async function fetchOpenCodeGoUsage(signal?: AbortSignal): Promise<SubscriptionUsageSnapshot> {
+  try {
+    const { key, account } = await readOpenCodeGoAuth();
+    let windows: Pick<SubscriptionAccountSnapshot, "fiveHour" | "weekly" | "monthly"> = {};
+    if (key) {
+      let shapeError: Error | undefined;
+      try {
+        const timeoutSignal = AbortSignal.timeout(7_000);
+        const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+        const response = await fetch(OPC_USAGE_URL, {
+          headers: {
+            Accept: "application/json",
+            Authorization: `Bearer ${key}`,
+            "User-Agent": `pi-sub/${PI_SUB_VERSION}`,
+          },
+          signal: combinedSignal,
+        });
+        if (!response.ok) throw new Error(`usage request failed with HTTP ${response.status}`);
+        const body = (await response.json()) as OpcUsageApiResponse;
+        const fiveHour = opcWindowToUsageWindow(body.usage?.rolling);
+        const weekly = opcWindowToUsageWindow(body.usage?.weekly);
+        const monthly = opcWindowToUsageWindow(body.usage?.monthly);
+        if (!fiveHour && !weekly && !monthly) {
+          // HTTP 200 but nothing parsed: structural (shape drift), not
+          // transient — surface it so the parser gets fixed.
+          shapeError = new Error("No usage windows in OpenCode Go response");
+        } else {
+          windows = { fiveHour, weekly, monthly };
+        }
+      } catch {
+        // ponytail: transport/API failures (offline, timeout, HTTP error) are
+        // transient — never degrade to the empty-error footer, the label,
+        // session cost, and tok/s would vanish (0.1.46 regression). Keep the
+        // 0.1.44 always-renders behavior and just skip the windows.
+      }
+      if (shapeError) throw shapeError;
+    }
+    // ponytail: keyless (accountId-only) setups keep the auth-only snapshot —
+    // session cost still renders, no usage API to call.
+    return {
+      providerDisplayName: "OpenCode Go",
+      accounts: [{ ...account, ...windows }],
+      activeAccount: { ...account, ...windows },
+      fetchedAt: Date.now(),
+    };
+  } catch (error) {
+    return {
+      providerDisplayName: "OpenCode Go",
+      accounts: [],
+      fetchedAt: Date.now(),
+      error: redactedError(error, "OpenCode Go"),
+    };
+  }
+}
+
+async function fetchRouterUsage(signal?: AbortSignal, provider?: string): Promise<SubscriptionUsageSnapshot> {
+  const cfg = readRouterConfig();
+  const now = Date.now();
+  if (!cfg) {
+    return {
+      providerDisplayName: "Router",
+      accounts: [],
+      fetchedAt: now,
+      error: "router not configured — set router.baseUrl in ~/.pi/agent/settings.json",
+    };
+  }
+  const apiKey = readRouterApiKey();
+  const baseAccount: SubscriptionAccountSnapshot = {
+    id: cfg.baseUrl,
+    isActive: true,
+    accountLabel: cfg.baseUrl.replace(/^https?:\/\//, ""),
+    lastActivity: "Now",
+  };
+
+  // General usage API (yardmaster): GET <baseUrl>/usage?provider=<prefix> —
+  // JSON with windows (session/weekly remaining_pct + reset_at) and credits.
+  // baseUrl already ends in /v1 so no origin derivation is needed. Unknown
+  // provider slugs 404 → retry the aggregate (no query). Routers without this
+  // endpoint (OmniRoute) 404/return HTML → fall through to the om-usage text
+  // flow below. A 200 JSON without windows/credits also falls through.
+  if (apiKey) {
+    try {
+      const timeoutSignal = AbortSignal.timeout(7_000);
+      const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      const usageUrl = (q: string) => `${cfg.baseUrl.replace(/\/$/, "")}/usage${q}`;
+      let response = await fetch(usageUrl(provider ? `?provider=${encodeURIComponent(provider)}` : ""), {
+        headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
+        signal: combined,
+      });
+      if (response.status === 404 && provider) {
+        response = await fetch(usageUrl(""), {
+          headers: { Accept: "application/json", Authorization: `Bearer ${apiKey}` },
+          signal: combined,
+        });
+      }
+      const ct = response.headers.get("content-type") ?? "";
+      if (response.ok && ct.includes("application/json")) {
+        const g = parseGenericUsage(await response.json());
+        if (g.fiveHour || g.weekly || g.monthly || g.monthlyCredits !== undefined) {
+          const account: SubscriptionAccountSnapshot = {
+            ...baseAccount,
+            plan: provider ? `Router · ${provider}` : "Router usage",
+            fiveHour: g.fiveHour,
+            weekly: g.weekly,
+            monthly: g.monthly,
+            monthlyCredits: g.monthlyCredits,
+            creditsCurrency: g.creditsCurrency,
+            usageBreakdown: g.breakdown,
+          };
+          return {
+            providerDisplayName: "Router",
+            accounts: [account],
+            activeAccount: account,
+            fetchedAt: Date.now(),
+          };
+        }
+      }
+    } catch { /* no general usage endpoint / transient — fall through */ }
+  }
+
+  // OmniRoute exposes per-key usage at GET <origin>/api/usage/om-usage
+  // (Bearer = the router API key). `?provider=` selects that upstream's quota
+  // (e.g. command-code/deepseek/deepseek-v4-flash → provider=command-code);
+  // without it the report shows the best/all snapshot. Plain text: Personal
+  // quota (Daily/Weekly USD budgets) + Provider quota (Session/Weekly).
+  // Non-OmniRoute routers 404 here — fall back to endpoint-only display.
+  if (apiKey) {
+    try {
+      const timeoutSignal = AbortSignal.timeout(7_000);
+      const combined = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+      const url = `${routerOrigin(cfg.baseUrl)}/api/usage/om-usage` +
+        (provider ? `?provider=${encodeURIComponent(provider)}` : "");
+      const response = await fetch(url, {
+        headers: { Accept: "text/plain", Authorization: `Bearer ${apiKey}` },
+        signal: combined,
+      });
+      if (response.ok) {
+        let text = await response.text();
+        if (text && !text.includes("disabled")) {
+          let w = parseOmniUsageText(text);
+          // "No cached usage data" = unknown/wrong slug — retry without
+          // ?provider= for the best/all snapshot. "Unavailable" windows mean a
+          // known credit-based upstream (deepseek) — keep them empty so the
+          // USD-balance path below takes over instead of showing the aggregate.
+          if (provider && !w.session && !w.providerWeekly && text.includes("No cached usage data")) {
+            const plain = await fetch(url.replace(/\?provider=.*$/, ""), {
+              headers: { Accept: "text/plain", Authorization: `Bearer ${apiKey}` },
+              signal: combined,
+            });
+            if (plain.ok) {
+              const plainText = await plain.text();
+              if (plainText && !plainText.includes("disabled")) {
+                w = parseOmniUsageText(plainText);
+                text = plainText;
+              }
+            }
+          }
+          // Credit-based upstreams (deepseek): the usage text prints "Unavailable"
+          // windows — pull the real USD balance from the management API instead.
+          const credits = await fetchRouterCredits(provider, w);
+          if (credits) {
+            const account: SubscriptionAccountSnapshot = {
+              ...baseAccount,
+              plan: `Router · ${provider}`,
+              monthlyCredits: credits.balanceUsd,
+              usageBreakdown: credits.breakdown,
+            };
+            return {
+              providerDisplayName: "Router",
+              accounts: [account],
+              activeAccount: account,
+              fetchedAt: Date.now(),
+            };
+          }
+          // personalDaily = per-key budget (nearest reset → R slot),
+          // provider weekly/session = upstream quota (W slot). Fall back sensibly.
+          const account: SubscriptionAccountSnapshot = {
+            ...baseAccount,
+            plan: provider ? `Router · ${provider}` : "Router usage",
+            fiveHour: w.personalDaily ?? w.session,
+            weekly: w.providerWeekly ?? w.personalWeekly,
+            // breakdown keeps only the provider-quota section — the raw text can
+            // include personal USD budget lines (privacy) and is noisy.
+            usageBreakdown: providerQuotaSection(text),
+          };
+          return {
+            providerDisplayName: "Router",
+            accounts: [account],
+            activeAccount: account,
+            fetchedAt: Date.now(),
+          };
+        }
+        // Usage command exists but is disabled for this key — keep the footer
+        // clean (endpoint display) and surface the hint in /sub detail only.
+        const hintAccount: SubscriptionAccountSnapshot = {
+          ...baseAccount,
+          usageBreakdown: `OmniRoute usage command is disabled for this router key — ` +
+            `enable it in the dashboard (API Keys → the key ending ${apiKey?.slice(-4)} → usage command).`,
+        };
+        return {
+          providerDisplayName: "Router",
+          accounts: [hintAccount],
+          activeAccount: hintAccount,
+          fetchedAt: Date.now(),
+        };
+      }
+    } catch { /* non-OmniRoute or transient — fall through to endpoint display */ }
+  }
+
+  return {
+    providerDisplayName: "Router",
+    accounts: [baseAccount],
+    activeAccount: baseAccount,
+    fetchedAt: now,
+  };
+}
+
+interface RouterCredits {
+  balanceUsd: number;
+  breakdown: string;
+}
+
+/** Fetch the raw USD balance for credit-based upstreams (deepseek: `credits_usd`)
+ *  via OmniRoute's management usage API. Only called when the key-authable
+ *  om-usage text reports no usable windows — that surface normalizes credits
+ *  to meaningless percentages. Needs the router key to hold the `manage`
+ *  scope (or ROUTER_MGMT_TOKEN as override). Connection discovery comes from
+ *  /api/v1/me/status (key-authable); the balance from /api/usage/<id>. */
+async function fetchRouterCredits(provider: string | undefined, w: ReturnType<typeof parseOmniUsageText>): Promise<RouterCredits | undefined> {
+  if (!provider || w.session || w.providerWeekly) return undefined;
+  const cfg = readRouterConfig();
+  const apiKey = readRouterApiKey();
+  const mgmtToken = readRouterMgmtToken(apiKey);
+  if (!cfg || !apiKey || !mgmtToken) return undefined;
+  const origin = routerOrigin(cfg.baseUrl);
+  try {
+    const combined = AbortSignal.timeout(7_000);
+    // 1. Connection id for this upstream via the key-authable status endpoint.
+    const statusRes = await fetch(`${origin}/api/v1/me/status`, {
+      headers: { Authorization: `Bearer ${apiKey}` },
+      signal: combined,
+    });
+    if (!statusRes.ok) return undefined;
+    const status = (await statusRes.json()) as { accountQuotas?: Array<{ provider?: string; connectionId?: string }> };
+    const connectionId = status.accountQuotas?.find((q) => q.provider === provider)?.connectionId;
+    if (!connectionId) return undefined;
+    // 2. Raw usage (management token) — quotas.credits_usd.remaining is the USD balance.
+    const usageRes = await fetch(`${origin}/api/usage/${connectionId}`, {
+      headers: { Authorization: `Bearer ${mgmtToken}` },
+      signal: combined,
+    });
+    if (!usageRes.ok) return undefined;
+    const usage = (await usageRes.json()) as { quotas?: Record<string, { remaining?: number }> };
+    const credits = usage.quotas?.credits_usd ?? usage.quotas?.credits;
+    const remaining = credits?.remaining;
+    if (typeof remaining !== "number" || !Number.isFinite(remaining)) return undefined;
+    const cny = usage.quotas?.credits_cny?.remaining;
+    return {
+      balanceUsd: remaining,
+      breakdown: `🪙 Balance (USD) $${remaining.toFixed(2)}` +
+        (typeof cny === "number" ? ` · ¥${cny.toFixed(2)} CNY` : ""),
+    };
+  } catch {
+    return undefined; // no mgmt token / upstream down — fall back to endpoint display
+  }
+}
+
+// Command Code's /alpha/billing/credits endpoint (auth: same Provider API key
+// as /provider/v1 models) returns live 5-hour and weekly rolling windows plus
+// the monthly credit balance — the same data as the cmd /usage CLI.
+async function fetchCommandCodeUsage(signal?: AbortSignal): Promise<SubscriptionUsageSnapshot> {
+  try {
+    const { key: apiKey, account: authAccount } = await readZaiAuth(COMMAND_CODE_PROVIDER, "Command Code");
+    const timeoutSignal = AbortSignal.timeout(7_000);
+    const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
+    const headers = {
+      Accept: "application/json",
+      Authorization: `Bearer ${apiKey}`,
+      "User-Agent": `pi-sub/${PI_SUB_VERSION}`,
+    };
+    const response = await fetch(COMMAND_CODE_USAGE_URL, { headers, signal: combinedSignal });
+    if (!response.ok) {
+      throw new Error(`Command Code usage request failed with HTTP ${response.status}`);
+    }
+    const body = (await response.json()) as CommandCodeCreditsApiResponse;
+
+    const credits = body.credits;
+    const windowLimits = body.windowLimits;
+    const fiveHour = commandCodeWindowToUsageWindow(windowLimits?.fiveHour);
+    const weekly = commandCodeWindowToUsageWindow(windowLimits?.weekly);
+
+    // Monthly allowance is an absolute USD balance, not a rolling window.
+    const monthlyCredits = typeof credits?.monthlyCredits === "number" ? credits.monthlyCredits : undefined;
+    const monthlyLine = monthlyCredits !== undefined ? `Monthly: $${monthlyCredits.toFixed(2)} remaining` : undefined;
+    const breakdown = [monthlyLine].filter((s): s is string => !!s);
+
+    const account: SubscriptionAccountSnapshot = {
+      ...authAccount,
+      fiveHour,
+      weekly,
+      monthlyCredits,
+      usageBreakdown: breakdown.length > 0 ? breakdown.join("\n") : undefined,
+    };
+
+    return {
+      providerDisplayName: "Command Code",
+      accounts: [account],
+      activeAccount: account,
+      fetchedAt: Date.now(),
+    };
+  } catch (error) {
+    return {
+      providerDisplayName: "Command Code",
+      accounts: [],
+      fetchedAt: Date.now(),
+      error: redactedError(error, "Command Code"),
+    };
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Z.ai adapter
+// ---------------------------------------------------------------------------
+
+interface ZaiLimitEntry {
+  type: string;
+  percentage: number;
+  nextResetTime?: number;
+}
+
+interface ZaiUsageApiResponse {
+  data?: {
+    limits?: ZaiLimitEntry[];
+    planName?: string;
+    plan?: string;
+    plan_type?: string;
+    packageName?: string;
+    level?: string;
+  };
+}
+
+interface ZaiUsageApiError {
+  code: number;
+  msg: string;
+  success?: boolean;
+}
+
+// ---------------------------------------------------------------------------
+// Command Code adapter
+// ---------------------------------------------------------------------------
+// Live-verified 2026-08-09: GET https://api.commandcode.ai/alpha/billing/credits
+// with the Provider API key (same user_... key as /provider/v1 models) returns
+// USD windows + monthly credit balance. resetAt is epoch milliseconds.
+
+interface CommandCodeWindowApi {
+  used: number;
+  cap: number;
+  exceeded?: boolean | null;
+  resetAt?: number;
+}
+
+interface CommandCodeCreditsApiResponse {
+  credits?: {
+    monthlyCredits?: number;
+    purchasedCredits?: number;
+    freeCredits?: number;
+    belowThreshold?: boolean;
+  };
+  windowLimits?: {
+    limited?: boolean;
+    fiveHour?: CommandCodeWindowApi;
+    weekly?: CommandCodeWindowApi;
+  };
+}
+
+/** Map a Command Code USD window (used/cap in dollars, resetAt in ms) into
+ *  the shared UsageWindow shape (remaining%, reset labels). */
+export function commandCodeWindowToUsageWindow(window: CommandCodeWindowApi | undefined): UsageWindow | undefined {
+  if (!window || typeof window.used !== "number" || typeof window.cap !== "number" || window.cap <= 0) return undefined;
+  const usedPct = Math.round((window.used / window.cap) * 100);
+  const percent = Math.min(100, usedPct);
+  const remaining = Math.max(0, 100 - percent);
+  // resetAt is epoch ms; format helpers expect seconds.
+  const resetAtSec = window.resetAt ? window.resetAt / 1000 : undefined;
+  const resetLabel = formatReset(resetAtSec);
+  const remainingLabel = formatRemainingTime(resetAtSec);
+  return { percent, remaining, remainingLabel, resetLabel };
+}
+
+function zaiLimitToUsageWindow(limit: ZaiLimitEntry): UsageWindow | undefined {
+  if (typeof limit.percentage !== "number") return undefined;
+  const percent = Math.round(limit.percentage);
+  const remaining = Math.max(0, 100 - percent);
+  // Z.ai returns nextResetTime in epoch milliseconds; format helpers expect seconds.
+  const resetAtSec = limit.nextResetTime ? limit.nextResetTime / 1000 : undefined;
+  const resetLabel = formatReset(resetAtSec);
+  const remainingLabel = formatRemainingTime(resetAtSec);
+  return {
+    percent,
+    remaining,
+    remainingLabel,
+    resetLabel,
+  };
+}
+
+function zaiPlanLabel(response: ZaiUsageApiResponse): string | undefined {
+  const data = response.data;
+  return planLabel(firstString(data?.planName, data?.plan, data?.plan_type, data?.packageName, data?.level));
+}
+
+function compactCount(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return String(n);
+}
+
+// ponytail: trailing-24h window matches Z.ai dashboard intent (chelper uses ~48h).
+function zaiUsageTimeWindow(): string {
+  const fmt = (d: Date) => {
+    const p = (n: number) => String(n).padStart(2, "0");
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+  };
+  const now = new Date();
+  return `?startTime=${encodeURIComponent(fmt(new Date(now.getTime() - 86_400_000)))}&endTime=${encodeURIComponent(fmt(now))}`;
+}
+
+// Z.ai model-usage / tool-usage are time-series responses (verified live, CN host).
+// Per-model totals live in data.totalUsage.modelSummaryList[]; tool totals are
+// named scalars in data.totalUsage. Return undefined on any mismatch so the
+// quota table is never affected.
+function parseZaiModelUsage(body: unknown): string | undefined {
+  const tu = (body as any)?.data?.totalUsage;
+  const list = tu?.modelSummaryList;
+  if (!Array.isArray(list)) return undefined;
+  const entries = list
+    .map((m: any) => ({ name: m?.modelName, count: m?.totalTokens }))
+    .filter((e: { name: string; count: number }) => typeof e.name === "string" && e.name && typeof e.count === "number" && e.count > 0)
+    .sort((a, b) => b.count - a.count);
+  if (entries.length === 0) return undefined;
+  const calls = typeof tu.totalModelCallCount === "number" && tu.totalModelCallCount > 0 ? ` (${tu.totalModelCallCount} calls)` : "";
+  return `Models: ${entries.map((e) => `${e.name} ${compactCount(e.count)}`).join(" · ")}${calls}`;
+}
+
+function parseZaiToolUsage(body: unknown): string | undefined {
+  const u = (body as any)?.data?.totalUsage;
+  if (!u || typeof u !== "object") return undefined;
+  // ponytail: fixed label map — Z.ai returns named scalar counts, not a list.
+  const labels: Record<string, string> = {
+    totalNetworkSearchCount: "search",
+    totalWebReadMcpCount: "web-read",
+    totalZreadMcpCount: "zread",
+    totalSearchMcpCount: "search-mcp",
+  };
+  const entries = Object.entries(labels)
+    .map(([field, label]) => ({ label, count: u[field] }))
+    .filter((e: { label: string; count: number }) => typeof e.count === "number" && e.count > 0);
+  if (entries.length === 0) return undefined;
+  return `Tools: ${entries.map((e) => `${e.label} ${e.count}`).join(" · ")}`;
+}
+
+// Factory: the international `zai` and China `zai-coding-cn` endpoints share an
+// identical quota response; only the provider id, host, and label differ.
+function zaiUsageAdapter(providerId: string, usageUrl: string, displayName: string): { fetchUsage(signal?: AbortSignal): Promise<SubscriptionUsageSnapshot> } {
+  async function fetchUsage(signal?: AbortSignal): Promise<SubscriptionUsageSnapshot> {
+    try {
+      const { key: apiKey, account: authAccount } = await readZaiAuth(providerId, displayName);
+      const timeoutSignal = AbortSignal.timeout(7_000);
+      const combinedSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal;
+
+      const headers = {
+        Accept: "application/json",
+        Authorization: `Bearer ${apiKey}`,
+        "User-Agent": `pi-sub/${PI_SUB_VERSION}`,
+      };
+      const response = await fetch(usageUrl, { headers, signal: combinedSignal });
+
+      const body = await response.json();
+
+      // Z.ai / BigModel return HTTP 200 even on auth errors: {"code":401,"msg":"...","success":false}
+      // Also handle missing success field, empty msg, or presence of code.
+      const apiError = body as ZaiUsageApiError;
+      if (apiError.code >= 400 || (typeof apiError.success === "boolean" && !apiError.success) || (apiError.msg && apiError.msg.length > 0 && apiError.success === undefined)) {
+        const message = apiError.msg || `HTTP status ${apiError.code}`;
+        throw new Error(`${displayName} API error: ${message}`);
+      }
+
+      const parsed = body as ZaiUsageApiResponse;
+      const limits = parsed.data?.limits ?? [];
+      const tokenLimits = limits
+        .filter((l) => l.type === "TOKENS_LIMIT")
+        .sort((a, b) => (a.nextResetTime ?? 0) - (b.nextResetTime ?? 0));
+      // TIME_LIMIT is the MCP/month allowance already present in this response.
+      const timeLimit = limits.find((l) => l.type === "TIME_LIMIT");
+
+      if (tokenLimits.length === 0) {
+        throw new Error(`No TOKENS_LIMIT entries in ${displayName} usage response`);
+      }
+
+      // The limit with the nearest reset is the 5-hour rolling window;
+      // the next one (if present) is the weekly window.
+      const fiveHour = zaiLimitToUsageWindow(tokenLimits[0]);
+      const weekly = tokenLimits.length >= 2 ? zaiLimitToUsageWindow(tokenLimits[1]) : undefined;
+      const mcpMonthly = timeLimit ? zaiLimitToUsageWindow(timeLimit) : undefined;
+
+      // Best-effort: per-model tokens + per-tool calls. Any failure is silent; the
+      // quota table above is the source of truth and never depends on these.
+      const window = zaiUsageTimeWindow();
+      const modelUrl = usageUrl.replace(/\/quota\/limit$/, "/model-usage") + window;
+      const toolUrl = usageUrl.replace(/\/quota\/limit$/, "/tool-usage") + window;
+      const [modelRes, toolRes] = await Promise.allSettled([
+        fetch(modelUrl, { headers, signal: combinedSignal }).then((r) => r.json()),
+        fetch(toolUrl, { headers, signal: combinedSignal }).then((r) => r.json()),
+      ]);
+      const breakdowns = [
+        modelRes.status === "fulfilled" ? parseZaiModelUsage(modelRes.value) : undefined,
+        toolRes.status === "fulfilled" ? parseZaiToolUsage(toolRes.value) : undefined,
+      ].filter((s): s is string => !!s);
+
+      const account: SubscriptionAccountSnapshot = {
+        ...authAccount,
+        plan: zaiPlanLabel(parsed) ?? authAccount.plan,
+        fiveHour,
+        weekly,
+        mcpMonthly,
+        usageBreakdown: breakdowns.length > 0 ? breakdowns.join("\n") : undefined,
+      };
+
+      return {
+        providerDisplayName: displayName,
+        accounts: [account],
+        activeAccount: account,
+        fetchedAt: Date.now(),
+      };
+    } catch (error) {
+      return {
+        providerDisplayName: displayName,
+        accounts: [],
+        fetchedAt: Date.now(),
+        error: redactedError(error, displayName),
+      };
+    }
+  }
+  return { fetchUsage };
+}
+
+// Exported for the adapter-wiring regression test (provider-id string ↔
+// adapter id ↔ usage URL are exactly what a typo silently breaks).
+export function supportedAdapter(model: ModelLike): SubscriptionProviderAdapter | undefined {
+  if (isCodexModel(model)) return { id: CODEX_PROVIDER, displayName: "Codex", fetchUsage: fetchCodexUsage };
+  if (isOpenCodeGoModel(model)) return { id: OPC_PROVIDER, displayName: "OpenCode Go", fetchUsage: fetchOpenCodeGoUsage };
+  if (isZaiModel(model)) return { id: ZAI_PROVIDER, displayName: "Z.ai", ...zaiUsageAdapter(ZAI_PROVIDER, ZAI_USAGE_URL, "Z.ai") };
+  if (isZaiCodingCnModel(model)) return { id: ZAI_CODING_CN_PROVIDER, displayName: "Z.ai (CN)", ...zaiUsageAdapter(ZAI_CODING_CN_PROVIDER, ZAI_CODING_CN_USAGE_URL, "Z.ai (CN)") };
+  if (isZaiAnthropicModel(model)) return { id: ZAI_ANTHROPIC_PROVIDER, displayName: "Z.ai (Anthropic)", ...zaiUsageAdapter(ZAI_ANTHROPIC_PROVIDER, ZAI_ANTHROPIC_USAGE_URL, "Z.ai (Anthropic)") };
+  if (isRouterModel(model)) {
+    const prefix = routerUpstreamPrefix(model);
+    return {
+      // Prefix in the id makes adapterChanged fire when switching upstreams
+      // (e.g. opencode-go → command-code), so the in-flight fetch from the
+      // previous model is discarded via the refreshGeneration guard.
+      id: prefix ? `${ROUTER_PROVIDER}:${prefix}` : ROUTER_PROVIDER,
+      displayName: "Router",
+      // ponytail: capture the upstream provider prefix so fetchRouterUsage can
+      // request that provider's quota from the OmniRoute usage API.
+      fetchUsage: (signal) => fetchRouterUsage(signal, prefix),
+    };
+  }
+  if (isRouterModel(model, LEGACY_9ROUTER_PROVIDER)) return { id: LEGACY_9ROUTER_PROVIDER, displayName: "9router (legacy)", fetchUsage: fetchRouterUsage };
+  if (isCommandCodeModel(model)) return { id: COMMAND_CODE_PROVIDER, displayName: "Command Code", fetchUsage: fetchCommandCodeUsage };
+  return undefined;
+}
+
+/** Strip everything up to and including the "Provider quota" section header
+ *  so /sub breakdown never shows personal USD budget lines. */
+function providerQuotaSection(text: string): string | undefined {
+  const idx = text.indexOf("Provider quota");
+  if (idx < 0) return undefined;
+  const section = text.slice(idx);
+  return section.trim().length > 0 ? section : undefined;
+}
+
+/** First path segment of a router model id = the upstream provider OmniRoute
+ *  routes to (e.g. `command-code/deepseek/deepseek-v4-flash` → `command-code`).
+ *  `router/provider/model` in pi flattens to id `provider/model`, so the prefix
+ *  is the first segment. Aliases normalize to the canonical provider id
+ *  (`cmd` → `command-code`); generic router aliases carry no provider info —
+ *  return undefined so the usage API picks the best snapshot. */
+export function routerUpstreamPrefix(model: ModelLike): string | undefined {
+  const id = model?.id ?? "";
+  const first = id.split("/")[0]?.toLowerCase();
+  if (!first) return undefined;
+  // Alias normalization: OmniRoute exposes the same upstream under several ids.
+  if (first === "cmd") return "command-code";
+  if (first === "oc") return "opencode-go";
+  if (first === "ds") return "deepseek";
+  if (first === "glmcn") return "glm-cn"; // OmniRoute connection slug (not the Pi provider id zai-coding-cn)
+  // Generic router aliases / upstreams without cached quota data — no provider
+  // selection; the usage API returns the best snapshot instead.
+  const generic = new Set(["auto", "aug", "no-think", "tllm", "combo", "openrouter", "nvidia", "felo", "pepper", "mcode", "ddgw", "veoaifree-web", "veo-free"]);
+  return generic.has(first) ? undefined : first;
+}
+
+/** Currency-aware monthly-balance figure for footer/detail segments:
+ *  CNY → ¥88.00 CNY, anything else (incl. undefined) → $88.00. Mirrors the
+ *  breakdown formatting in parseGenericUsage. */
+export function formatMonthlyCredits(amount: number, currency?: string): string {
+  return currency === "CNY" ? `¥${amount.toFixed(2)} CNY` : `$${amount.toFixed(2)}`;
+}
+
+function formatRemaining(window: UsageWindow | undefined): string {
+  if (!window) return "?";
+  if (window.remainingLabel) return `${window.remaining}%/${window.remainingLabel}`;
+  if (window.remaining !== undefined) return `${window.remaining}%`;
+  return "?";
+}
+
+function minRemaining(account: SubscriptionAccountSnapshot | undefined): number {
+  const values: number[] = [];
+  if (account?.fiveHour?.remaining !== undefined) values.push(account.fiveHour.remaining);
+  if (account?.weekly?.remaining !== undefined) values.push(account.weekly.remaining);
+  if (account?.monthly?.remaining !== undefined) values.push(account.monthly.remaining);
+  if (values.length === 0) return 100;
+  return Math.min(...values);
+}
+
+function windowSegments(account: SubscriptionAccountSnapshot | undefined): string[] {
+  if (!account) return [];
+  const segments: string[] = [];
+  if (account.fiveHour) segments.push(`R:${formatRemaining(account.fiveHour)}`);
+  if (account.weekly) segments.push(`W:${formatRemaining(account.weekly)}`);
+  if (account.monthly) segments.push(`M:${formatRemaining(account.monthly)}`);
+  return segments;
+}
+
+export function renderSubscriptionLine(state: State): void {
+  // ponytail: resolve ctx at render time — any captured ctx goes stale on
+  // session replacement (new/fork/switch/reload) and ctx.ui then throws.
+  const ctx = state.ctx;
+  if (!ctx) return;
+  const theme = ctx.ui.theme;
+  // pi-budget parity: the theme proxy may not be initialized yet — dereferencing
+  // theme.fg throws (unhandledRejection → pi exits). Best-effort footer: skip.
+  if (!theme?.fg) return;
+  if (!state.adapter) {
+    // Unsupported provider (e.g. Ollama): still show the last response speed.
+    ctx.ui.setStatus(STATUS_KEY, state.lastTokPerSec !== undefined ? theme.fg("dim", `${state.lastTokPerSec} tok/s`) : undefined);
+    return;
+  }
+  const snapshot = state.snapshot;
+  let line: string;
+  let color: "dim" | "warning" | "error" = "dim";
+  if (!snapshot) {
+    line = `Sub ${state.adapter.displayName} loading`;
+  } else if (snapshot.error) {
+    line = `Sub ${snapshot.error}`;
+    color = "warning";
+  } else {
+    const account = snapshot.activeAccount;
+    const windowParts = windowSegments(account);
+    const accountPart = formatFooterAccount(account);
+    const segments = accountPart ? [accountPart, ...windowParts] : [...windowParts];
+    const cost = state.cumulativeCost;
+    const hasWindows = windowParts.length > 0;
+    // Monthly balance (Command Code credits, router-reported balances):
+    // currency-aware compact figure — e.g. M:$69.99 / M:¥88.00 CNY.
+    if (typeof account?.monthlyCredits === "number") {
+      segments.push(`M:${formatMonthlyCredits(account.monthlyCredits, account.creditsCurrency)}`);
+    }
+    if (cost > 0) segments.push(`$${cost.toFixed(2)}`);
+    if (state.lastTokPerSec !== undefined) segments.push(`${state.lastTokPerSec} tok/s`);
+    if (segments.length === 0) {
+      line = `Sub ${state.adapter.displayName}`;
+    } else if (!hasWindows) {
+      line = `${state.adapter.displayName} ${segments.join(" ")}`;
+    } else {
+      line = segments.join(" ");
+    }
+    const remaining = minRemaining(account);
+    color = remaining <= 10 ? "error" : remaining <= 20 ? "warning" : "dim";
+  }
+  ctx.ui.setStatus(STATUS_KEY, theme.fg(color, line));
+}
+
+function isStaleCtxError(error: unknown): boolean {
+  // pi 0.85.1's wording is "This extension ctx is stale after session
+  // replacement or reload." (verified in the host bundle); "invalidated" is
+  // matched too so wording drift degrades to a harmless extra disarm instead
+  // of silently disabling recovery.
+  return error instanceof Error && /\bctx is stale\b|invalidated/i.test(error.message);
+}
+
+function selfDisarm(state: State): void {
+  stopTimer(state);
+  state.inFlight = undefined;
+  state.refreshGeneration++;
+  state.ctx = undefined;
+}
+
+/** pi can invalidate state.ctx without ever delivering a matching
+ *  session_shutdown (pi 0.85.1 orphaned-runtime teardown; instances are shared
+ *  across sessions), so a deferred refresh can hit a stale ctx. refreshUsage
+ *  is async — its throw becomes a rejected promise, and a void-discarded
+ *  rejection exits pi (unhandledRejection -> uncaughtException). Catch it and
+ *  self-disarm; session_start re-arms with the fresh ctx. Non-stale
+ *  rejections are swallowed: adapters already resolve error snapshots. */
+function deferRefresh(state: State, force: boolean): void {
+  refreshUsage(state, force).catch((error) => {
+    if (isStaleCtxError(error)) selfDisarm(state);
+  });
+}
+
+function startTimer(state: State): void {
+  if (state.refreshTimer || !state.adapter) return;
+  state.refreshTimer = setInterval(() => {
+    deferRefresh(state, false);
+  }, REFRESH_INTERVAL_MS);
+}
+
+function stopTimer(state: State): void {
+  if (state.refreshTimer) clearInterval(state.refreshTimer);
+  if (state.debounceTimer) clearTimeout(state.debounceTimer);
+  state.refreshTimer = undefined;
+  state.debounceTimer = undefined;
+}
+
+function updateActiveAdapter(state: State, model: ModelLike): void {
+  const nextAdapter = supportedAdapter(model);
+  const adapterChanged = state.adapterId !== nextAdapter?.id;
+
+  state.model = model;
+  state.adapter = nextAdapter;
+  state.adapterId = nextAdapter?.id;
+
+  if (adapterChanged) {
+    state.snapshot = undefined;
+    state.lastRefreshAt = 0;
+    state.inFlight = undefined;
+    state.refreshGeneration++;
+  }
+
+  if (!state.adapter) {
+    stopTimer(state);
+  }
+  renderSubscriptionLine(state);
+  if (state.adapter) startTimer(state);
+}
+
+async function refreshUsage(state: State, force: boolean): Promise<SubscriptionUsageSnapshot | undefined> {
+  const adapter = state.adapter;
+  // ponytail: resolve ctx at call time, never capture it across the fetch —
+  // the session can be replaced while the promise is in flight.
+  const ctx = state.ctx;
+  if (!adapter || !ctx) {
+    renderSubscriptionLine(state);
+    return undefined;
+  }
+  if (!force && state.snapshot && Date.now() - state.lastRefreshAt < REFRESH_TTL_MS) return state.snapshot;
+  if (state.inFlight) return state.inFlight;
+  const generation = state.refreshGeneration;
+  renderSubscriptionLine(state);
+  state.inFlight = adapter.fetchUsage(ctx.signal).then((snapshot) => {
+    if (state.refreshGeneration !== generation) return snapshot;
+    state.snapshot = snapshot;
+    state.lastRefreshAt = Date.now();
+    renderSubscriptionLine(state);
+    return snapshot;
+  }).finally(() => {
+    if (state.refreshGeneration === generation) {
+      state.inFlight = undefined;
+    }
+  });
+  return state.inFlight;
+}
+
+export function scheduleRefresh(state: State): void {
+  if (!state.adapter) return;
+  if (state.debounceTimer) clearTimeout(state.debounceTimer);
+  state.debounceTimer = setTimeout(() => {
+    state.debounceTimer = undefined;
+    deferRefresh(state, true);
+  }, REFRESH_DEBOUNCE_MS);
+}
+
+function pad(value: string, width: number): string {
+  return value.length >= width ? value : value + " ".repeat(width - value.length);
+}
+
+/** "46 tok/s (36 think + 10 answer)" — split shown only when the model
+ *  reasoned. usage.reasoning is a subset of usage.output (Pi SDK contract),
+ *  so answer speed = (output − reasoning)/s, never output + reasoning. */
+export function tokPerSecLabel(output: number, thinking: number, elapsedMs: number): string {
+  const total = Math.round(output / (elapsedMs / 1000));
+  if (thinking <= 0) return `${total} tok/s`;
+  const secs = elapsedMs / 1000;
+  return `${total} tok/s (${Math.round(thinking / secs)} think + ${Math.round((output - thinking) / secs)} answer)`;
+}
+
+function buildDetails(snapshot: SubscriptionUsageSnapshot | undefined, state: State): string {
+  if (!state.adapter) {
+    const header = `Provider: ${state.model?.provider ?? "unknown"}${state.model?.id ? ` · Model: ${state.model.id}` : ""}`;
+    if (state.lastTokPerSec === undefined) return `${header}\nSubscription tracking inactive for this provider.`;
+    const tokPerSecLine = `Last response: ${state.lastTokPerSecLabel}` +
+      (state.cumulativeDurationMs > 0
+        ? ` · Session avg: ${Math.round(state.cumulativeOutput / (state.cumulativeDurationMs / 1000))} tok/s`
+        : "");
+    return `${header}\n${tokPerSecLine}`;
+  }
+  if (!snapshot) return "Subscription usage has not been loaded yet.";
+  if (snapshot.error) return `${snapshot.providerDisplayName}: ${snapshot.error}`;
+  if (snapshot.accounts.length === 0) {
+    const costLine = state.cumulativeCost > 0 ? `\nSession cost: $${state.cumulativeCost.toFixed(2)}` : "";
+    const modelInfo = state.model?.id ? ` · Model: ${state.model.id}` : "";
+    return `Provider: ${snapshot.providerDisplayName}${modelInfo} · Fetched: ${new Date(snapshot.fetchedAt).toLocaleTimeString()}\n${snapshot.providerDisplayName} does not expose usage windows.${costLine}`;
+  }
+
+  const columns: { key: string; label: string; get: (a: SubscriptionAccountSnapshot) => string }[] = [
+    { key: "account", label: "ACCOUNT", get: (a) => a.accountLabel ?? "unknown" },
+    { key: "plan", label: "PLAN", get: (a) => a.plan ?? "?" },
+  ];
+
+  const hasFiveHour = snapshot.accounts.some((a) => a.fiveHour);
+  const hasWeekly = snapshot.accounts.some((a) => a.weekly);
+  if (hasFiveHour) columns.push({ key: "five", label: "ROLLING", get: (a) => formatRemaining(a.fiveHour) });
+  if (hasWeekly) columns.push({ key: "weekly", label: "WEEKLY", get: (a) => formatRemaining(a.weekly) });
+  const hasMonthly = snapshot.accounts.some((a) => a.monthly);
+  if (hasMonthly) columns.push({ key: "monthly", label: "MONTHLY", get: (a) => formatRemaining(a.monthly) });
+  const rows = snapshot.accounts.map((account) => ({
+    active: account.isActive ? "*" : " ",
+    snapshot: account,
+  }));
+
+  const widths: Record<string, number> = {};
+  for (const col of columns) {
+    widths[col.key] = Math.max(col.label.length, ...snapshot.accounts.map((a) => col.get(a).length));
+  }
+
+  const headerCols = columns.map((c) => pad(c.label, widths[c.key]));
+  const header = `  ${headerCols.join("  ")}  LAST ACTIVITY`;
+  const sep = "-".repeat(header.length);
+  const body = rows.map((row) => {
+    const cols = columns.map((c) => pad(c.get(row.snapshot), widths[c.key]));
+    return `${row.active} ${cols.join("  ")}  ${row.snapshot.lastActivity ?? ""}`;
+  });
+
+  const costLine = state.cumulativeCost > 0 ? `\nSession cost: $${state.cumulativeCost.toFixed(2)}` : "";
+  const tokPerSecLine = state.lastTokPerSec !== undefined
+    ? `\nLast response: ${state.lastTokPerSecLabel}` +
+      (state.cumulativeDurationMs > 0
+        ? ` · Session avg: ${Math.round(state.cumulativeOutput / (state.cumulativeDurationMs / 1000))} tok/s`
+        : "")
+    : "";
+  const lines = [`Provider: ${snapshot.providerDisplayName} · Model: ${state.model?.id ?? "unknown-model"} · Fetched: ${new Date(snapshot.fetchedAt).toLocaleTimeString()}${costLine}${tokPerSecLine}`, "", header, sep, ...body];
+  if (!hasFiveHour && !hasWeekly && !hasMonthly) {
+    lines.push("", `${snapshot.providerDisplayName} does not expose usage windows.`);
+  }
+  // Z.ai extras: MCP/month allowance (from TIME_LIMIT) + per-model/per-tool breakdown.
+  const mcpAcct = snapshot.accounts.find((a) => a.mcpMonthly);
+  if (mcpAcct && mcpAcct.mcpMonthly) lines.push("", `MCP/month: ${formatRemaining(mcpAcct.mcpMonthly)}`);
+  for (const a of snapshot.accounts) if (a.usageBreakdown) lines.push("", a.usageBreakdown);
+  return lines.join("\n");
+}
+
+// ============================================================================
+// /context — context-window breakdown (Claude Code style panel)
+// ============================================================================
+
+/** Formatting helpers for the /context panel (OMP house style: 5.3K, 21K, 1m). */
+export function formatCtxTokens(n: number): string {
+  if (n < 1000) return String(n);
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+  return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
+}
+
+/** OMP-style percentage: `<0.1%` for non-zero slivers, one decimal otherwise. */
+export function formatCtxPercent(tokens: number, contextWindow: number): string {
+  if (!(contextWindow > 0)) return "?";
+  const pct = (tokens / contextWindow) * 100;
+  if (pct > 0 && pct < 0.1) return "<0.1%";
+  return `${pct.toFixed(1)}%`;
+}
+
+/** Waffle-chart glyphs, matching OMP's vocabulary. */
+const WAFFLE_FILLED = "⛁";
+const WAFFLE_FREE = "⛶";
+const WAFFLE_BUFFER = "⛝";
+
+/** OMP's signature waffle grid: `rows × cols` cells over the window, painted in
+ *  slice order (used categories → free → autocompact buffer).
+ *
+ *  Cells are allocated by share of the window, with a **minimum of one cell per
+ *  slice worth ≥0.5%** — deliberate visibility scaling, the same choice OMP
+ *  makes (their 2%-used grid still lights up a third of the cells). Any
+ *  shortfall or overflow is absorbed by the largest slice, so the grid always
+ *  fills exactly `rows × cols` cells. */
+export function ctxWaffle(
+  slices: { tokens: number; glyph: string }[],
+  contextWindow: number,
+  cols = 10,
+  rows = 4,
+): string[] {
+  const cells = cols * rows;
+  if (!(contextWindow > 0)) return Array.from({ length: rows }, () => WAFFLE_FREE.repeat(cols));
+  const MIN_SHARE = 0.005;
+  const alloc = slices.map((s) => {
+    const tokens = Math.max(0, s.tokens);
+    if (tokens <= 0) return 0;
+    const share = tokens / contextWindow;
+    return share < MIN_SHARE ? 1 : Math.max(1, Math.round(share * cells));
+  });
+  // Overflow swallows from the largest slice first (never below one cell).
+  let total = alloc.reduce((a, b) => a + b, 0);
+  while (total > cells) {
+    const biggest = alloc.indexOf(Math.max(...alloc));
+    if (alloc[biggest] <= 1) break;
+    alloc[biggest] -= 1;
+    total -= 1;
+  }
+  // Underflow pads the LARGEST slice — with a well-formed breakdown that is free
+  // space. Never the last slice: that would inflate the autocompact buffer (a
+  // fixed reserve) whenever a category figure is underestimated.
+  if (total < cells && alloc.length > 0) {
+    const biggest = alloc.indexOf(Math.max(...alloc));
+    alloc[biggest] += cells - total;
+  }
+  const glyphs = alloc.flatMap((count, i) => Array.from({ length: count }, () => slices[i].glyph));
+  const out: string[] = [];
+  for (let r = 0; r < rows; r++) out.push(glyphs.slice(r * cols, (r + 1) * cols).join(""));
+  return out;
+}
+
+/** Token cost of one tool as the prompt carries it: description + JSON
+ *  parameter schema + guidelines, chars/4 (same heuristic as estimateTokens). */
+function toolTokens(t: { description: string; parameters: unknown; promptGuidelines?: string[] }): number {
+  let chars = t.description.length + JSON.stringify(t.parameters ?? {}).length;
+  if (t.promptGuidelines) chars += t.promptGuidelines.join("\n").length;
+  return Math.ceil(chars / 4);
+}
+
+/** Short, readable source label: `sourceInfo.source` is a filesystem path for
+ *  locally-linked packages and a package spec for installed ones — both reduce
+ *  to the last segment (`../../pi-web` and `@bacnh85/pi-web` → `pi-web`),
+ *  leaving built-in single-segment names untouched. */
+export function shortSource(source: string): string {
+  const parts = source.split("/").filter((p) => p && p !== "." && p !== "..");
+  return parts[parts.length - 1] ?? source;
+}
+
+/** Parse `<name>…</name>` skill entries out of the skills prompt section. */
+function countSkills(skillsSection: string): number {
+  const matches = skillsSection.match(/<skill>[\s\S]*?<\/skill>/g);
+  return matches ? matches.length : 0;
+}
+
+/** Effective compaction reserve for the active model: pi resolves
+ *  `compaction.modelOverrides["provider/id"].reserveTokens` → `compaction.reserveTokens`
+ *  → default 16384 (settings-manager getCompactionReserveTokens). Mirrors that
+ *  order so the panel shows the number pi will actually use. */
+export function resolveReserveTokens(settings: unknown, model?: { provider?: string; id?: string }): number {
+  const compaction = (settings as { compaction?: { reserveTokens?: unknown; modelOverrides?: Record<string, unknown> } } | undefined)?.compaction;
+  const override = model?.provider && model?.id
+    ? (compaction?.modelOverrides?.[`${model.provider}/${model.id}`] as { reserveTokens?: unknown } | undefined)?.reserveTokens
+    : undefined;
+  for (const candidate of [override, compaction?.reserveTokens]) {
+    if (typeof candidate === "number" && Number.isSafeInteger(candidate) && candidate >= 0) return candidate;
+  }
+  return DEFAULT_COMPACTION_SETTINGS.reserveTokens;
+}
+
+function readCompactionSettings(): unknown {
+  try {
+    const dir = process.env.PI_CODING_AGENT_DIR?.trim() || path.join(os.homedir(), ".pi", "agent");
+    return JSON.parse(fs.readFileSync(path.join(dir, "settings.json"), "utf8"));
+  } catch {
+    return undefined; // no settings file → defaults
+  }
+}
+
+export interface ContextBreakdownInput {
+  ctx: {
+    getContextUsage(): { tokens: number | null; contextWindow: number; percent: number | null } | undefined;
+    getSystemPrompt(): string;
+    sessionManager: { buildSessionProjection(): { messages: unknown[] } };
+  };
+  /** From pi.getAllTools() — command contexts do not expose it; the closure does. */
+  allTools: { name: string; description: string; parameters: unknown; promptGuidelines?: string[]; sourceInfo: { source: string } }[];
+  /** From pi.getActiveTools(). */
+  activeTools: string[];
+  model?: { provider?: string; id?: string; name?: string; maxTokens?: number; contextWindow?: number };
+  /** Parsed ~/.pi/agent/settings.json — resolves the effective compaction reserve. */
+  settings?: unknown;
+}
+
+export interface ContextBreakdown {
+  contextWindow: number;
+  usedTokens: number | null;
+  percent: number | null;
+  /** `provider/id` of the active model, for the header line. */
+  modelLabel?: string;
+  /** Human-readable model name, e.g. "GLM-5.3". */
+  modelName?: string;
+  systemPrompt: { total: number; sections: Record<string, number> };
+  tools: { total: number; activeCount: number; registeredCount: number; bySource: Record<string, { tokens: number; count: number }> };
+  /** Per-tool costs, descending — powers the "top tools" list. */
+  toolCosts: { name: string; tokens: number; source: string }[];
+  skills: { total: number; count: number };
+  memoryFiles: { total: number; files: { name: string; tokens: number }[] };
+  messages: { total: number; count: number };
+  /** Disjoint category totals for the panel (no overlap, sum ≤ window):
+   *  system prompt/context split out of the sections, plus tools, messages,
+   *  autocompact buffer, free space. */
+  categories: { label: string; tokens: number; glyph: string }[];
+  /** Compaction reserve — pi triggers at `tokens > window - compaction`. A hard
+   *  slice of the window (the "autocompact buffer" in Claude/OMP terms), NOT
+   *  additive with free space. */
+  reserved: { compaction: number };
+  /** Window left before compaction triggers: `window - used - reserve`. */
+  freeSpace: number;
+  /** True when compaction is disabled in settings (reserve is not enforced). */
+  compactionDisabled: boolean;
+}
+
+/** Build the full context-window breakdown for /context. Pure over ctx getters.
+ *  Exported for tests. Token figures are chars/4 estimates except usedTokens,
+ *  which is the authoritative ctx.getContextUsage() total when known. */
+export function computeContextBreakdown(input: ContextBreakdownInput): ContextBreakdown {
+  const { ctx, allTools, activeTools, model } = input;
+  const usage = ctx.getContextUsage();
+  const contextWindow = model?.contextWindow ?? usage?.contextWindow ?? 0;
+  const usedTokens = usage?.tokens ?? null;
+  const percent = usage?.percent ?? null;
+
+  // System prompt: prefer the structured sections replayed on the transcript's
+  // leading system message (exactly what the model sees); fall back to the
+  // whole-prompt blob before the first turn records sections.
+  const sections: Record<string, number> = {};
+  let systemTotal = 0;
+  let haveSections = false;
+  let sysRawSkills = "";
+  try {
+    const messages = ctx.sessionManager.buildSessionProjection().messages as Array<{ role?: string; sections?: Record<string, string | null> }>;
+    const sys = messages.find((m) => m.role === "system");
+    if (sys?.sections) {
+      haveSections = true;
+      for (const [name, content] of Object.entries(sys.sections)) {
+        if (!content) continue;
+        if (name === "skills") sysRawSkills = content;
+        const tokens = Math.ceil(content.length / 4);
+        sections[name] = (sections[name] ?? 0) + tokens;
+        systemTotal += tokens;
+      }
+    }
+  } catch { /* projection unavailable — fall back to blob */ }
+  if (!haveSections) {
+    // No transcript system message yet (nothing has been sent). The rendered
+    // prompt is the only source; keep it as one bucket and let the tool/skill
+    // figures below still populate, so a first-turn /context is still useful.
+    systemTotal = Math.ceil(ctx.getSystemPrompt().length / 4);
+  }
+
+  const tools = allTools;
+  const activeSet = new Set(activeTools);
+  const bySource: Record<string, { tokens: number; count: number }> = {};
+  const toolCosts: { name: string; tokens: number; source: string }[] = [];
+  let toolsTotal = 0;
+  for (const t of tools) {
+    const cost = toolTokens(t);
+    toolsTotal += cost;
+    const src = t.sourceInfo?.source ?? "unknown";
+    const bucket = (bySource[src] ??= { tokens: 0, count: 0 });
+    bucket.tokens += cost;
+    bucket.count += 1;
+    toolCosts.push({ name: t.name, tokens: cost, source: src });
+  }
+  toolCosts.sort((a, b) => b.tokens - a.tokens);
+
+  const skillsRaw = sysRawSkills;
+  const memorySectionTokens = (sections.project_context ?? 0) + (sections.addendum ?? 0);
+
+  let messagesTotal = 0;
+  let messagesCount = 0;
+  try {
+    for (const m of ctx.sessionManager.buildSessionProjection().messages as Array<{ role?: string }>) {
+      if (m.role === "system") continue; // counted above as systemPrompt
+      messagesTotal += estimateTokens(m as Parameters<typeof estimateTokens>[0]);
+      messagesCount += 1;
+    }
+  } catch { /* no projection */ }
+
+  // pi's trigger: shouldCompact → tokens > contextWindow - reserveTokens. The
+  // reserve is a hard slice of the window, not a cost added on top; model output
+  // is NOT reserved (pi only caps it inside summarization).
+  const compactionDisabled = (input.settings as { compaction?: { enabled?: unknown } } | undefined)?.compaction?.enabled === false;
+  const reserved = { compaction: resolveReserveTokens(input.settings, model) };
+  const withheld = compactionDisabled ? 0 : reserved.compaction;
+
+  // Disjoint partition for the waffle + category lines (OMP model). Sections
+  // count each once: context files and skills leave the system-prompt bucket so
+  // nothing is double-counted against the window.
+  //
+  // The prompt-side rows are near-exact character counts of text we can see
+  // (sections, tool schemas), so they are reported as measured. The Messages row
+  // is the weak estimate: chars/4 also reads thinking blocks and cache-unwritten
+  // content, so on real sessions it lands tens of percent ABOVE the provider's
+  // authoritative input count. Messages is therefore reported as the RESIDUAL
+  // (`used − prompt rows`), which absorbs both that over-count and any tokens we
+  // cannot attribute at all — and keeps every row ≤ the headline total.
+  const contextTokens = memorySectionTokens;
+  const skillsTokens = sections.skills ?? 0;
+  const corePromptTokens = Math.max(0, systemTotal - contextTokens - skillsTokens);
+  const promptTokens = corePromptTokens + toolsTotal + contextTokens + skillsTokens;
+  const messagesRow = usedTokens !== null
+    // Capped so a stale figure reporting more tokens than the window can hold
+    // still yields a partition that fits.
+    ? Math.min(Math.max(0, usedTokens - promptTokens), Math.max(0, contextWindow - withheld - promptTokens))
+    : messagesTotal;
+  // Occupancy basis: the authoritative count when known, estimates otherwise.
+  // `max` guards the post-compaction case where prompt estimates alone exceed a
+  // momentarily tiny measured total.
+  const occupied = Math.max(usedTokens ?? 0, promptTokens + messagesRow);
+  const freeSpace = Math.max(0, contextWindow - Math.min(occupied, contextWindow - withheld) - withheld);
+  const categories = [
+    { label: "System prompt", tokens: corePromptTokens, glyph: "⛁" },
+    { label: "System tools", tokens: toolsTotal, glyph: "⛁" },
+    { label: "System context", tokens: contextTokens, glyph: "⛁" },
+    { label: "Skills", tokens: skillsTokens, glyph: "⛁" },
+    { label: "Messages", tokens: messagesRow, glyph: WAFFLE_FILLED },
+    { label: "Free space", tokens: freeSpace, glyph: WAFFLE_FREE },
+    // The reserve is the LAST slice of the window (pi compacts at
+    // `tokens > window - reserve`), so it renders after free space.
+    ...(compactionDisabled ? [] : [{ label: "Autocompact buffer", tokens: reserved.compaction, glyph: WAFFLE_BUFFER }]),
+  ];
+
+  return {
+    contextWindow,
+    usedTokens,
+    percent,
+    modelLabel: model && "provider" in model && model.provider ? `${model.provider}/${model.id ?? "?"}` : undefined,
+    modelName: model && "name" in model ? model.name : undefined,
+    systemPrompt: { total: systemTotal, sections },
+    tools: { total: toolsTotal, activeCount: activeSet.size, registeredCount: tools.length, bySource },
+    toolCosts,
+    skills: { total: sections.skills ?? 0, count: countSkills(skillsRaw) },
+    memoryFiles: {
+      total: memorySectionTokens,
+      files: Object.entries(sections)
+        .filter(([name]) => name === "project_context" || name === "addendum")
+        .map(([name, tokens]) => ({ name, tokens })),
+    },
+    messages: { total: messagesTotal, count: messagesCount },
+    categories,
+    reserved,
+    freeSpace,
+    compactionDisabled,
+  };
+}
+
+/** Render the /context panel in OMP's layout: waffle grid + model info to its
+ *  right, then a disjoint "Estimated usage by category" block, then detail
+ *  lists and pruning recommendations. */
+export function renderContextPanel(b: ContextBreakdown): string[] {
+  const k = formatCtxTokens;
+  const pct = (n: number) => ` (${formatCtxPercent(n, b.contextWindow)})`;
+  const lines: string[] = ["Context Usage", ""];
+
+  if (b.usedTokens === null) {
+    lines.push(
+      "Context usage: exact totals unknown (right after compaction or before the first model response).",
+      "Run /context again after the next reply for authoritative numbers. Category splits are estimates.",
+      "",
+    );
+  }
+  const used = b.usedTokens ?? b.systemPrompt.total + b.tools.total + b.messages.total;
+
+  // ── Header: waffle on the left (10 cols), model + totals on the right ──
+  // Painted in window order: used categories → free → autocompact buffer.
+  const waffleSlices = b.categories.map((c) => ({ tokens: c.tokens, glyph: c.glyph }));
+  const grid = ctxWaffle(waffleSlices, b.contextWindow, 10, 4);
+  const right = [
+    b.modelName ? `${b.modelName}${b.contextWindow > 0 ? ` (${k(b.contextWindow)} context)` : ""}` : undefined,
+    // OMP shows the bare model id with the window bracketed: `glm-5.3[1m]`.
+    b.modelLabel ? `${b.modelLabel.split("/").pop()}${b.contextWindow > 0 ? `[${k(b.contextWindow)}]` : ""}` : undefined,
+    `${k(used)}/${k(b.contextWindow)} tokens (${formatCtxPercent(used, b.contextWindow)})`,
+    "Estimated usage by category",
+  ];
+  for (let r = 0; r < grid.length; r++) {
+    const rightText = right[r];
+    lines.push(rightText ? `${grid[r]}  ${rightText}` : grid[r]);
+  }
+  for (const extra of right.slice(grid.length)) if (extra) lines.push("            " + extra);
+  lines.push("");
+
+  // ── Disjoint category block (glyph-prefixed, OMP style) ──
+  for (const c of b.categories) {
+    lines.push(` ${c.glyph} ${c.label}: ${k(c.tokens)} token${c.tokens === 1 ? "" : "s"}${pct(c.tokens)}`);
+  }
+  if (b.compactionDisabled) lines.push(" ⛶ Autocompact buffer: disabled (compaction.enabled=false)");
+
+  // ── Detail: system-prompt sections, top tools, per-package attribution ──
+  const sectionNames = Object.keys(b.systemPrompt.sections).sort((x, y) => b.systemPrompt.sections[y] - b.systemPrompt.sections[x]);
+  if (sectionNames.length > 1) {
+    lines.push("", `Prompt sections (${k(b.systemPrompt.total)}):`);
+    for (const name of sectionNames) lines.push(`  ${name}: ${k(b.systemPrompt.sections[name])}`);
+  }
+  if (b.toolCosts.length > 0) {
+    lines.push("", `Tools (${b.tools.registeredCount}${b.tools.activeCount !== b.tools.registeredCount ? ` · ${b.tools.activeCount} active` : ""}):`);
+    for (const t of b.toolCosts.slice(0, 5)) lines.push(`  ${t.name}: ${k(t.tokens)}`);
+    const top = Object.entries(b.tools.bySource).sort((x, y) => y[1].tokens - x[1].tokens).slice(0, 3);
+    for (const [src, s] of top) lines.push(`  ${shortSource(src)}: ${k(s.tokens)} · ${s.count} tool${s.count === 1 ? "" : "s"}`);
+  }
+
+  const recs: string[] = [];
+  if (b.tools.total > b.contextWindow * 0.4) {
+    recs.push(`Tool schemas are ${k(b.tools.total)} tokens (${formatCtxPercent(b.tools.total, b.contextWindow)} of window) — consider setActiveTools pruning.`);
+  }
+  if (b.memoryFiles.total > 3000) {
+    recs.push(`Context files are ${k(b.memoryFiles.total)} tokens — consider trimming AGENTS.md.`);
+  }
+  if (b.skills.total > 2000) {
+    recs.push(`Skills section is ${k(b.skills.total)} tokens — disable-model-invocation on reference-only skills.`);
+  }
+  if (recs.length > 0) lines.push("", "Recommendations:", ...recs.map((r) => `- ${r}`));
+  return lines;
+}
+
+export default function (pi: ExtensionAPI) {
+  const state: State = { lastRefreshAt: 0, refreshGeneration: 0, cumulativeOutput: 0, cumulativeDurationMs: 0, cumulativeCost: 0 };
+
+  pi.on("session_start", async (_event, ctx) => {
+    // Only session_start installs state.ctx: it fires (startup/new/fork/switch/
+    // reload) before the session's other events, so mid-session handlers never
+    // need to — and a late old-session event must not reinstall a stale ctx.
+    state.ctx = ctx;
+    updateActiveAdapter(state, ctx.model);
+    if (state.adapter) deferRefresh(state, true);
+  });
+
+  pi.on("model_select", async (event, _ctx) => {
+    updateActiveAdapter(state, event.model);
+    if (state.adapter) deferRefresh(state, true);
+  });
+
+  pi.on("before_provider_request", async (_event, _ctx) => {
+    state.responseStartTime = Date.now();
+  });
+
+  pi.on("message_end", async (event, _ctx) => {
+    if (event.message.role === "assistant") {
+      // pi-budget parity: coerce + finite guard so a string/NaN cost.total can
+      // never poison the accumulator (string concat garbles every subsequent
+      // footer).
+      const cost = Number((event.message.usage as any)?.cost?.total);
+      if (Number.isFinite(cost) && cost > 0) state.cumulativeCost += cost;
+      if (state.responseStartTime) {
+        // usage.output already includes reasoning tokens (Pi SDK contract) —
+        // this is total tok/s in both thinking and normal mode.
+        const output = (event.message.usage as any)?.output ?? 0;
+        const reasoning = (event.message.usage as any)?.reasoning ?? 0;
+        const elapsed = Date.now() - state.responseStartTime;
+        state.responseStartTime = undefined;
+        if (elapsed > 0 && output > 0) {
+          state.lastTokPerSec = Math.round(output / (elapsed / 1000));
+          state.lastTokPerSecLabel = tokPerSecLabel(output, reasoning, elapsed);
+          state.cumulativeOutput += output;
+          state.cumulativeDurationMs += elapsed;
+        }
+      }
+      renderSubscriptionLine(state);
+    }
+  });
+
+  pi.on("after_provider_response", async (event, _ctx) => {
+    if (event.status >= 400) {
+      state.responseStartTime = undefined;
+    }
+    if (state.adapter) scheduleRefresh(state);
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+    // Only tear down if this shutdown belongs to the installed session: a late
+    // old-session shutdown (delivered after the next session_start) must not
+    // stop the live refresh timer, drop the live in-flight fetch, or touch a
+    // ctx that may already be invalidated. Normal flow: session_start installed
+    // this ctx, so the identity always matches for the session being torn down.
+    if (state.ctx !== ctx) return;
+    stopTimer(state);
+    // ponytail: session is being torn down (new/fork/switch/reload). Pi invalidates
+    // this ctx next; no-op any in-flight fetch .then that captured it, and drop the
+    // stale promise so the next session fetches fresh instead of returning it.
+    state.inFlight = undefined;
+    state.refreshGeneration++;
+    ctx.ui.setStatus(STATUS_KEY, undefined);
+    state.ctx = undefined;
+  });
+
+  pi.registerCommand("sub", {
+    description: "Show subscription usage for the current supported model provider (use /sub refresh to force refresh).",
+    getArgumentCompletions: (prefix) => {
+      const items = ["refresh"]
+        .filter((k) => k.startsWith(String(prefix || "").trim().toLowerCase()))
+        .map((k) => ({ value: k, label: k, description: "force refresh" }));
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args, ctx) => {
+      try {
+        updateActiveAdapter(state, ctx.model);
+        const command = args.trim().toLowerCase();
+        const force = command === "refresh";
+        const snapshot = state.adapter ? await refreshUsage(state, force || !state.snapshot) : undefined;
+        const details = buildDetails(snapshot ?? state.snapshot, state);
+        pi.sendMessage({ customType: MESSAGE_TYPE, content: details, display: true });
+        // state.ctx (not captured ctx): the session could be replaced during the
+        // await above; if it was, skip the notification instead of touching a
+        // stale ctx.
+        if (force) state.ctx?.ui.notify("Subscription usage refreshed", "info");
+      } catch (error) {
+        // Orphaned stale ctx (invalidated without shutdown): disarm like the
+        // deferred paths instead of throwing into pi's dispatcher.
+        if (!isStaleCtxError(error)) throw error;
+        selfDisarm(state);
+      }
+    },
+  });
+
+  // Transcript renderer for /context: pi renders this inline in the scrollback
+  // (above the editor), like OMP's panel, instead of a dismissable overlay. The
+  // renderer receives the live theme, so the category glyphs keep their colors
+  // and the panel stays visible while you keep working.
+  // Optional-call guard: matches pi-a2a/pi-subagent/pi-advisor, and keeps older
+  // SDK builds (and minimal test harnesses) loadable.
+  pi.registerMessageRenderer?.<{ lines: string[] }>(MESSAGE_TYPE_CONTEXT, (message, _opts, theme) => {
+    try {
+      const fg = theme?.fg ? (c: string, s: string) => theme.fg(c as never, s) : (s: string) => s;
+      const body = (message.details as { lines?: string[] } | undefined)?.lines
+        ?? (typeof message.content === "string" ? message.content.split("\n") : []);
+      const clamp = (line: string, width: number) => {
+        if (width <= 0 || [...line].length <= width) return line;
+        // Ellipsis rather than a mid-word slice — this is a display clamp, not data loss.
+        const chars = [...line];
+        return chars.length <= width ? line : chars.slice(0, Math.max(0, width - 1)).join("") + "…";
+      };
+      return {
+        render: (width: number) => body.map((l) => clamp(l, width)).map((line) => {
+          // Tint the category glyph; keep the numeric body plain for contrast.
+          const m = line.match(/^(\s*)([⛁⛶⛝])( .*)$/);
+          if (!m) return fg("customMessageText", line);
+          const tint = m[2] === "⛶" ? "dim" : m[2] === "⛝" ? "warning" : "accent";
+          return `${m[1]}${fg(tint, m[2])}${fg("customMessageText", m[3])}`;
+        }),
+        invalidate: () => {},
+      };
+    } catch {
+      return undefined; // pi-tui unavailable → fall back to default rendering
+    }
+  });
+
+  pi.registerCommand("context", {
+    description: "Show a context-window breakdown: system prompt, tools, memory files, skills, messages, reserved, free space.",
+    handler: async (_args, ctx) => {
+      // getAllTools/getActiveTools live on the ExtensionAPI closure — command
+      // contexts (ExtensionCommandContext) do not expose them.
+      const b = computeContextBreakdown({ ctx, allTools: pi.getAllTools(), activeTools: pi.getActiveTools(), model: ctx.model as ContextBreakdownInput["model"], settings: readCompactionSettings() });
+      const lines = renderContextPanel(b);
+      // display:true → shown in the transcript (above the editor, like OMP).
+      // `content` is the plain-text fallback for renderer-less builds and
+      // non-TUI modes; `details.lines` feeds the themed transcript renderer.
+      pi.sendMessage({ customType: MESSAGE_TYPE_CONTEXT, content: lines.join("\n"), display: true, details: { lines } });
+    },
+  });
+
+  // Returned for tests only — Pi ignores the extension setup return value.
+  return state;
+}
