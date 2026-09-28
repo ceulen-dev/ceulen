@@ -1,0 +1,37 @@
+{
+  "name": "ceulen",
+  "version": "0.1.0",
+  "description": "Ceulen — the Pi coding agent, fully dressed: one bundle extension carrying the full toolkit with a single /ceulen config command.",
+  "type": "module",
+  "main": "extensions/index.js",
+  "license": "MIT",
+  "keywords": [
+    "pi",
+    "pi-coding-agent",
+    "coding-agent",
+    "agent-harness",
+    "ai",
+    "cli"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "files": [
+    "extensions",
+    "skills",
+    "README.md",
+    "LICENSE",
+    "CHANGELOG.md"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ceulen-dev/ceulen.git"
+  },
+  "homepage": "https://github.com/ceulen-dev/ceulen#readme",
+  "bugs": "https://github.com/ceulen-dev/ceulen/issues",
+  "pi": {
+    "extensions": [
+      "./extensions"
+    ]
+  }
+}
