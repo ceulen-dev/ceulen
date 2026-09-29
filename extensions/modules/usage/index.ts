@@ -3,9 +3,10 @@ import { createHash } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { loadCwdEnvFilesIfTrusted, parseEnvText } from "../../lib/env.js";
 
 /** Single source of truth for User-Agent strings — matches package.json version. */
-const PI_SUB_VERSION: string = (() => {
+const CEULEN_VERSION: string = (() => {
   try {
     return JSON.parse(fs.readFileSync(new URL("../../../package.json", import.meta.url), "utf8")).version; // ceulen bundle root
   } catch {
@@ -13,76 +14,10 @@ const PI_SUB_VERSION: string = (() => {
   }
 })();
 
-/** Parse .env-style text into KEY→VALUE entries: `export ` prefix allowed,
- *  single/double quotes stripped, comment/blank/non-assignment lines ignored.
- *  No inline-comment stripping (a `#` in the value stays part of the value).
- *  Exported for tests. */
-export function parseEnvText(text: string): Record<string, string> {
-  const out: Record<string, string> = {};
-  for (const line of text.split(/\r?\n/)) {
-    const m = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
-    if (!m) continue;
-    let v = m[2].trim();
-    if ((v.startsWith('"') && v.endsWith('"')) || (v.startsWith("'") && v.endsWith("'"))) v = v.slice(1, -1);
-    out[m[1]] = v;
-  }
-  return out;
-}
-
-/** Read a .env-style file into entries; missing/unreadable → {} (optional). */
-function readEnvFile(file: string): Record<string, string> {
-  try {
-    return parseEnvText(fs.readFileSync(file, "utf8"));
-  } catch {
-    return {}; // optional file
-  }
-}
-
-/** Keys injected at import from global env files. Trusted-project cwd files
- *  may still override these (the pre-gating cwd-first precedence); values from
- *  the real environment are never touched by either pass. */
-const globalEnvFileKeys = new Set<string>();
-
-/** Import-time pass: ONLY global/PI_CODING_AGENT_DIR env files. Cwd .env files
- *  are untrusted repo content — loading them here would let any repo inject
- *  ROUTER_MGMT_TOKEN, COMMAND_CODE_BASE_URL, etc. They load in session_start
- *  behind ctx.isProjectTrusted() instead (see loadCwdEnvFilesIfTrusted). */
-function loadGlobalEnvFiles(): void {
-  const dirs = process.env.PI_CODING_AGENT_DIR
-    ? [process.env.PI_CODING_AGENT_DIR]
-    : [path.join(os.homedir(), ".pi", "agent"), path.join(os.homedir(), ".pi", "agents")];
-  for (const dir of dirs) {
-    for (const file of [path.join(dir, ".env.local"), path.join(dir, ".env")]) {
-      for (const [key, value] of Object.entries(readEnvFile(file))) {
-        if (process.env[key] === undefined) {
-          process.env[key] = value;
-          globalEnvFileKeys.add(key);
-        }
-      }
-    }
-  }
-}
-loadGlobalEnvFiles();
-
-let cwdEnvLoaded = false;
-
-/** session_start pass: ingest cwd .env.local/.env, but ONLY for trusted
- *  projects. Idempotent (first trusted session wins), first-wins per candidate
- *  order, and never overrides the real environment. */
-export function loadCwdEnvFilesIfTrusted(ctx: { isProjectTrusted?: () => boolean }): void {
-  if (cwdEnvLoaded || ctx.isProjectTrusted?.() !== true) return;
-  cwdEnvLoaded = true;
-  for (const file of [path.resolve(process.cwd(), ".env.local"), path.resolve(process.cwd(), ".env")]) {
-    for (const [key, value] of Object.entries(readEnvFile(file))) {
-      if (process.env[key] === undefined || globalEnvFileKeys.has(key)) process.env[key] = value;
-    }
-  }
-}
-
-const STATUS_KEY = "pi-sub";
-const MESSAGE_TYPE = "pi-sub-status";
+const STATUS_KEY = "ceulen-usage";
+const MESSAGE_TYPE = "ceulen-usage-status";
 /** /context panel message type — rendered inline in the transcript (OMP-style). */
-const MESSAGE_TYPE_CONTEXT = "pi-sub-context";
+const MESSAGE_TYPE_CONTEXT = "ceulen-usage-context";
 const USAGE_ENDPOINT = "https://chatgpt.com/backend-api/wham/usage";
 export const REFRESH_INTERVAL_MS = 60_000;
 const REFRESH_TTL_MS = 30_000;
@@ -168,7 +103,7 @@ interface SubscriptionAccountSnapshot {
   monthlyCredits?: number;
   // Balance currency — only "CNY" is special-cased (¥); undefined = USD ($).
   creditsCurrency?: string;
-  // Z.ai-only extras surfaced in the /sub detail view.
+  // Z.ai-only extras surfaced in the /usage detail view.
   mcpMonthly?: UsageWindow; // from TIME_LIMIT already present in the quota response
   usageBreakdown?: string; // per-model / per-tool summary line(s)
   lastActivity?: string;
@@ -610,7 +545,7 @@ async function fetchUsageFromPiAuth(entry: PiAuthEntry, signal?: AbortSignal): P
       Accept: "application/json",
       Authorization: `Bearer ${entry.access}`,
       "ChatGPT-Account-Id": accountId,
-      "User-Agent": `pi-sub/${PI_SUB_VERSION}`,
+      "User-Agent": `ceulen/${CEULEN_VERSION}`,
     },
     signal: combinedSignal,
   });
@@ -676,7 +611,7 @@ export async function fetchOpenCodeGoUsage(signal?: AbortSignal): Promise<Subscr
           headers: {
             Accept: "application/json",
             Authorization: `Bearer ${key}`,
-            "User-Agent": `pi-sub/${PI_SUB_VERSION}`,
+            "User-Agent": `ceulen/${CEULEN_VERSION}`,
           },
           signal: combinedSignal,
         });
@@ -856,7 +791,7 @@ async function fetchRouterUsage(signal?: AbortSignal, provider?: string): Promis
           };
         }
         // Usage command exists but is disabled for this key — keep the footer
-        // clean (endpoint display) and surface the hint in /sub detail only.
+        // clean (endpoint display) and surface the hint in /usage detail only.
         const hintAccount: SubscriptionAccountSnapshot = {
           ...baseAccount,
           usageBreakdown: `OmniRoute usage command is disabled for this router key — ` +
@@ -942,7 +877,7 @@ async function fetchCommandCodeUsage(signal?: AbortSignal): Promise<Subscription
     const headers = {
       Accept: "application/json",
       Authorization: `Bearer ${apiKey}`,
-      "User-Agent": `pi-sub/${PI_SUB_VERSION}`,
+      "User-Agent": `ceulen/${CEULEN_VERSION}`,
     };
     const response = await fetch(COMMAND_CODE_USAGE_URL, { headers, signal: combinedSignal });
     if (!response.ok) {
@@ -1136,7 +1071,7 @@ function zaiUsageAdapter(providerId: string, usageUrl: string, displayName: stri
       const headers = {
         Accept: "application/json",
         Authorization: `Bearer ${apiKey}`,
-        "User-Agent": `pi-sub/${PI_SUB_VERSION}`,
+        "User-Agent": `ceulen/${CEULEN_VERSION}`,
       };
       const response = await fetch(usageUrl, { headers, signal: combinedSignal });
 
@@ -1236,7 +1171,7 @@ export function supportedAdapter(model: ModelLike): SubscriptionProviderAdapter 
 }
 
 /** Strip everything up to and including the "Provider quota" section header
- *  so /sub breakdown never shows personal USD budget lines. */
+ *  so /usage breakdown never shows personal USD budget lines. */
 function providerQuotaSection(text: string): string | undefined {
   const idx = text.indexOf("Provider quota");
   if (idx < 0) return undefined;
@@ -1960,8 +1895,8 @@ export default function (pi: ExtensionAPI) {
     state.ctx = undefined;
   });
 
-  pi.registerCommand("sub", {
-    description: "Show subscription usage for the current supported model provider (use /sub refresh to force refresh).",
+  pi.registerCommand("usage", {
+    description: "Show subscription usage for the current supported model provider (use /usage refresh to force refresh).",
     getArgumentCompletions: (prefix) => {
       const items = ["refresh"]
         .filter((k) => k.startsWith(String(prefix || "").trim().toLowerCase()))

@@ -214,7 +214,7 @@ export function resolveVision(id: string, metadataVision: boolean): boolean {
 
 // Upstream connection slugs (OmniRoute ids are "<connection>/<model>") whose
 // reasoning_effort schema rejects "none" and "minimal". The `cmd` slug is an alias
-// pi-sub memory maps to the same upstream.
+// usage-module memory maps to the same upstream.
 const NO_DISABLE_PREFIX = /^(command-?code|cmd)[-/]/i;
 
 const FORMAT_TO_LEVEL_MAP: Record<string, Record<string, string | null>> = {

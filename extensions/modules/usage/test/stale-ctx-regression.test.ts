@@ -194,7 +194,7 @@ test("60s interval fires against an orphaned stale ctx and self-disarms (pi-exit
   }
 });
 
-test("/sub against an orphaned stale ctx disarms instead of throwing into the dispatcher", async () => {
+test("/usage against an orphaned stale ctx disarms instead of throwing into the dispatcher", async () => {
   const restoreFetch = stubFetch();
   try {
     const { pi, state } = makePiHarness();
@@ -202,10 +202,10 @@ test("/sub against an orphaned stale ctx disarms instead of throwing into the di
     assert.ok(state.refreshTimer);
     ctxB.invalidate(); // orphaned invalidation, no session_shutdown delivered
 
-    await pi.commands.sub.handler("", ctxB as never); // must not throw
+    await pi.commands.usage.handler("", ctxB as never); // must not throw
 
-    assert.equal(state.ctx, undefined, "stale /sub must disarm");
-    assert.equal(state.refreshTimer, undefined, "stale /sub must stop the interval");
+    assert.equal(state.ctx, undefined, "stale /usage must disarm");
+    assert.equal(state.refreshTimer, undefined, "stale /usage must stop the interval");
   } finally {
     restoreFetch();
   }

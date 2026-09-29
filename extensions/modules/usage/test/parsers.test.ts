@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   commandCodeWindowToUsageWindow,
-  parseEnvText,
   parseGenericUsage,
   parseOmniUsageText,
   routerUpstreamPrefix,
@@ -10,6 +9,7 @@ import {
   formatMonthlyCredits,
   jwtExpired,
 } from "../index.ts";
+import { parseEnvText } from "../../../lib/env.ts";
 
 // ── parseOmniUsageText — OmniRoute /api/usage/om-usage free-text report ──────
 

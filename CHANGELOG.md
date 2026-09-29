@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- **usage** (renamed from **sub**): the module and its command are now `/usage` (`/sub` survives only as the deprecated kill-switch key `"sub"` → treated as `"usage"`). Status-bar key is `ceulen-usage`; message customTypes are `ceulen-usage-status` / `ceulen-usage-context`; User-Agent is `ceulen/x.y.z`. Sessions recorded before this change replay the old `pi-sub-*` messages as raw text (the renderer was renamed with the module).
+- **bundle**: new cross-module duplicate-registration guard — all ceulen modules share one extension object, where a repeated name silently overwrites; a claim by a DIFFERENT module now throws at load (same-module re-claims stay legal, e.g. router's runtime provider refresh). Env ingestion (`.env.local`/`.env`, trust-gated) moved to `extensions/lib/env.ts` — bundle infrastructure, no longer exported from a feature module.
 - **bundle**: trusted cwd `.env` ingestion (`loadCwdEnvFilesIfTrusted`) is now also registered at the bundle entry, before every module's `session_start` — sub previously loaded it in its own handler, which runs after router's, so a trusted repo's `.env`-provided `ROUTER_BASE_URL`/`ROUTER_ENABLE_REASONING` was invisible to router for the entire first session.
 - **sub**: backported the nightly-review security fix from pi-sub — cwd `.env.local`/`.env` are no longer ingested at import time (an untrusted checkout could inject `ROUTER_MGMT_TOKEN` etc.); they now load in `session_start` only behind `ctx.isProjectTrusted()`, with global agent-dir env files still injected at import and trusted-cwd files overriding only those. Also backported the expired-Codex-JWT fix: a plan label no longer renders from a token whose `exp` has passed (shows `expired`).
 

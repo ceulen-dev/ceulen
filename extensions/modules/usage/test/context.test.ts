@@ -243,7 +243,7 @@ test("/context handler posts a transcript message; renderer tints glyphs", async
   (extension as unknown as (pi: unknown) => void)(fakePi);
   const handler = commands.context?.handler;
   assert.ok(handler, "/context registered");
-  assert.ok(renderers["pi-sub-context"], "transcript renderer registered");
+  assert.ok(renderers["ceulen-usage-context"], "transcript renderer registered");
 
   const mkCtx = (mode: string) => ({
     mode,
@@ -257,14 +257,14 @@ test("/context handler posts a transcript message; renderer tints glyphs", async
   // TUI: panel posted as a displayable transcript message carrying the lines.
   await handler!("", mkCtx("tui"));
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].customType, "pi-sub-context");
+  assert.equal(sent[0].customType, "ceulen-usage-context");
   assert.equal(sent[0].display, true, "message is displayed in the transcript");
   const lines = sent[0].details?.lines ?? [];
   assert.ok(lines.some((l) => l.startsWith(" ⛁ System prompt:")), lines.join("\n"));
   assert.ok(lines.some((l) => l.startsWith(" ⛶ Free space:")));
 
   // Renderer: colors the glyph, keeps the body plain, and clamps to width.
-  const comp = renderers["pi-sub-context"]!({ details: { lines: [" ⛁ System prompt: 1K tokens (1.0%)"] } }, {}, { fg: (c: string, s: string) => `<${c}>${s}</>` });
+  const comp = renderers["ceulen-usage-context"]!({ details: { lines: [" ⛁ System prompt: 1K tokens (1.0%)"] } }, {}, { fg: (c: string, s: string) => `<${c}>${s}</>` });
   const out = comp!.render(200);
   assert.ok(out[0].includes("<accent>⛁</>"), out[0]);
   assert.ok(out[0].includes("System prompt: 1K tokens"), out[0]);
@@ -330,7 +330,7 @@ test("/context handler posts a transcript message; renderer tints glyphs", async
   (extension as unknown as (pi: unknown) => void)(fakePi);
   const handler = commands.context?.handler;
   assert.ok(handler, "/context registered");
-  assert.ok(renderers["pi-sub-context"], "transcript renderer registered");
+  assert.ok(renderers["ceulen-usage-context"], "transcript renderer registered");
 
   const mkCtx = (mode: string) => ({
     mode,
@@ -344,14 +344,14 @@ test("/context handler posts a transcript message; renderer tints glyphs", async
   // TUI: panel posted as a displayable transcript message carrying the lines.
   await handler!("", mkCtx("tui"));
   assert.equal(sent.length, 1);
-  assert.equal(sent[0].customType, "pi-sub-context");
+  assert.equal(sent[0].customType, "ceulen-usage-context");
   assert.equal(sent[0].display, true, "message is displayed in the transcript");
   const lines = sent[0].details?.lines ?? [];
   assert.ok(lines.some((l) => l.startsWith(" ⛁ System prompt:")), lines.join("\n"));
   assert.ok(lines.some((l) => l.startsWith(" ⛶ Free space:")));
 
   // Renderer: colors the glyph, keeps the body plain, and clamps to width.
-  const comp = renderers["pi-sub-context"]!({ details: { lines: [" ⛁ System prompt: 1K tokens (1.0%)"] } }, {}, { fg: (c: string, s: string) => `<${c}>${s}</>` });
+  const comp = renderers["ceulen-usage-context"]!({ details: { lines: [" ⛁ System prompt: 1K tokens (1.0%)"] } }, {}, { fg: (c: string, s: string) => `<${c}>${s}</>` });
   const out = comp!.render(200);
   assert.ok(out[0].includes("<accent>⛁</>"), out[0]);
   assert.ok(out[0].includes("System prompt: 1K tokens"), out[0]);

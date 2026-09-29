@@ -5,7 +5,7 @@ import path from "node:path";
 import { after, before, test } from "node:test";
 import { fetchOpenCodeGoUsage, opcWindowToUsageWindow } from "../index.ts";
 
-const AUTH_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "pi-sub-opc-test-"));
+const AUTH_DIR = fs.mkdtempSync(path.join(os.tmpdir(), "ceulen-usage-opc-test-"));
 const AUTH_PATH = path.join(AUTH_DIR, "auth.json");
 const AUTH_ENV = process.env.PI_CODING_AGENT_DIR;
 

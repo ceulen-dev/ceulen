@@ -3,12 +3,10 @@ import { test } from "node:test";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import {
-  accountFromPiAuth,
-  loadCwdEnvFilesIfTrusted,
-} from "../index.ts";
+import { accountFromPiAuth, REFRESH_INTERVAL_MS } from "../index.ts";
+import { loadCwdEnvFilesIfTrusted } from "../../../lib/env.ts";
 
-const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), "pi-sub-env-"));
+const tmpdir = () => fs.mkdtempSync(path.join(os.tmpdir(), "ceulen-usage-env-"));
 
 function makeCtx(trusted: boolean) {
   return { isProjectTrusted: () => trusted };
@@ -72,7 +70,7 @@ test("trusted cwd .env overrides a key injected by the global agent-dir pass (cw
   delete process.env.PI_SUB_PROBE_GLOBAL;
   process.chdir(cwdDir);
   try {
-    const fresh = await import(`../index.ts?probe-global-${Date.now()}`);
+    const fresh = await import(`../../../lib/env.ts?probe-global-${Date.now()}`);
     assert.equal(process.env.PI_SUB_PROBE_GLOBAL, "from-global"); // import-time global pass ran
     fresh.loadCwdEnvFilesIfTrusted(makeCtx(true));
     assert.equal(process.env.PI_SUB_PROBE_GLOBAL, "from-cwd"); // trusted cwd file overrides the global-file value

@@ -4,7 +4,7 @@
   ],
   "exclude": [
     "node_modules",
-    "extensions/modules/sub/test",
+    "extensions/modules/usage/test",
     "extensions/modules/ponytail/test"
   ],
   "compilerOptions": {
