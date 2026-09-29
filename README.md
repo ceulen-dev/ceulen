@@ -37,6 +37,7 @@ Registers the generic `router` provider (discovers models via `GET /v1/models`, 
 ### sub — subscription-usage footer
 
 A status footer showing subscription/provider usage (5-hour, weekly, monthly windows, credits) for known providers, plus the **Yardmaster usage display** below. Commands: `/sub` (usage detail), `/context` (context-window detail).
+
 ### Yardmaster usage
 
 If your `router.baseUrl` points at a yardmaster instance, the sub footer shows your proxy usage directly: it polls `GET <router.baseUrl>/usage?provider=<prefix>` (falling back to the aggregate `GET /usage`, and to OmniRoute's `om-usage` endpoint when the JSON form isn't served) and renders remaining % per window plus credit balance, e.g.

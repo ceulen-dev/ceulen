@@ -14,7 +14,7 @@ import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import routerModule from "./modules/router/index.ts";
-import subModule from "./modules/sub/index.ts";
+import subModule, { loadCwdEnvFilesIfTrusted } from "./modules/sub/index.ts";
 import ponytailModule from "./modules/ponytail/index.ts";
 
 // ponytail: module registry grows by append — one object per module, loader
@@ -45,6 +45,15 @@ export default function ceulen(pi: ExtensionAPI) {
         "info",
       );
     },
+  });
+
+  // Trusted cwd .env ingestion must precede every module's session_start:
+  // router reads ROUTER_BASE_URL/ROUTER_ENABLE_REASONING in its own handler, so
+  // a trusted repo's .env loaded any later is invisible for the whole first
+  // session. Registered first (handlers fire in registration order); sub keeps
+  // its own idempotent call as a safety net when this entry is bypassed.
+  pi.on("session_start", async (_event, ctx) => {
+    loadCwdEnvFilesIfTrusted(ctx);
   });
 
   for (const m of MODULES) {

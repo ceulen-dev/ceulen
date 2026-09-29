@@ -60,10 +60,10 @@ Resolution: env var > config file > `full`.
 
 ## Update
 
-Pi packages update by reinstalling:
+Pi packages update by reinstalling the bundle:
 
 ```bash
-pi install npm:@bacnh85/pi-ponytail
+pi install npm:ceulen
 ```
 
 Restart pi to load the new version.

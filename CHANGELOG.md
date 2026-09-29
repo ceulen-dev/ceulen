@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- **bundle**: trusted cwd `.env` ingestion (`loadCwdEnvFilesIfTrusted`) is now also registered at the bundle entry, before every module's `session_start` — sub previously loaded it in its own handler, which runs after router's, so a trusted repo's `.env`-provided `ROUTER_BASE_URL`/`ROUTER_ENABLE_REASONING` was invisible to router for the entire first session.
 - **sub**: backported the nightly-review security fix from pi-sub — cwd `.env.local`/`.env` are no longer ingested at import time (an untrusted checkout could inject `ROUTER_MGMT_TOKEN` etc.); they now load in `session_start` only behind `ctx.isProjectTrusted()`, with global agent-dir env files still injected at import and trusted-cwd files overriding only those. Also backported the expired-Codex-JWT fix: a plan label no longer renders from a token whose `exp` has passed (shows `expired`).
 
 ## 0.3.0 — 2026-09-28
