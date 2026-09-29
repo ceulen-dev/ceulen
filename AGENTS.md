@@ -34,7 +34,7 @@ skills/                  skill directories shipped with the package (contributed
 ## Commands
 
 - `npm install` — set up (dev deps only: tsx, typescript, @types/node, pi peer packages)
-- `npm run typecheck` — `tsc --noEmit` over `extensions/**` (usage tests excluded: inherited from pi-sub, which never typechecked its tests; they run under tsx)
+- `npm run typecheck` — `tsc --noEmit` over `extensions/**` (usage tests excluded: loose harness stubs don't typecheck; they run under tsx)
 - `npm test` — router unit + guard suites, usage suites, ponytail suites (node --test via tsx)
 - `npm pack --dry-run` — verify the shipped file list (extensions/, skills/, README, LICENSE, CHANGELOG; no docs/)
 
@@ -48,7 +48,7 @@ With `router.baseUrl` set to a yardmaster instance, the usage module polls `GET 
 
 ## Ponytail config (ponytail module)
 
-Ponytail resolves its default mode from `PONYTAIL_DEFAULT_MODE`, then `~/.config/ponytail/config.json` (`{"defaultMode": "full", "quietStartup": false, "hideStatus": false}`; XDG_CONFIG_HOME respected), then `full`. `PONYTAIL_HIDE_STATUS`, `PONYTAIL_QUIET_STARTUP`, `PONYTAIL_SUBAGENT_SCOPE=off` override the config booleans. Config surface is deliberately NOT namespaced to `ceulen.*` — existing pi-ponytail users keep their config.
+Ponytail resolves its default mode from `PONYTAIL_DEFAULT_MODE`, then `~/.config/ponytail/config.json` (`{"defaultMode": "full", "quietStartup": false, "hideStatus": false}`; XDG_CONFIG_HOME respected), then `full`. `PONYTAIL_HIDE_STATUS`, `PONYTAIL_QUIET_STARTUP`, `PONYTAIL_SUBAGENT_SCOPE=off` override the config booleans. Config surface is deliberately NOT namespaced to `ceulen.*` — the `ponytail.*`/`PONYTAIL_*` names are the module's stable contract.
 
 ## Release flow
 

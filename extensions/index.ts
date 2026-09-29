@@ -1,8 +1,8 @@
 /**
  * ceulen — the Pi coding agent, fully dressed.
  *
- * One bundle extension: consolidates the pi-extensions fleet into a single
- * entry with per-module kill-switches. Every module registers only through
+ * One bundle extension: feature modules loaded by a single entry, each with
+ * a per-module kill-switch. Every module registers only through
  * Pi's public extension API — no core patches, so upstream Pi upgrades stay
  * drop-in.
  *
