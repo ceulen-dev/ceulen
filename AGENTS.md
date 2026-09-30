@@ -55,7 +55,7 @@ Ponytail resolves its default mode from `PONYTAIL_DEFAULT_MODE`, then `~/.config
 
 ## Release flow
 
-Bump `version` in `package.json` → git tag → push; the GitHub release triggers `publish.yml` (npm publish, provenance on). CI (`ci.yml`) runs typecheck + tests on every push/PR.
+Bump `version` in `package.json` → commit → `git tag vX.Y.Z` → push → `gh release create vX.Y.Z` — the GitHub **release** (not the tag push) triggers `publish.yml` (npm publish, provenance on). CI (`ci.yml`) runs typecheck + tests on every push/PR.
 
 ## Central config panel (config module)
 
