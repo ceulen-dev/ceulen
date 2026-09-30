@@ -83,7 +83,7 @@ describe("ShapeEditor rendering", () => {
 
   it("status-bearing shapes show the live status; band shows a blank reserved row without data", () => {
     const withData = rendered(editor("box", "hi", { model: "GLM-5.3", cwd: "ceulen", pct: 42 }), 50).map(plain);
-    assert.ok(withData[0]!.includes("GLM-5.3") && withData[0]!.includes("42%"), withData[0]);
+    assert.ok(withData[0]!.includes("GLM-5.3") && withData[0]!.includes("42.0%"), withData[0]);
     const empty = rendered(editor("band"), 50).map(plain);
     assert.equal(empty[0]!.trim(), "", "band reserves its row (blank, full width)");
   });

@@ -55,10 +55,23 @@ right in the panel (rendered through the same chrome builders the live editor
 uses — no drift); Enter applies it to the running editor immediately — text,
 autocomplete and all app keybindings intact (the custom editor extends Pi's
 `CustomEditor`) — and persists `composer.shape` to the global settings.json.
-Status-bearing shapes (Band, Box, Claude, Top Rule Dock) show live session
-data — model · directory · context %; the working spinner stays visible in
-every shape. **Core module**: always loaded, no kill-switch — a
-half-configured composer is worse than none.
+Status-bearing shapes (Band, Box, Claude, Top Rule Dock) show OMP's stock
+status split, every segment carrying its icon (OMP's glyph set) — left group:
+`π` brand · `(provider) model (thinking level)` · `📁` `~/`-relative directory · `⑂` git branch with
+working-tree counts (`*3` unstaged / `+1` staged / `?2` untracked, warning
+when dirty) · `⚡` Generation Rate (last response); right group: the context
+window (`0.0%/1.0M (auto)`, color-stepped at 70%/90%). On the band the fill
+covers the status chip only (the context figure sits on the bare surface), so
+the band reads as a status strip rather than a title bar. On those
+shapes the module also **replaces Pi's built-in footer** so the same info is
+not printed twice: the band additionally carries the session token stats
+(`↑40k ↓44 R64 CH0.2%`) and provider quota windows (`(router) R:59%/2H3M`,
+minute-precision countdowns; usage module feeds it via a shared store), so
+the narrowed footer keeps only the other extensions' status lines (rtk,
+serena, ux, accordion, …). Shapes without an embedded band (Pi, Borderless,
+Compact Field, Accent Rail) keep Pi's native footer untouched. The working
+spinner stays visible in every shape. **Core module**: always loaded, no
+kill-switch — a half-configured composer is worse than none.
 
 - Config: `composer.shape` in `~/.pi/agent/settings.json` — via `/config` (Appearance tab)
 

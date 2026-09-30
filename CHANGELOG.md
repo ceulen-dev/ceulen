@@ -1,24 +1,6 @@
 # Changelog
 
-## 0.5.1 — 2026-09-30
-
-- Widened pi peer range from `^0.99.1` to `>=0.99.1 <0.101.0`: caret on a
-  0.x dependency is patch-only (≥0.99.1 <0.100.0), too narrow for pi's fast
-  minor releases. No other changes.
-
-## 0.5.0 — 2026-09-30
-
-- **pi 0.99.1 compatibility**: peer dependencies widened from
-  `>=0.80.8 <0.88.0` to `^0.99.1` for both
-  `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` (range
-  corrected to `>=0.99.1 <0.101.0` in 0.5.1). No code changes — all surfaces verified:
-  registration API (guarded() claims), composer `CustomEditor` duck-typing,
-  theme Proxy/`setTheme` semantics, `session_start` re-fire, trust.json
-  gating, jiti extension loading (the 0.99 tsx→type-stripping switch affects
-  pi's own build only). 306 tests + live `pi --mode rpc` smoke pass.
-
 ## Unreleased
-
 - **composer** (new CORE module): Composer Shape for the input editor with
   OMP's full vocabulary and copy — **Status Band** (default) · **Rounded Box**
   · **Claude Code** · **Pi** · **Borderless** · **Top Rule Dock** · **Compact
@@ -30,9 +12,19 @@
   and filled surfaces are composed by re-laying the editor out at the
   shape's content width and wrapping each row — the cursor marker survives,
   so wrapping and hardware-cursor placement stay exact. Status-bearing
-  shapes show live model · cwd · context-%; the working spinner stays
-  visible in every shape. Always on: no kill-switch (a half-configured
-  composer is worse than none).
+  shapes show OMP's stock status split with icons on every segment — left
+  group: `π` brand · `(provider) model (thinking level)` (level live via `thinking_level_select`; `off` hidden; the provider prefix is skipped when the display name already carries it) · `📁` cwd · `⑂` branch + working-tree counts
+  (`*N`/`+N`/`?N`, warning when dirty) · provider quota windows (`(router)
+  R:59%/2H3M`, fed by the usage module) · session token stats (`↑40k ↓44 R64
+  CH0.2%`) · `⚡` Generation Rate; right group: the context window
+  (`0.0%/1.0M (auto)`, stepped at 70%/90%). The band fills the
+  status chip only, not the whole line. On status-bearing
+  shapes the module replaces Pi's built-in footer with a narrowed one —
+  the other extensions' statuses only, since cwd/branch/
+  model/context%/token-stats/quota-windows are already in the band;
+  non-embedding shapes keep the
+  native footer. The working spinner stays visible in every shape. Always on:
+  no kill-switch (a half-configured composer is worse than none).
 - **config**: rows can carry a `previewLines` hook — a read-only preview
   block under the rows pane / selection menu that follows the highlighted
   option (OMP's settings-screen preview window).
@@ -133,6 +125,23 @@
 - **bundle**: new cross-module duplicate-registration guard — all ceulen modules share one extension object, where a repeated name silently overwrites; a claim by a DIFFERENT module now throws at load (same-module re-claims stay legal, e.g. router's runtime provider refresh). Env ingestion (`.env.local`/`.env`, trust-gated) moved to `extensions/lib/env.ts` — bundle infrastructure, no longer exported from a feature module.
 - **bundle**: trusted cwd `.env` ingestion (`loadCwdEnvFilesIfTrusted`) is now also registered at the bundle entry, before every module's `session_start` — sub previously loaded it in its own handler, which runs after router's, so a trusted repo's `.env`-provided `ROUTER_BASE_URL`/`ROUTER_ENABLE_REASONING` was invisible to router for the entire first session.
 - **sub**: backported the nightly-review security fix from pi-sub — cwd `.env.local`/`.env` are no longer ingested at import time (an untrusted checkout could inject `ROUTER_MGMT_TOKEN` etc.); they now load in `session_start` only behind `ctx.isProjectTrusted()`, with global agent-dir env files still injected at import and trusted-cwd files overriding only those. Also backported the expired-Codex-JWT fix: a plan label no longer renders from a token whose `exp` has passed (shows `expired`).
+
+## 0.5.1 — 2026-09-30
+
+- Widened pi peer range from `^0.99.1` to `>=0.99.1 <0.101.0`: caret on a
+  0.x dependency is patch-only (≥0.99.1 <0.100.0), too narrow for pi's fast
+  minor releases. No other changes.
+
+## 0.5.0 — 2026-09-30
+
+- **pi 0.99.1 compatibility**: peer dependencies widened from
+  `>=0.80.8 <0.88.0` to `^0.99.1` for both
+  `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` (range
+  corrected to `>=0.99.1 <0.101.0` in 0.5.1). No code changes — all surfaces verified:
+  registration API (guarded() claims), composer `CustomEditor` duck-typing,
+  theme Proxy/`setTheme` semantics, `session_start` re-fire, trust.json
+  gating, jiti extension loading (the 0.99 tsx→type-stripping switch affects
+  pi's own build only). 306 tests + live `pi --mode rpc` smoke pass.
 
 ## 0.3.0 — 2026-09-28
 

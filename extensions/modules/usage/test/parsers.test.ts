@@ -8,11 +8,24 @@ import {
   tokPerSecLabel,
   formatMonthlyCredits,
   jwtExpired,
+  usageBandItem,
 } from "../index.ts";
 import { parseEnvText } from "../../../lib/env.ts";
 
 // ── parseOmniUsageText — OmniRoute /api/usage/om-usage free-text report ──────
 
+test("usageBandItem: router renders the short (router) label + windows", () => {
+  const item = usageBandItem(
+    { fiveHour: { remaining: 59, remainingLabel: "2H3M" }, weekly: { remaining: 99, remainingLabel: "2D" } },
+    "Router",
+  );
+  assert.equal(item, "(router) R:59%/2H3M W:99%/2D");
+  // Non-router providers keep their display name, lowercased.
+  assert.equal(usageBandItem({ fiveHour: { remaining: 80, remainingLabel: "3H" } }, "Z.ai"), "z.ai R:80%/3H");
+  // No windows → no item (the band drops the segment entirely).
+  assert.equal(usageBandItem({}, "Router"), undefined);
+  assert.equal(usageBandItem(undefined, "Router"), undefined);
+});
 test("om-usage: full report parses all four windows", () => {
   const p = parseOmniUsageText(
     [

@@ -7,18 +7,26 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { CURSOR_MARKER, visibleWidth } from "@earendil-works/pi-tui";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
+  composeStatus,
   contentWidth,
   DEFAULT_SHAPE,
+  formatCompact,
+  ICONS,
+  parseGitStats,
   gutterWidth,
   IDENTITY_THEME,
   isShapeId,
   padRow,
   previewShape,
+  readGitBranch,
   SHAPE_IDS,
   SHAPES,
   shapeById,
-  statusLine,
+  statusSegments,
   surfacePainter,
   type ShapeTheme,
 } from "../lib/shapes.ts";
@@ -119,7 +127,7 @@ describe("chrome rendering through the shared builders", () => {
 
   it("status-bearing shapes show the live status line; band reserves a blank row when empty", () => {
     const box = previewShape("box", 40, th, { model: "GLM-5.3", cwd: "ceulen", pct: 42 }).map(plain);
-    assert.ok(box[0]!.includes("GLM-5.3") && box[0]!.includes("ceulen") && box[0]!.includes("42%"), box[0]);
+    assert.ok(box[0]!.includes("GLM-5.3") && box[0]!.includes("ceulen") && box[0]!.includes("42.0%"), box[0]);
     const bandEmpty = previewShape("band", 40, th).map(plain);
     assert.equal(bandEmpty[0]!.trim(), "", "band row reserved (blank) without data");
     const bandFull = previewShape("band", 40, th, { model: "M" }).map(plain);
@@ -136,13 +144,200 @@ describe("chrome rendering through the shared builders", () => {
   });
 });
 
+describe("git branch read (.git/HEAD)", () => {
+  const withTmp = (fn: (dir: string) => void) => {
+    const dir = mkdtempSync(join(tmpdir(), "ceulen-branch-"));
+    try {
+      fn(dir);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  };
+
+  it("reads a normal repo's HEAD branch and walks up from a subdirectory", () => {
+    withTmp((dir) => {
+      mkdirSync(join(dir, ".git"), { recursive: true });
+      writeFileSync(join(dir, ".git", "HEAD"), "ref: refs/heads/main\n");
+      const sub = join(dir, "packages", "app");
+      mkdirSync(sub, { recursive: true });
+      assert.equal(readGitBranch(dir), "main");
+      assert.equal(readGitBranch(sub), "main", "walk-up finds the repo root");
+    });
+  });
+
+  it("resolves a linked worktree (.git is a gitdir file)", () => {
+    withTmp((dir) => {
+      const realGit = join(dir, "real-git");
+      mkdirSync(realGit, { recursive: true });
+      writeFileSync(join(realGit, "HEAD"), "ref: refs/heads/feature/x\n");
+      const wt = join(dir, "worktree");
+      mkdirSync(wt, { recursive: true });
+      writeFileSync(join(wt, ".git"), `gitdir: ${realGit}\n`);
+      assert.equal(readGitBranch(wt), "feature/x");
+    });
+  });
+
+  it("detached HEAD and non-repos degrade safely", () => {
+    withTmp((dir) => {
+      mkdirSync(join(dir, ".git"), { recursive: true });
+      writeFileSync(join(dir, ".git", "HEAD"), "0123456789abcdef0123456789abcdef01234567\n");
+      assert.equal(readGitBranch(dir), "detached");
+    });
+    withTmp((dir) => {
+      assert.equal(readGitBranch(dir), null, "no repo → null");
+    });
+  });
+});
+
 describe("status line + surface fill", () => {
-  it("statusLine joins model · dir · pct with theme styling and skips blanks", () => {
-    assert.equal(plain(statusLine({ model: "M", cwd: "d", pct: 42.6 }, th)), "M · d · 43%");
-    assert.equal(plain(statusLine({ model: "M" }, th)), "M");
-    assert.equal(statusLine({}, th), "");
-    assert.equal(statusLine(undefined, th), "");
-    assert.equal(plain(statusLine({ model: " ", cwd: "x" }, th)), "x", "blank segments skipped");
+  it("statusSegments splits OMP's stock groups: identity left, context window right", () => {
+    const s = statusSegments({ model: "M", provider: "router", thinkingLevel: "max", cwd: "~/dev/ceulen", branch: "main", rate: 46, pct: 42.6, window: 1_000_000 }, th);
+    assert.equal(plain(s.left), "π · (router) M (max) · 📁 ~/dev/ceulen · ⑂ main · ⚡ 46 tok/s");
+    assert.equal(plain(s.right), "42.6%/1.0M");
+    // Every segment carries its icon (OMP's glyph set).
+    assert.ok(plain(s.left).startsWith("π "), "brand leads the group");
+    assert.ok(plain(s.left).includes("📁 ~/dev/ceulen"), "folder icon on the dir");
+    assert.ok(plain(s.left).includes("⑂ main"), "branch icon on the git segment");
+    assert.ok(plain(s.left).includes("⚡ 46 tok/s"), "throughput icon on the rate");
+    // Blanks drop out — never wrong, just shorter. The brand only leads a
+    // group that exists, so an empty session keeps the band blank.
+    assert.equal(plain(statusSegments({ model: "M" }, th).left), "π · M");
+    assert.equal(statusSegments({}, th).left, "", "no data → no brand");
+    assert.equal(statusSegments(undefined, th).left, "");
+    assert.equal(statusSegments(undefined, th).right, "");
+    assert.equal(plain(statusSegments({ model: " ", cwd: "x" }, th).left), "π · 📁 x", "blank segments skipped");
+    // Branch without a cwd still renders; detached renders as-is.
+    assert.equal(plain(statusSegments({ branch: "detached" }, th).left), "π · ⑂ detached");
+    // Spinner takes the brand slot while a turn runs.
+    assert.equal(plain(statusSegments({ model: "M" }, th, "⟳").left), "⟳ · M");
+  });
+
+  it("model segment: (provider) prefix skips when the name carries it; off/blank level dropped", () => {
+    // Direct provider whose display name already starts with provider/ — no double prefix.
+    assert.equal(plain(statusSegments({ model: "zai/glm-5.3", provider: "zai" }, th).left), "π · zai/glm-5.3");
+    // Prefix is case-insensitive on the check, verbatim on output.
+    assert.equal(plain(statusSegments({ model: "Zai/GLM", provider: "zai" }, th).left), "π · Zai/GLM");
+    assert.equal(plain(statusSegments({ model: "M", provider: "zai" }, th).left), "π · (zai) M");
+    // `off` and blank levels render nothing, not "(off)".
+    assert.equal(plain(statusSegments({ model: "M", thinkingLevel: "off" }, th).left), "π · M");
+    assert.equal(plain(statusSegments({ model: "M", thinkingLevel: "  " }, th).left), "π · M");
+    // Level without a model never renders alone.
+    assert.equal(statusSegments({ thinkingLevel: "max" }, th).left, "");
+  });
+
+  it("usage + stats segments sit next to git (OMP's segment order), tone-stepped", () => {
+    const s = statusSegments(
+      { model: "M", provider: "router", thinkingLevel: "high", branch: "main", git: { staged: 1, unstaged: 10, untracked: 4 }, usage: "(router) R:59%/2H3M W:99%/2D3H", stats: "↑1.9M ↓377k R69M CH99.7%", rate: 46 },
+      th,
+    );
+    const left = plain(s.left);
+    // OMP order: identity → path → git → usage/counters → throughput.
+    assert.equal(left, "π · (router) M (high) · ⑂ main *10 +1 ?4 · (router) R:59%/2H3M W:99%/2D3H · ↑1.9M ↓377k R69M CH99.7% · ⚡ 46 tok/s");
+    // Quota tone steps with the tightest window (usage module decides).
+    const stepping: ShapeTheme = {
+      ...th,
+      warn: (t) => `W(${t})`,
+      error: (t) => `E(${t})`,
+    };
+    assert.equal(plain(statusSegments({ usage: "(router) R:59%/2H3M", usageTone: "warning" }, stepping).left), "π · W((router) R:59%/2H3M)");
+    assert.equal(plain(statusSegments({ usage: "(router) R:9%/1M", usageTone: "error" }, stepping).left), "π · E((router) R:9%/1M)");
+    assert.equal(plain(statusSegments({ usage: "(router) R:59%/2H3M", usageTone: "dim" }, stepping).left), "π · (router) R:59%/2H3M");
+    // Missing figures drop their segment — never wrong, just shorter.
+    assert.equal(plain(statusSegments({ model: "M", usage: "  " }, th).left), "π · M");
+    assert.equal(plain(statusSegments({ model: "M", stats: "" }, th).left), "π · M");
+  });
+
+  it("context window color-steps like pi's footer (>70 warn, >90 error)", () => {
+    const seen = { warn: 0, error: 0 };
+    const stepping: ShapeTheme = {
+      ...th,
+      warn: (s) => (seen.warn++, s),
+      error: (s) => (seen.error++, s),
+    };
+    assert.equal(plain(statusSegments({ pct: 42, window: 200_000 }, stepping).right), "42.0%/200k");
+    assert.equal(seen.warn, 0);
+    assert.equal(plain(statusSegments({ pct: 75, window: 200_000 }, stepping).right), "75.0%/200k");
+    assert.equal(seen.warn, 1);
+    assert.equal(plain(statusSegments({ pct: 95, window: 200_000 }, stepping).right), "95.0%/200k");
+    assert.equal(seen.error, 1);
+    // Unknown pct with a known window shows the window alone.
+    assert.equal(plain(statusSegments({ pct: null, window: 200_000 }, th).right), "200k/?");
+    assert.equal(statusSegments({}, th).right, "");
+    // pi's `(auto)` compaction marker rides the context figure (footer parity).
+    assert.equal(plain(statusSegments({ pct: 42, window: 200_000, autoCompact: true }, th).right), "42.0%/200k (auto)");
+    assert.equal(plain(statusSegments({ pct: 95, window: 200_000, autoCompact: true }, stepping).right), "95.0%/200k (auto)");
+  });
+
+  it("composeStatus justifies the right group; the left group yields first when narrow", () => {
+    assert.equal(plain(composeStatus("L", "R", 10)), "L        R");
+    assert.equal(plain(composeStatus("", "R", 10)), "R");
+    assert.equal(plain(composeStatus("L", "", 10)), "L");
+    // OMP priority: the context window survives; identity truncates into it.
+    assert.equal(plain(composeStatus("LLLLLL", "RR", 6)), "LL… RR");
+    assert.equal(plain(composeStatus("LLLLLL", "RRRR", 5)), "RRRR", "right alone when the left cannot fit");
+  });
+
+  it("formatCompact matches pi-footer/OMP token figures", () => {
+    assert.equal(formatCompact(0), "0");
+    assert.equal(formatCompact(999), "999");
+    assert.equal(formatCompact(2_500), "2.5k");
+    assert.equal(formatCompact(200_000), "200k");
+    assert.equal(formatCompact(1_000_000), "1.0M");
+    assert.equal(formatCompact(12_000_000), "12M");
+    assert.equal(formatCompact(Number.NaN), "0");
+  });
+
+  it("status chips/bands carry dir, branch and the context window", () => {
+    const data = { model: "M", cwd: "~/dev/ceulen", branch: "main", pct: 42.6, window: 1_000_000 };
+    const band = previewShape("band", 60, th, data).map(plain)[0]!;
+    assert.ok(band.includes("📁 ~/dev/ceulen") && band.includes("⑂ main"), band);
+    assert.ok(band.includes("42.6%/1.0M"), band);
+    // Right group is justified to the band's right edge (before the closing cap cells).
+    assert.ok(band.trimEnd().endsWith("42.6%/1.0M"), band);
+    const box = previewShape("box", 60, th, data).map(plain)[0]!;
+    assert.ok(box.includes("📁 ~/dev/ceulen") && box.includes("42.6%/1.0M") && box.endsWith("╮"), box);
+  });
+
+  it("band fills the status chip only, not the whole line (OMP's band)", () => {
+    // Sentinel fill makes the filled span explicit and implementation-agnostic.
+    const theme: ShapeTheme = { ...th, fill: (s) => `⟦${s}⟧` };
+    const c = { w: 80, hidden: 0, theme, data: { model: "M", cwd: "~/x", branch: "main", pct: 42, window: 1_000_000 } };
+    const line = shapeById("band").top!(c as never)!;
+    const filled = line.slice(line.indexOf("⟦") + 1, line.indexOf("⟧"));
+    assert.ok(filled.includes("main"), `identity is filled: ${filled}`);
+    assert.ok(!filled.includes("42.0%/1.0M"), `context figure stays on the bare surface: ${filled}`);
+    // The context figure survives OUTSIDE the chip, and the line is still full width.
+    assert.equal(visibleWidth(line), 80, "band still spans the full width");
+    assert.ok(plain(line).includes("42.0%/1.0M"), plain(line));
+    assert.ok(plain(line).indexOf("⟧") < plain(line).indexOf("42.0%/1.0M"), "fill ends before the context figure");
+  });
+
+  it("git segment renders OMP's indicators and goes warning when dirty", () => {
+    assert.equal(plain(statusSegments({ branch: "main" }, th).left), "π · ⑂ main", "clean tree: branch only");
+    const dirty = statusSegments({ branch: "main", git: { staged: 1, unstaged: 3, untracked: 2 } }, th).left;
+    assert.ok(plain(dirty).endsWith("⑂ main *3 +1 ?2"), plain(dirty));
+    // Dirty renders through the warning hook (OMP's statusLineGitDirty).
+    let warned = 0;
+    const th2: ShapeTheme = { ...th, warn: (s) => (warned++, s) };
+    statusSegments({ branch: "main", git: { staged: 0, unstaged: 1, untracked: 0 } }, th2);
+    assert.equal(warned, 1, "dirty tree warns");
+    assert.equal(plain(statusSegments({ branch: "main", git: { staged: 0, unstaged: 0, untracked: 0 } }, th2).left), "π · ⑂ main");
+    assert.equal(warned, 1, "clean tree does not warn again");
+  });
+
+  it("parseGitStats counts porcelain XY states like OMP's indicators", () => {
+    const porcelain = [
+      " M src/a.ts",
+      "M  src/b.ts",
+      "MM src/c.ts",
+      "A  src/d.ts",
+      "?? src/e.ts",
+      "?? src/f.ts",
+      " D src/g.ts",
+      "R  a.ts -> b.ts",
+    ].join("\n");
+    assert.deepEqual(parseGitStats(porcelain), { staged: 4, unstaged: 3, untracked: 2 });
+    assert.deepEqual(parseGitStats(""), { staged: 0, unstaged: 0, untracked: 0 });
   });
 
   it("surfacePainter re-applies the fill across nested resets (cursor glyph)", () => {

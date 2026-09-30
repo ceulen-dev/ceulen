@@ -4,7 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadCwdEnvFilesIfTrusted, parseEnvText } from "../../lib/env.js";
-
+import { resetGenRate, setGenRate } from "../../lib/rate.js";
+import { resetUsageItem, setUsageItem } from "../../lib/usage-store.js";
 /** Single source of truth for User-Agent strings — matches package.json version. */
 const CEULEN_VERSION: string = (() => {
   try {
@@ -276,15 +277,19 @@ function planLabel(plan: string | undefined): string | undefined {
   return labels[normalized] ?? plan;
 }
 
+/** Remaining time until reset: hours keep minute precision (`2H3M`, OMP's
+ *  formatUsageReset style), days stay coarse (`2D`), sub-minute rounds up. */
 function formatRemainingTime(resetAtSec: number | undefined): string | undefined {
   if (!resetAtSec) return undefined;
-  const nowSec = Date.now() / 1000;
-  const remainingSec = resetAtSec - nowSec;
+  const remainingSec = resetAtSec - Date.now() / 1000;
   if (remainingSec <= 0) return "0M";
   const remainingMin = Math.ceil(remainingSec / 60);
   if (remainingMin < 60) return `${remainingMin}M`;
-  const remainingH = Math.ceil(remainingSec / 3600);
-  if (remainingH < 24) return `${remainingH}H`;
+  if (remainingMin < 24 * 60) {
+    const h = Math.floor(remainingMin / 60);
+    const m = remainingMin % 60;
+    return m > 0 ? `${h}H${m}M` : `${h}H`;
+  }
   const remainingD = Math.ceil(remainingSec / 86400);
   return `${remainingD}D`;
 }
@@ -1232,6 +1237,17 @@ function windowSegments(account: SubscriptionAccountSnapshot | undefined): strin
   return segments;
 }
 
+/** Compact status item for the composer band: provider label + quota windows
+ *  (e.g. `(router) R:59%/2H3M`). Cost/credits/tok/s stay out — those live in
+ *  /usage and the footer totals. */
+export function usageBandItem(account: SubscriptionAccountSnapshot | undefined, providerDisplayName: string | undefined): string | undefined {
+  if (!account) return undefined;
+  const label = providerDisplayName?.toLowerCase() === ROUTER_PROVIDER ? `(${ROUTER_PROVIDER})` : providerDisplayName?.toLowerCase();
+  const windows = windowSegments(account).join(" ");
+  if (!windows) return undefined;
+  return label ? `${label} ${windows}` : windows;
+}
+
 export function renderSubscriptionLine(state: State): void {
   // ponytail: resolve ctx at render time — any captured ctx goes stale on
   // session replacement (new/fork/switch/reload) and ctx.ui then throws.
@@ -1259,13 +1275,13 @@ export function renderSubscriptionLine(state: State): void {
     const windowParts = windowSegments(account);
     const accountPart = formatFooterAccount(account);
     const segments = accountPart ? [accountPart, ...windowParts] : [...windowParts];
-    const cost = state.cumulativeCost;
     const hasWindows = windowParts.length > 0;
     // Monthly balance (Command Code credits, router-reported balances):
     // currency-aware compact figure — e.g. M:$69.99 / M:¥88.00 CNY.
     if (typeof account?.monthlyCredits === "number") {
       segments.push(`M:${formatMonthlyCredits(account.monthlyCredits, account.creditsCurrency)}`);
     }
+    const cost = state.cumulativeCost;
     if (cost > 0) segments.push(`$${cost.toFixed(2)}`);
     if (state.lastTokPerSec !== undefined) segments.push(`${state.lastTokPerSec} tok/s`);
     if (segments.length === 0) {
@@ -1277,6 +1293,21 @@ export function renderSubscriptionLine(state: State): void {
     }
     const remaining = minRemaining(account);
     color = remaining <= 10 ? "error" : remaining <= 20 ? "warning" : "dim";
+  }
+  // Publish the compact band item (provider label + windows only) — the
+  // composer renders it next to git; cost/credits/tok/s stay out (they live
+  // in /usage and the footer totals). Errors/empty windows publish nothing so
+  // the band drops the segment instead of showing a stale one. Tone mirrors
+  // the setStatus color steps over the tightest window.
+  if (!snapshot || snapshot.error) {
+    setUsageItem({});
+  } else {
+    const remaining = minRemaining(snapshot.activeAccount);
+    setUsageItem({
+      provider: snapshot.providerDisplayName,
+      windows: usageBandItem(snapshot.activeAccount, snapshot.providerDisplayName),
+      tone: remaining <= 10 ? "error" : remaining <= 20 ? "warning" : "dim",
+    });
   }
   ctx.ui.setStatus(STATUS_KEY, theme.fg(color, line));
 }
@@ -1833,6 +1864,8 @@ export default function (pi: ExtensionAPI) {
     // reload) before the session's other events, so mid-session handlers never
     // need to — and a late old-session event must not reinstall a stale ctx.
     state.ctx = ctx;
+    resetGenRate(); // fresh session, fresh Generation Rate item
+    resetUsageItem(); // ...and fresh usage windows
     updateActiveAdapter(state, ctx.model);
     if (state.adapter) deferRefresh(state, true);
   });
@@ -1863,6 +1896,7 @@ export default function (pi: ExtensionAPI) {
         if (elapsed > 0 && output > 0) {
           state.lastTokPerSec = Math.round(output / (elapsed / 1000));
           state.lastTokPerSecLabel = tokPerSecLabel(output, reasoning, elapsed);
+          setGenRate({ tps: state.lastTokPerSec });
           state.cumulativeOutput += output;
           state.cumulativeDurationMs += elapsed;
         }
@@ -1892,6 +1926,7 @@ export default function (pi: ExtensionAPI) {
     state.inFlight = undefined;
     state.refreshGeneration++;
     ctx.ui.setStatus(STATUS_KEY, undefined);
+    resetUsageItem();
     state.ctx = undefined;
   });
 
