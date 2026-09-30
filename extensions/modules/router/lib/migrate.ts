@@ -64,7 +64,7 @@ export function migrateLegacyConfig(): boolean {
 
 /** Write settings/auth atomically: tmp file in the same dir, then rename —
  *  a crash mid-write can never leave a truncated settings.json/auth.json
- *  (same pattern as writeRouterSection in commands/commands.ts). */
+ *  (same pattern as writeRouterSection in lib/config.ts). */
 function atomicWriteJson(path: string, value: unknown): void {
   mkdirSync(dirname(path), { recursive: true });
   const tmp = path + ".tmp";

@@ -128,9 +128,22 @@ export function writeDefaultMode(mode: string): RuntimeMode | null {
   const config = readConfig();
   config.defaultMode = normalized;
 
+  writeConfig(config);
+  return normalized;
+}
+
+/** Merge boolean flags into the config file (read-modify-write, atomic value
+ *  write; the module's memoized read cache is invalidated). */
+export function writeConfigBools(patch: { quietStartup?: boolean; hideStatus?: boolean }): void {
+  const config = readConfig();
+  if (patch.quietStartup !== undefined) config.quietStartup = patch.quietStartup;
+  if (patch.hideStatus !== undefined) config.hideStatus = patch.hideStatus;
+  writeConfig(config);
+}
+
+function writeConfig(config: Record<string, unknown>): void {
   const configPath = getConfigPath();
   fs.mkdirSync(path.dirname(configPath), { recursive: true });
   fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
   configCache = { path: null, mtimeMs: -1, size: -1, config: {} }; // force re-read
-  return normalized;
 }

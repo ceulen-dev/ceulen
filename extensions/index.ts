@@ -6,17 +6,12 @@
  * Pi's public extension API — no core patches, so upstream Pi upgrades stay
  * drop-in.
  *
- * Modules land in waves. Wave 1: router + usage.
+ * Modules land in waves. Wave 1: router + usage. Wave 2: ponytail. Wave 3: config.
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, readFileSync } from "node:fs";
-import os from "node:os";
-import path from "node:path";
 import { loadCwdEnvFilesIfTrusted } from "./lib/env.js";
-import routerModule from "./modules/router/index.ts";
-import usageModule from "./modules/usage/index.ts";
-import ponytailModule from "./modules/ponytail/index.ts";
+import { MODULES, readDisabled, type ModuleConfig, type ModuleLoadDeps } from "./lib/registry.js";
 
 // Guards the ONE namespace bundle modules share: pi merges every module's
 // registrations into a single extension object, where a duplicate name
@@ -54,16 +49,6 @@ export function guarded(pi: ExtensionAPI, mod: string, owner: Map<string, string
   } as ExtensionAPI;
 }
 
-// ponytail: module registry grows by append — one object per module, loader
-// stays ~10 lines forever, no plugin framework
-const MODULES = [
-  // Router first: usage reads the `router` provider for usage display.
-  { name: "router", load: routerModule },
-  { name: "usage", load: usageModule },
-  { name: "ponytail", load: ponytailModule },
-  // { name: "notify", load: notifyModule },  // later wave
-];
-
 export default function ceulen(pi: ExtensionAPI) {
   // Kill-switch: "ceulen": { "disabled": ["usage"] } in settings.json skips those
   // modules entirely. Minimal form of the per-module toggle promise.
@@ -78,7 +63,8 @@ export default function ceulen(pi: ExtensionAPI) {
       const off = MODULES.filter((m) => disabled.has(m.name)).map((m) => m.name);
       ctx.ui.notify(
         `Ceulen ${active.length} module(s) active: ${active.join(", ")}` +
-          (off.length ? ` · disabled: ${off.join(", ")}` : ""),
+          (off.length ? ` · disabled: ${off.join(", ")}` : "") +
+          "\nConfigure: /config",
         "info",
       );
     },
@@ -96,61 +82,20 @@ export default function ceulen(pi: ExtensionAPI) {
   // One ownership map for the whole loop — this is what makes guarded() able
   // to see every module's claims (see guarded() docstring).
   const owner = new Map<string, string>();
+  // Per-module config contribution factories, closed over THAT module's guarded
+  // pi (router's save re-registers its provider — a claim that must stay the
+  // router module's). The config module receives this map and calls the
+  // factories per /config open.
+  const configContribs = new Map<string, () => ModuleConfig>();
+  const deps: ModuleLoadDeps = { configContribs };
   for (const m of MODULES) {
     if (disabled.has(m.name)) continue;
+    const g = guarded(pi, m.name, owner);
+    if (m.config) configContribs.set(m.name, () => m.config!(g));
     try {
-      m.load(guarded(pi, m.name, owner));
+      m.load(g, deps);
     } catch (err) {
       console.error(`ceulen: module ${m.name} failed to load: ${err instanceof Error ? err.message : err}`);
     }
   }
-}
-
-/** Read the `ceulen.disabled` module list. <cwd>/.pi/settings.json is only
- *  eligible when the project is trusted (an untrusted checkout must not be
- *  able to re-enable or disable modules); otherwise agent-dir settings only. */
-function readDisabled(): string[] {
-  const dirs = process.env.PI_CODING_AGENT_DIR
-    ? [process.env.PI_CODING_AGENT_DIR]
-    : [path.join(os.homedir(), ".pi", "agent"), path.join(os.homedir(), ".pi", "agents")];
-  const cwd = process.cwd();
-  for (const file of [
-    ...(isProjectTrusted(cwd, dirs) ? [path.join(cwd, ".pi", "settings.json")] : []),
-    ...dirs.map((d) => path.join(d, "settings.json")),
-  ]) {
-    if (!existsSync(file)) continue;
-    try {
-      const raw = (JSON.parse(readFileSync(file, "utf8"))?.ceulen ?? {}) as { disabled?: unknown };
-      if (!Array.isArray(raw.disabled)) return [];
-      // ponytail: deprecated "sub" alias — the module was renamed to "usage"; drop when no settings ship it
-      return raw.disabled.map((n) => (n === "sub" ? "usage" : n)).filter((n): n is string => typeof n === "string");
-    } catch {
-      return []; // malformed → defaults (all modules on)
-    }
-  }
-  return [];
-}
-
-/** Project trust: read <agentDir>/trust.json ({ "<path>": true|false }),
- *  walking up the tree like pi's ProjectTrustStore. Unreadable/absent →
- *  false (fail closed). */
-function isProjectTrusted(cwd: string, dirs: string[]): boolean {
-  let current = path.resolve(cwd);
-  for (const dir of dirs) {
-    const file = path.join(dir, "trust.json");
-    if (!existsSync(file)) continue;
-    try {
-      const data = JSON.parse(readFileSync(file, "utf8"));
-      for (;;) {
-        const v = data[current];
-        if (typeof v === "boolean") return v;
-        const parent = path.dirname(current);
-        if (parent === current) break;
-        current = parent;
-      }
-    } catch {
-      return false;
-    }
-  }
-  return false;
 }

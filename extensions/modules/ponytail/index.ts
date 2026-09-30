@@ -14,6 +14,7 @@ import type {
 } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_MODE,
+  RUNTIME_MODES,
   VALID_MODES,
   getDefaultMode,
   getHideStatus,
@@ -21,9 +22,12 @@ import {
   isDeactivationCommand,
   normalizeMode,
   normalizePersistedMode,
+  writeConfigBools,
   writeDefaultMode,
   type PonytailMode,
 } from "./lib/config.js";
+import { row, type PanelGroup } from "../../lib/panel.js";
+import type { ModuleConfig } from "../../lib/registry.js";
 import { filterSkillBodyForMode, getPonytailInstructions } from "./lib/instructions.js";
 import { getSubagentInstructions, shouldInjectSubagentInstructions } from "./lib/subagent.js";
 
@@ -57,9 +61,9 @@ export function resolveSessionMode(entries: unknown, fallbackMode: string = DEFA
 }
 
 interface ParsedCommand {
-  type: "status" | "set-default" | "set-mode" | "invalid";
+  type: "status" | "set-mode" | "invalid";
   mode?: string;
-  reason?: "invalid-default-mode" | "invalid-mode";
+  reason?: "invalid-mode";
 }
 
 export function parsePonytailCommand(text: unknown): ParsedCommand {
@@ -70,21 +74,108 @@ export function parsePonytailCommand(text: unknown): ParsedCommand {
     return { type: "status" };
   }
 
-  const [primary, secondary] = normalizedText.split(/\s+/);
+  const primary = normalizedText.split(/\s+/)[0];
 
   if (primary === "status") return { type: "status" };
-
-  if (primary === "default") {
-    // ponytail: a default must be a runtime level; review is session-only (#377).
-    const mode = normalizeMode(secondary);
-    return mode ? { type: "set-default", mode } : { type: "invalid", reason: "invalid-default-mode" };
-  }
 
   const mode = normalizePersistedMode(primary);
   return mode ? { type: "set-mode", mode } : { type: "invalid", reason: "invalid-mode", mode: primary };
 }
 
 export { writeDefaultMode };
+
+export interface PonytailSettings {
+  defaultMode: string;
+  quietStartup: boolean;
+  hideStatus: boolean;
+}
+
+/** Build the ponytail panel groups over a working copy (mutated by row
+ *  setters). Exported for tests. */
+export function buildPonytailGroups(cfg: PonytailSettings): PanelGroup[] {
+  return [
+    {
+      key: "ponytail",
+      label: "Ponytail",
+      tab: "Tasks",
+      icon: "🦥",
+      rows: [
+        row("ponytail.defaultMode", "Default mode", "string", cfg.defaultMode, (v) => {
+          cfg.defaultMode = String(v ?? "").trim();
+        }, {
+          values: RUNTIME_MODES,
+          defaultValue: DEFAULT_MODE,
+          description: "Ponytail intensity for new sessions (review is session-only, not a default). PONYTAIL_DEFAULT_MODE env overrides the saved value.",
+        }),
+        row("ponytail.quietStartup", "Quiet startup", "toggle", cfg.quietStartup, (v) => {
+          cfg.quietStartup = Boolean(v);
+        }, {
+          description: "Skip the startup mode banner. PONYTAIL_QUIET_STARTUP env overrides the saved value.",
+          defaultValue: false,
+        }),
+        row("ponytail.hideStatus", "Hide status bar", "toggle", cfg.hideStatus, (v) => {
+          cfg.hideStatus = Boolean(v);
+        }, {
+          description: "Hide the status-bar mode segment. PONYTAIL_HIDE_STATUS env overrides the saved value.",
+          defaultValue: false,
+        }),
+      ],
+    },
+  ];
+}
+
+const OWNED_KEYS = ["ponytail.defaultMode", "ponytail.quietStartup", "ponytail.hideStatus"];
+
+/** Ponytail's ModuleConfig for the central /config panel. Row descriptions +
+ *  warnings disclose env precedence and next-session timing; the save notify
+ *  stays a short confirmation (plus an env caveat when it actually bit). */
+export function ponytailConfig(): ModuleConfig {
+  const before: PonytailSettings = {
+    defaultMode: getDefaultMode(),
+    quietStartup: getQuietStartup(),
+    hideStatus: getHideStatus(),
+  };
+  const working = structuredClone(before);
+  return {
+    groups: () => buildPonytailGroups(working),
+    save: async (edited, ctx) => {
+      if (!OWNED_KEYS.some((k) => edited.has(k))) return;
+
+      // Bools first: they're independent of the mode's validity.
+      if (working.quietStartup !== before.quietStartup || working.hideStatus !== before.hideStatus) {
+        writeConfigBools({
+          quietStartup: working.quietStartup !== before.quietStartup ? working.quietStartup : undefined,
+          hideStatus: working.hideStatus !== before.hideStatus ? working.hideStatus : undefined,
+        });
+      }
+
+      let modeNote = "";
+      if (working.defaultMode !== before.defaultMode) {
+        const mode = normalizeMode(working.defaultMode);
+        if (!mode) {
+          ctx.ui.notify(`Invalid ponytail default mode “${working.defaultMode}”. Use: ${RUNTIME_MODES.join(", ")}.`, "warning");
+        } else {
+          writeDefaultMode(mode);
+          // Report the EFFECTIVE default — PONYTAIL_DEFAULT_MODE env wins.
+          const effective = getDefaultMode();
+          if (effective !== mode) {
+            modeNote = ` PONYTAIL_DEFAULT_MODE env keeps the default at ${effective}.`;
+          }
+        }
+      }
+
+      // Row descriptions already disclose env precedence; the notify adds the
+      // caveat only when an env var actually shadowed this save.
+      const envBooleans = process.env.PONYTAIL_HIDE_STATUS || process.env.PONYTAIL_QUIET_STARTUP;
+      ctx.ui.notify(
+        `Ponytail config saved.${modeNote}` +
+          (envBooleans ? " PONYTAIL_* env vars override the saved booleans." : "") +
+          " Applied from the next session (or /reload).",
+        modeNote || envBooleans ? "warning" : "info",
+      );
+    },
+  };
+}
 
 export default function ponytailExtension(pi: ExtensionAPI) {
   // Skills ship in-package (../skills/, 3 levels up from the module dir) and are
@@ -140,10 +231,10 @@ export default function ponytailExtension(pi: ExtensionAPI) {
   };
 
   pi.registerCommand("ponytail", {
-    description: `Set mode: ${VALID_MODES.join("|")} (review is session-only). Commands: status, default <mode>`,
+    description: `Set mode: ${VALID_MODES.join("|")} (review is session-only), or status`,
     getArgumentCompletions: (prefix) => {
       const q = String(prefix || "").trim().toLowerCase();
-      const vocab = [...VALID_MODES, "status", "default"];
+      const vocab = [...VALID_MODES, "status"];
       const items = vocab.filter((k) => k.startsWith(q)).map((k) => ({ value: k, label: k }));
       return items.length > 0 ? items : null;
     },
@@ -155,35 +246,13 @@ export default function ponytailExtension(pi: ExtensionAPI) {
         return;
       }
 
-      if (parsed.type === "set-default") {
-        try {
-          const written = writeDefaultMode(parsed.mode!);
-          if (written) {
-            configuredDefaultMode = getDefaultMode();
-            const message =
-              configuredDefaultMode === written
-                ? `Default Ponytail mode set to ${written}.`
-                : `Saved default ${written}, but env override keeps default at ${configuredDefaultMode}.`;
-            ctx?.ui?.notify?.(message, "info");
-          } else {
-            ctx?.ui?.notify?.(`Invalid default mode “${parsed.mode}”. Use: lite, full, ultra, or off.`, "warning");
-          }
-        } catch (e) {
-          ctx?.ui?.notify?.(`Failed to save default mode: ${e instanceof Error ? e.message : e}`, "error");
-        }
-        return;
-      }
-
       if (parsed.type === "set-mode") {
         setMode(parsed.mode!, ctx);
         return;
       }
 
       if (parsed.type === "invalid") {
-        const msg =
-          parsed.reason === "invalid-default-mode"
-            ? "Invalid default mode. Use: lite, full, ultra, or off."
-            : `Unknown mode: ${parsed.mode}. Use: lite, full, ultra, off, status, or default <mode>.`;
+        const msg = `Unknown mode: ${parsed.mode}. Use: lite, full, ultra, off, or status.`;
         ctx?.ui?.notify?.(msg, "warning");
         return;
       }

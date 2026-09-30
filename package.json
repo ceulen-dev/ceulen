@@ -29,7 +29,7 @@
   "homepage": "https://github.com/ceulen-dev/ceulen#readme",
   "bugs": "https://github.com/ceulen-dev/ceulen/issues",
   "scripts": {
-    "test": "node --import tsx --test extensions/modules/router/test/unit.test.ts extensions/modules/router/test/guard.test.ts extensions/modules/usage/test/*.test.ts extensions/modules/ponytail/test/*.test.ts",
+    "test": "node --import tsx --test extensions/modules/router/test/unit.test.ts extensions/modules/router/test/guard.test.ts extensions/modules/usage/test/*.test.ts extensions/modules/ponytail/test/*.test.ts extensions/modules/config/test/*.test.ts",
     "typecheck": "tsc --noEmit"
   },
   "pi": {

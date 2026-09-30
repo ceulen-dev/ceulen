@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -92,13 +92,42 @@ export function maskApiKey(key: string | undefined): string {
   return key.slice(0, 4) + "●".repeat(key.length - 8) + key.slice(-4);
 }
 
+// ── Writes ───────────────────────────────────────────────────────────────────
+
+/** Read-modify-write non-secret `router` fields into the GLOBAL settings.json
+ *  (merge, never clobber). `baseUrl` is normalized (trailing slashes stripped).
+ *  Atomicity (tmp+rename) is part of the contract — exported for tests. */
+export function writeRouterSection(patch: { baseUrl?: string; enableReasoning?: boolean }): void {
+  let settings: Record<string, unknown> | null = {};
+  try {
+    if (existsSync(globalSettingsPath())) {
+      settings = JSON.parse(readFileSync(globalSettingsPath(), "utf8")) as Record<string, unknown>;
+    }
+  } catch {
+    // Corrupt ≠ missing: a {} fallback would make the rename below overwrite
+    // the file with ONLY the router section, destroying every other key.
+    settings = null;
+  }
+  if (settings === null) {
+    throw new Error(`${globalSettingsPath()} is not valid JSON — fix or remove it before saving.`);
+  }
+  const router = (settings.router ?? {}) as Record<string, unknown>;
+  if (patch.baseUrl !== undefined) router.baseUrl = normalizeUrl(patch.baseUrl);
+  if (patch.enableReasoning !== undefined) router.enableReasoning = patch.enableReasoning;
+  settings.router = router;
+  mkdirSync(dirname(globalSettingsPath()), { recursive: true });
+  const tmp = globalSettingsPath() + ".tmp";
+  writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+  renameSync(tmp, globalSettingsPath());
+}
+
 export function configSummary(settings: RouterSettings): string {
   const key = process.env.ROUTER_API_KEY
     ? maskApiKey(process.env.ROUTER_API_KEY) + " (env)"
     : maskApiKey(readStoredApiKey());
   const reasoning = settings.enableReasoning
     ? "ON"
-    : "OFF (run /router-reasoning to enable thinking levels)";
+    : "OFF (enable via /config → Router)";
   return `Endpoint: ${settings.baseUrl || "(not configured)"}
 API key: ${key}
 Reasoning: ${reasoning}`;

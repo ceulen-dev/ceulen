@@ -50,7 +50,7 @@ export default function (pi: ExtensionAPI) {
       return;
     }
     // Repo scope flipped the endpoint: re-register + refresh exactly like the
-    // /router-config panel save path so discovery/chat hit the new URL.
+    // /config Router-tab save path so discovery/chat hit the new URL.
     if (s.baseUrl !== registeredBaseUrl) {
       registeredBaseUrl = s.baseUrl;
       registerProvider(pi, s);

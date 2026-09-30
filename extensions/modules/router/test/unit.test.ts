@@ -141,7 +141,7 @@ describe("commands", () => {
     const settingsPath = join(TMP_HOME, "settings.json");
     writeFileSync(settingsPath, JSON.stringify({ other: true, router: { baseUrl: "http://x" } }));
     const inoBefore = statSync(settingsPath).ino;
-    const { writeRouterSection } = await import("../commands/commands.js");
+    const { writeRouterSection } = await import("../lib/config.js");
     writeRouterSection({ enableReasoning: true });
     const settings = JSON.parse(readFileSync(settingsPath, "utf8")) as {
       other: boolean;
@@ -162,7 +162,7 @@ describe("commands", () => {
     const corrupt = '{ "router": { "baseUrl": "http://x" }, "other": true\nOOPS';
     writeFileSync(settingsPath, corrupt);
     const before = readFileSync(settingsPath, "utf8");
-    const { writeRouterSection } = await import("../commands/commands.js");
+    const { writeRouterSection } = await import("../lib/config.js");
     assert.throws(() => writeRouterSection({ enableReasoning: true }), /not valid JSON/);
     assert.equal(readFileSync(settingsPath, "utf8"), before,
       "corrupt file must be left byte-identical — no rename-overwrite");

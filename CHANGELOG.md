@@ -2,6 +2,95 @@
 
 ## Unreleased
 
+- **config**: multi-choice rows now open an **OMP-style selection menu**
+  instead of cycling — press Enter on Theme, Default thinking level, Transport,
+  Mermaid mode, ponytail mode, … and the panel swaps to a full option list:
+  `↑↓` browse (clamped), typing filters options live, `Enter` selects and
+  `Esc` backs out (clearing the filter first). The row's description/warning
+  stays visible below the menu, options can carry their own one-line
+  descriptions, the current value is marked `(current)`, and the footer
+  switches to the menu's key hints. **Theme previews live while browsing** —
+  moving through the theme list restyles the whole terminal (panel included)
+  immediately, `Esc` restores the previous theme, and `Enter` persists it.
+  The Default model row opens a `provider/id` picker built from the model
+  catalogue (`ctx.modelRegistry`), writing provider + model as one pair.
+  Everything goes through pi's public extension API (`ctx.ui.getAllThemes`/
+  `getTheme`/`setTheme`, `ctx.modelRegistry.getAvailable`).
+- **config**: `/config` now spans **pi core settings + ceulen modules** under
+  OMP's taxonomy — tabs are Appearance · Model · Interaction · Context · Shell ·
+  Tasks · Providers · Plugins (empty categories don't render). Pi-core rows are
+  backed by Pi's own public `SettingsManager` (theme, thinking, transport/retry,
+  steering, trust & telemetry, shell, images, fullscreen…), so they read the
+  effective global ⊕ project value and save to the global `settings.json` via
+  Pi's typed setters (apply after `/reload`). The standalone **Modules** kill-switch
+  tab is gone: each module's **Enabled** row now sits at the top of its own
+  section — Router → Providers, ponytail → Tasks, usage → Appearance, the config
+  panel → Plugins — and stays visible (and togglable) even while the module is
+  off.
+- **config**: OMP-parity chrome pass — the frame is a closed box
+  (`╭─┤│╰─╯`, every content row `│ … │`); section headings render underlined
+  in-pane beside the sidebar (OMP shows both) with rows outside the active
+  section dim-washed; the sidebar width is pinned across every tab so the `│`
+  rail never jumps, and hides below a 60-column rows pane (headings remain);
+  changed-from-default values render warning-colored on the label too (a
+  selected+changed row keeps an accent label + warning value); the tab bar
+  collapses inactive tabs to icons starting farthest from the active one (the
+  active tab keeps its label); and the browse footer hint now derives from the
+  active tab (`Enter toggle` for toggle/enum-only tabs, no Enter pair for
+  read-only tabs, no section jump for single-section tabs).
+- **config**: `/config` is now a fullscreen panel (OMP `/settings` parity): the
+  frame fills the terminal as a 100%×100% overlay — title border, tab row, and a
+  pinned key-hint footer as the last row (the hints follow the mode: browse,
+  search, inline edit, action prompt), with the unsaved-changes marker
+  right-aligned on that footer. The rows pane is height-driven (it grows with a
+  taller terminal instead of the fixed 18-row window), and the chat underneath
+  is untouched while the panel is open.
+- **router/ponytail**: individual config commands removed now that `/config` is
+  the single settings surface — `/router-config` and `/router-reasoning` are the
+  Providers tab's Router section, `/ponytail default <mode>` is the Tasks tab's
+  Default-mode row.
+  `/router-status`, `/router-model`, and `/ponytail <mode>|status` are unchanged
+  (status / model picking / session-mode switching, not persisted config).
+- **config**: `/config` now follows OMP's tab → section → rows hierarchy, and tab
+  navigation actually works in every terminal. Fixes: `←`/`→` used raw escape-byte
+  comparisons, so application-cursor-mode (SS3 `\u001bOD`) and kitty-protocol
+  terminals never moved backward — navigation now goes through pi-tui's `matchesKey`
+  (CSI/SS3/CSI-u all match), and tab stepping WRAPS like OMP's TabBar instead of
+  clamping. Structure: adjacent groups sharing a `tab` merge into one tab
+  (Router's Endpoint + Models are now one Router section under the Providers tab), each group's label renders
+  as a left-sidebar section beside its detail rows, `PageUp`/`PageDown` jump
+  sections, and rows outside the active section get OMP's dim wash. Plugins splits
+  into Project/Global sections under one 📦 tab.
+- **config**: tab bar polish — per-group icons (`PanelGroup.icon`; the bundled
+  groups use 🌐 Router / 🦥 Ponytail / 📦 Plugins),
+  active tab inverse-highlighted (`selectedBg`, falls back to bold accent) with
+  an icon-only fallback on narrow bars, a middle accent heading naming the
+  category being configured (icon + label + setting count), and footer key
+  hints that color each key glyph in accent with its meaning dimmed (OMP
+  style). Also fixes the description area leaking a neighbor row's text while
+  the active tab is empty, and enables `←/→` category jumps during search in
+  the keybinding-less input path.
+- **config**: `/config` is now TABBED — one tab per category (Modules, Endpoint, Models,
+  Ponytail, Plugins…) with `←/→`/`Tab`/`Shift+Tab` switching, so each category renders
+  in its own view instead of one long mixed list. Per-tab selection memory, ↑/↓ clamped
+  to the active tab, active-tab highlighting (inverse/selectedBg), narrow-terminal tab
+  windowing with `…` edge markers, and a single-group panel that renders no tab bar.
+  Search still spans all tabs; `←/→` during a search jumps between matching categories,
+  and clearing it snaps the panel to the selected row's tab.
+- **config**: new **Plugins** group in the `/config` panel — every installed Pi package
+  (`packages` in settings.json, project entries first when trusted) gets an on/off toggle.
+  Off writes Pi's whole-off form (`{source, extensions: [], skills: [], prompts: [], themes: []}`
+  — the load contract's "empty array disables all resources"), on restores the plain
+  string; each row writes back to the file its entry lives in, atomically, refusing a
+  corrupt file. Packages carrying granular `pi config` filters or `autoload: false`
+  project deltas render as read-only "custom filters" rows. New kernel `info` row kind
+  (display-only derived state); `/config show` lists plugins too.
+- **config**: `/config` panel v2 — OMP-style split layout (module rail + rows pane with a dim wash outside the active group, selection-derived active section, fixed 3-row help area showing the selected row's description/warning), enum rows (`Enter` cycles a closed value set — ponytail default mode no longer accepts free text), changed-vs-default values rendered warning-styled, `←→`/`Tab` section jumps, type-to-search fuzzy filter (printable text; `Esc` clears, then closes), width-dependent flat fallback below 60 pane columns. Kernel `extensions/lib/panel.ts` is now a fork evolved in-repo (was: fixed vendor snapshot of `@bacnh85/pi-config-panel` 0.1.10). Rows gain optional `description`/`warning`/`values`/`defaultValue`; `ModuleEntry.describe` feeds each module's kill-switch help line; `/config show` appends help text.
+- **config** (new module): `/config` — one central settings panel for every ceulen module, on top of the vendored panel kernel. Module kill-switches (writes `ceulen.disabled` to the effective settings layer — project when trusted and it carries the section, else agent dir; disclosed in the panel), router endpoint + thinking levels (save re-registers the provider, force-refreshes the catalog, revalidates the active model), ponytail default mode / quiet startup / status bar (own config file; next session). Non-TUI/multi-arg shells get `/config show` text. `/settings` is a Pi builtin and cannot be overridden by extensions — `/config` is the ceulen surface.
+- **bundle**: `MODULES` registry + kill-switch settings I/O moved from `extensions/index.ts` to `extensions/lib/registry.ts` (the config module iterates it without a circular import). Modules may now declare `config?: (pi) => ModuleConfig` — a `{ groups(), save(editedKeys, ctx) }` contribution; the loader hands each module a `ModuleLoadDeps` map whose factories close over that module's own guarded `pi`.
+- **router**: panel + save logic extracted to `modules/router/configPanel.ts` (`buildRouterGroups`/`saveRouterConfig`), the central panel's single save path; `writeRouterSection` moved from `commands/commands.ts` to `lib/config.ts`.
+- **ponytail**: `writeConfigBools` helper added to `lib/config.ts`; central-panel contribution for `defaultMode`/`quietStartup`/`hideStatus`.
+
 - **usage** (renamed from **sub**): the module and its command are now `/usage` (`/sub` survives only as the deprecated kill-switch key `"sub"` → treated as `"usage"`). Status-bar key is `ceulen-usage`; message customTypes are `ceulen-usage-status` / `ceulen-usage-context`; User-Agent is `ceulen/x.y.z`. Sessions recorded before this change replay the old `pi-sub-*` messages as raw text (the renderer was renamed with the module).
 - **bundle**: new cross-module duplicate-registration guard — all ceulen modules share one extension object, where a repeated name silently overwrites; a claim by a DIFFERENT module now throws at load (same-module re-claims stay legal, e.g. router's runtime provider refresh). Env ingestion (`.env.local`/`.env`, trust-gated) moved to `extensions/lib/env.ts` — bundle infrastructure, no longer exported from a feature module.
 - **bundle**: trusted cwd `.env` ingestion (`loadCwdEnvFilesIfTrusted`) is now also registered at the bundle entry, before every module's `session_start` — sub previously loaded it in its own handler, which runs after router's, so a trusted repo's `.env`-provided `ROUTER_BASE_URL`/`ROUTER_ENABLE_REASONING` was invisible to router for the entire first session.

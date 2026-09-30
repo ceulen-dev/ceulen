@@ -30,7 +30,7 @@ Registers the generic `router` provider (models via `GET /v1/models`, chat via `
 
 - Config: `router.baseUrl` in `~/.pi/agent/settings.json` (or `ROUTER_BASE_URL` env)
 - Auth: `/login router` in Pi (or `ROUTER_API_KEY` env)
-- Commands: `/router-status`, `/router-config` (interactive panel), `/router-reasoning`, `/router-model`
+- Commands: `/router-status`, `/router-model` — settings via `/config` (Providers tab)
 
 ### usage — subscription-usage footer
 
@@ -49,7 +49,51 @@ Needs a yardmaster API key with the **usage** permission — the same key you `/
 Lazy mode for the agent itself: `/ponytail off|lite|full|ultra|review` switches the over-engineering discipline level (persisted per session); `stop ponytail` / `normal mode` deactivates. The active level is injected into the system prompt each turn, shown in the status bar, and inherited by subagents. Ships the six `ponytail*` skills (`/ponytail-review|audit|gain|debt|help`).
 
 - Config: `~/.config/ponytail/config.json` or `PONYTAIL_*` envs
-- Command: `/ponytail [mode|status|default <mode>]`
+- Command: `/ponytail [mode|status]` — default mode via `/config` (Tasks tab)
+
+### config — central settings panel
+
+`/config` opens one fullscreen panel for **pi core settings and every ceulen
+module** — the frame fills the terminal (boxed corners, tab row, pinned
+key-hint footer), so the chat is replaced while you configure and comes back
+untouched on close. Tabs follow OMP's settings taxonomy: **Appearance · Model ·
+Interaction · Context · Shell · Tasks · Providers · Plugins** (empty
+categories don't render). A tab with several settings groups shows them as a
+left sidebar of sections with the underlined section headings repeated beside
+the detail rows, OMP style; the sidebar geometry stays identical across tabs.
+
+- **Appearance** — pi theme, display/editor/fullscreen/terminal-image settings, plus the usage-footer module switch
+- **Model** — default model/provider, thinking, network transport/timeouts, retry, cache warming
+- **Interaction** — steering/follow-up modes, double-escape + tree filter, startup notices, trust & telemetry
+- **Context / Shell** — auto-compact, shell path/prefix, npm command
+- **Tasks** — ponytail (default mode `off/lite/full/ultra`, quiet startup, status-bar visibility; applies next session)
+- **Providers** — router (base URL + thinking levels; saves re-register the provider and refresh the catalog live)
+- **Plugins** — every installed Pi package (`packages` in settings.json) with an on/off
+  toggle; disabling writes the package in Pi's all-empty-resource-list form. Packages
+  with granular `pi config` filters or project filter deltas show as read-only
+  ("custom filters"). Toggles apply after `/reload`.
+
+Each module's on/off switch lives at the top of its own section (Router → Providers,
+ponytail → Tasks, usage → Appearance, the config panel itself → Plugins) as an
+**Enabled** row writing the `ceulen.disabled` list — a feature is turned on where
+it is configured. Pi-core rows are backed by Pi's `SettingsManager` and save to the
+global `settings.json`; they apply after `/reload` (or a new session).
+
+Keyboard: `←→`/`Tab`/`Shift+Tab` switch tabs (wrapping), `↑↓` move, `PageUp`/
+`PageDown` jump sections, `Enter` toggles a switch or opens the selection menu,
+type any text to fuzzy-search across every tab (`←→` jumps between matching
+categories), `Esc` saves and closes (a second `Esc` clears the search first).
+Multi-choice rows (theme, thinking level, transport, model, …) open an
+OMP-style **selection menu** in place: `↑↓` browse, type to filter, `Enter`
+selects, `Esc` backs out. **Theme changes preview live** as you browse (the
+whole terminal restyles; `Esc` restores the previous theme) and the model
+picker lists `provider/id` from the model catalogue. Values differing
+from their default render in warning color; rows that env vars can override
+say so in the help area.
+
+Pi's builtin `/settings` cannot be overridden by extensions (a colliding
+command is renamed `/settings:1`); `/config` adds the ceulen modules around
+pi's own settings. Non-TUI shells get a text summary (`/config show`).
 
 ## Kill-switches
 
@@ -59,11 +103,7 @@ In `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):
 { "ceulen": { "disabled": ["usage"] } }
 ```
 
-Disabled modules don't register anything; `/ceulen` lists what's active and disabled.
-
-## Roadmap
-
-Next: a `config` module owning `/config` — a central settings panel rendered from per-module descriptors.
+Disabled modules don't register anything; `/ceulen` lists what's active and disabled. `/config` toggles the same list — it writes to whichever file currently carries the `ceulen` section (project file when that's the effective one, disclosed in the panel).
 
 ## License
 

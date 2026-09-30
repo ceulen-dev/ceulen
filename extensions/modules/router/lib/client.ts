@@ -352,8 +352,8 @@ function parsePositiveInt(value: unknown): number | undefined {
   return undefined;
 }
 
-/** Re-map an already-mapped model with a new enableReasoning flag — used by
- *  /router-reasoning to toggle thinking levels without re-fetching. */
+/** Re-map an already-mapped model with a new enableReasoning flag — toggling
+ *  thinking levels without re-fetching. */
 export function applyReasoning(model: PiModel, enableReasoning: boolean): PiModel {
   return {
     ...model,

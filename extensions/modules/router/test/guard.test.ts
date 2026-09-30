@@ -37,7 +37,7 @@ test("same-module re-claim passes — router's runtime provider refresh pattern"
   const owner = new Map<string, string>();
   const g = guarded(pi, "router", owner);
   g.registerProvider("router" as never);
-  g.registerProvider("router" as never); // /router-reasoning toggle, settings reload
+  g.registerProvider("router" as never); // settings reload re-registers the provider
   g.registerCommand("router-status", {} as never);
   g.registerCommand("router-status", {} as never); // harmless re-claim
   assert.deepEqual(owner.get("provider:router"), "router");
@@ -52,6 +52,17 @@ test("different names from different modules coexist; ownership never transfers"
   assert.equal(owner.get("command:router-status"), "router");
   assert.equal(owner.get("command:usage"), "usage");
   assert.equal(owner.get("renderer:ceulen-usage-context"), "usage");
+});
+
+test("the config module owns command:config; another module claiming it throws", () => {
+  const { pi } = makePi();
+  const owner = new Map<string, string>();
+  guarded(pi, "config", owner).registerCommand("config", {} as never);
+  assert.equal(owner.get("command:config"), "config");
+  assert.throws(
+    () => guarded(pi, "router", owner).registerCommand("config", {} as never),
+    /module "router" re-registered command:config \(already owned by "config"\)/,
+  );
 });
 
 test("claims pass through to the underlying pi API", () => {

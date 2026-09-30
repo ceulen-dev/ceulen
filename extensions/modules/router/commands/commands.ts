@@ -1,84 +1,12 @@
-import { existsSync, readFileSync, renameSync, writeFileSync, mkdirSync } from "node:fs";
-import { homedir } from "node:os";
-import { dirname, join } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { openConfigPanel, row } from "../../../lib/panel.js";
-import { configSummary, getSettings, readStoredApiKey, maskApiKey, normalizeUrl } from "../lib/config.js";
-import { registerProvider, maybeRefreshCatalog, PROVIDER_ID } from "../lib/provider.js";
-import { refreshActiveModel } from "../lib/refresh.js";
+import { configSummary, getSettings } from "../lib/config.js";
+import { maybeRefreshCatalog, PROVIDER_ID } from "../lib/provider.js";
 
 /** Router model ids from the last /router-model invocation — the completion
  *  hook has no ctx, so it replays this cache (empty until first use). */
 let lastRouterModelIds: string[] | undefined;
 
-function settingsPath(): string {
-  const agentDir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
-  return join(agentDir, "settings.json");
-}
-
-function readSettingsJson(): Record<string, unknown> | null {
-  try {
-    if (!existsSync(settingsPath())) return {};
-    return JSON.parse(readFileSync(settingsPath(), "utf8")) as Record<string, unknown>;
-  } catch {
-    // Corrupt ≠ missing: returning {} here would make writeRouterSection
-    // rename-overwrite the file with ONLY the router section, destroying
-    // every other settings key. Null = bail, same as lib/config.ts readFileJson.
-    return null;
-  }
-}
-
-/** Read-modify-write non-secret `router` fields into the GLOBAL settings.json
- *  (merge, never clobber). `baseUrl` is normalized (trailing slashes stripped).
- *  Atomicity (tmp+rename) is part of the contract — exported for tests. */
-export function writeRouterSection(patch: { baseUrl?: string; enableReasoning?: boolean }): void {
-  const settings = readSettingsJson();
-  if (settings === null) {
-    throw new Error(`${settingsPath()} is not valid JSON — fix or remove it before saving.`);
-  }
-  const router = (settings.router ?? {}) as Record<string, unknown>;
-  if (patch.baseUrl !== undefined) router.baseUrl = normalizeUrl(patch.baseUrl);
-  if (patch.enableReasoning !== undefined) router.enableReasoning = patch.enableReasoning;
-  settings.router = router;
-  mkdirSync(dirname(settingsPath()), { recursive: true });
-  const tmp = settingsPath() + ".tmp";
-  writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, settingsPath());
-}
-
 export function registerCommands(pi: ExtensionAPI): void {
-  pi.registerCommand("router-reasoning", {
-    description: "Enable/disable Pi thinking levels for router models.",
-    handler: async (_args, ctx) => {
-      const current = getSettings();
-      if (!current.baseUrl) {
-        ctx.ui.notify("router not configured — set router.baseUrl in settings.json first.", "error");
-        return;
-      }
-      const next = !current.enableReasoning;
-      writeRouterSection({ enableReasoning: next });
-      // Re-register so refreshModels closure picks up the new flag, then force
-      // a refresh — the offline phase re-maps persisted models with the new
-      // flag, so the pull must actually run even when the catalog is TTL-fresh
-      // (shared in-flight guard; force supersedes a stale in-flight fetch).
-      registerProvider(pi, { ...current, enableReasoning: next });
-      try {
-        await maybeRefreshCatalog(ctx, { force: true });
-      } catch { /* refresh errors are surfaced by Pi elsewhere */ }
-      await refreshActiveModel(pi, ctx);
-      // Report the EFFECTIVE flag — env/repo precedence can shadow the persisted value.
-      const effective = getSettings().enableReasoning;
-      ctx.ui.notify(
-        effective === next
-          ? `router reasoning ${next ? "ENABLED" : "DISABLED"} — ` +
-              `use Shift+Tab or model :high/:max suffixes for reasoning.`
-          : `saved ${next ? "true" : "false"} to settings.json, but ROUTER_ENABLE_REASONING env or ` +
-              `repo .pi/settings.json overrides it to ${effective} — remove the override.`,
-        "info",
-      );
-    },
-  });
-
   pi.registerCommand("router-model", {
     description: "Search and select a router model by name.",
     getArgumentCompletions: (prefix) => {
@@ -159,102 +87,13 @@ export function registerCommands(pi: ExtensionAPI): void {
         "",
         "Commands:",
         "  /login router       Store API key (auth.json)",
-        "  /router-config      Interactive settings panel",
-        "  /router-reasoning   Toggle thinking levels",
+        "  /config             Central settings panel (all ceulen modules)",
         "  /router-model       Search and select a model",
         "  /model              Pi built-in picker (triggers refresh)",
         "",
         "URL: settings.json `router.baseUrl` or ROUTER_BASE_URL env.",
       ];
       ctx.ui.notify(lines.join("\n"), "info");
-    },
-  });
-
-  pi.registerCommand("router-config", {
-    description: "Configure router endpoint interactively (TUI) or show config",
-    handler: async (args, ctx) => {
-      const sub = String(args ?? "").trim().toLowerCase();
-
-      // Non-interactive mode or explicit "show": print the summary.
-      if (sub === "show" || ctx.mode !== "tui" || !ctx.hasUI) {
-        const s = getSettings();
-        const key = process.env.ROUTER_API_KEY
-          ? maskApiKey(process.env.ROUTER_API_KEY) + " (env)"
-          : maskApiKey(readStoredApiKey());
-        ctx.ui.notify(
-          [
-            "Router config:",
-            `  baseUrl: ${s.baseUrl || "(not configured)"}`,
-            `  enableReasoning: ${s.enableReasoning}`,
-            `  apiKey: ${key}`,
-            "",
-            "Interactive editor: run /router-config in TUI mode.",
-          ].join("\n"),
-          "info",
-        );
-        return;
-      }
-
-      const before = getSettings();
-      const working = structuredClone(before);
-      await openConfigPanel({
-        ctx,
-        cfg: working,
-        title: "Router Configuration",
-        build: (cfg) => [
-          {
-            key: "endpoint",
-            label: "Endpoint",
-            rows: [
-              row("baseUrl", "Base URL", "string", cfg.baseUrl, (v) => {
-                cfg.baseUrl = String(v ?? "").trim();
-              }),
-            ],
-          },
-          {
-            key: "models",
-            label: "Models",
-            rows: [
-              row("enableReasoning", "Thinking levels", "toggle", cfg.enableReasoning, (v) => {
-                cfg.enableReasoning = Boolean(v);
-              }),
-            ],
-          },
-        ],
-        onSave: async (saved) => {
-          if (!saved) return;
-          if (
-            working.baseUrl === before.baseUrl &&
-            working.enableReasoning === before.enableReasoning
-          ) {
-            ctx.ui.notify("No changes.", "info");
-            return;
-          }
-          writeRouterSection({
-            baseUrl: working.baseUrl !== before.baseUrl ? working.baseUrl : undefined,
-            enableReasoning: working.enableReasoning !== before.enableReasoning ? working.enableReasoning : undefined,
-          });
-          // Re-register so the provider closure picks up the new values, then
-          // force a refresh (new endpoint or reasoning flag must take effect
-          // immediately — bypass TTL, supersede any in-flight fetch);
-          // refreshActiveModel keeps the active model valid.
-          registerProvider(pi, working);
-          try {
-            await maybeRefreshCatalog(ctx, { force: true });
-          } catch { /* refresh errors are surfaced by Pi elsewhere */ }
-          await refreshActiveModel(pi, ctx);
-          const effective = getSettings();
-          const overridden =
-            (working.baseUrl !== effective.baseUrl && working.baseUrl !== "") ||
-            working.enableReasoning !== effective.enableReasoning;
-          ctx.ui.notify(
-            overridden
-              ? `Saved to settings.json, but ROUTER_BASE_URL/ROUTER_ENABLE_REASONING env or repo .pi/settings.json overrides it — effective: ${effective.baseUrl || "(none)"}, reasoning ${effective.enableReasoning}.`
-              : `Router config saved. Endpoint: ${effective.baseUrl || "(not configured)"} · reasoning ${effective.enableReasoning ? "ON" : "OFF"}`,
-            overridden ? "warning" : "info",
-          );
-        },
-      });
     },
   });
 }
