@@ -1,6 +1,24 @@
 # Changelog
 
 ## Unreleased
+- **config**: stock-`/settings` parity — every pi setting with a typed
+  `SettingsManager` setter is now a `/config` row. New: **per-model thinking
+  overrides** (one row per model + an **Add model override** row whose menu
+  lists catalog models; the clear option reverts to the default — rows appear
+  and disappear on commit via the kernel's new `rebuildOnCommit`), **Fullscreen
+  wheel scrolling**, and the extra-resource-dir lists (**Extension dirs**,
+  **Skill dirs**, **Template dirs**, **Theme dirs**). Stock choice UX: HTTP idle
+  timeout renders the labeled choices (`30 sec`…`disabled`), Default project
+  trust `Ask`/`Always trust`/`Never trust`, editor padding / autocomplete /
+  image width as stock choice sets, and thinking levels carry their per-level
+  descriptions (`off` … `max`, ~token hints). OMP taxonomy: transport →
+  **Providers · Protocol**, HTTP idle timeout → **Providers · Timeouts**,
+  telemetry/analytics → **Providers · Privacy**, skill commands + skill dirs →
+  **Tasks · Commands & Skills**, extension dirs → **Tools · Extensions**,
+  template dirs → **Context · Prompt templates**; descriptions now match pi's
+  own stock `/settings` copy. Kernel: `ConfigPanelOpts.rebuildOnCommit` +
+  `ConfigPanelModel.rebuild` rebuild the row set after any committed edit
+  (toggle, menu pick, inline submit) — used by the dynamic per-model rows.
 - **composer** (new CORE module): Composer Shape for the input editor with
   OMP's full vocabulary and copy — **Status Band** (default) · **Rounded Box**
   · **Claude Code** · **Pi** · **Borderless** · **Top Rule Dock** · **Compact

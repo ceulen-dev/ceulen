@@ -212,6 +212,10 @@ export interface ConfigPanelOpts<T> {
   actions?: Record<string, PanelAction>;
   /** Panel title (first render line). */
   title?: string;
+  /** Rebuild the groups from `build` after every committed edit — for row
+   *  sets that grow/shrink with the config (per-model override rows). Off by
+   *  default: static row sets don't need it. */
+  rebuildOnCommit?: boolean;
   /** Called when the panel saves (Esc with dirty). Second arg: row keys the
    *  user actually edited (for secret-persistence decisions). */
   onSave?: (saved: boolean, editedKeys?: Set<string>) => void;
@@ -278,6 +282,7 @@ export function openConfigPanel<T>(opts: ConfigPanelOpts<T>): Promise<void> {
     const model = new ConfigPanelModel(build(cfg, actions), theme, title);
     model.keybindings = keybindings;
     model.onRequestRender = () => tui.requestRender();
+    if (opts.rebuildOnCommit) model.rebuild = () => build(cfg, actions);
     model.onSave = async () => {
       try {
         await onSave?.(true, model.editedKeys);
@@ -425,6 +430,13 @@ export class ConfigPanelModel implements Component {
   onChanged: (() => void) | null = null;
   onSave: (() => void) | null = null;
   onAction: ((row: PanelRow) => Promise<void>) | null = null;
+  /** When set, fires after every committed edit (toggle, menu pick, inline
+   *  submit) and replaces the groups — lets dynamic row sets (per-model
+   *  overrides) appear/disappear without reopening the panel. The returned
+   *  groups become the new model state; selection is preserved by position,
+   *  clamped when rows were removed. Wired by openConfigPanel from
+   *  `rebuildOnCommit`. */
+  rebuild: (() => PanelGroup[]) | null = null;
   onClose: (() => void) | null = null;
   keybindings: KeybindingsManager | null = null;
   /** Terminal height source for the full-viewport frame; tests inject a
@@ -1390,7 +1402,7 @@ export class ConfigPanelModel implements Component {
       this.dirty = true;
       this.editedKeys.add(row.key);
       this.onChanged?.();
-      this.requestRender();
+      this.committed();
     } else {
       this.startEdit(row);
     }
@@ -1405,6 +1417,15 @@ export class ConfigPanelModel implements Component {
    *  the single provider call; empty results fall through to inline edit). */
   private hasMenu(row: PanelRow): boolean {
     return !!row.menu || (row.values?.length ?? 0) > 0;
+  }
+
+  /** Shared tail of every committed edit: rebuild dynamic groups (rows added
+   *  or removed by the setter), then repaint. Order matters on the inline-edit
+   *  path — `editing`/`input` must be torn down BEFORE the rebuild so
+   *  setGroups swaps rows under a closed editor. */
+  private committed(): void {
+    if (this.rebuild) this.setGroups(this.rebuild());
+    this.requestRender();
   }
 
   /** Open the submenu for a row: options from `menu()` or `values`, cursor on
@@ -1508,6 +1529,8 @@ export class ConfigPanelModel implements Component {
       this.dirty = true;
       this.editedKeys.add(m.row.key);
       this.onChanged?.();
+      this.committed();
+      return;
     }
     this.requestRender();
   }
@@ -1636,7 +1659,7 @@ export class ConfigPanelModel implements Component {
       this.editing = null;
       this.input = null;
       this.suggestions = [];
-      this.requestRender();
+      this.committed();
     };
     this.input.onEscape = () => {
       this.editing = null;

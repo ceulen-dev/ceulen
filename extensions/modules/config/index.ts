@@ -99,6 +99,7 @@ export function piMenuLookup(ctx: ExtensionContext): PiMenuLookup {
         provider: mo.provider,
         id: mo.id,
         ...(mo.name && mo.name !== mo.id ? { description: mo.name } : {}),
+        ...(mo.reasoning === false ? { reasoning: false } : {}),
       })),
   };
 }
@@ -247,6 +248,9 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
         cfg: {},
         title: "Settings",
         build: assemble,
+        // Per-model thinking override rows grow/shrink with the manager
+        // state — rebuild on every committed edit so add/clear is visible.
+        rebuildOnCommit: true,
         onSave: async (_saved, edited) => {
           const keys = edited ?? new Set<string>();
 

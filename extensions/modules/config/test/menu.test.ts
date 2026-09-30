@@ -224,3 +224,67 @@ describe("kernel v5 — selection submenu", () => {
     assert.ok(!text.includes("Type to search"), "menu chrome gone");
   });
 });
+
+describe("kernel — rebuild on commit", () => {
+  const groups = (rows: PanelRow[]): PanelGroup[] => [{ key: "s", label: "Section", rows }];
+
+  it("menu commit swaps in the rebuilt groups (dynamic row sets)", () => {
+    // The shape `rebuildOnCommit` exists for: a row set that grows with the
+    // config (per-model override rows).
+    let extra = false;
+    const build = () => groups([
+      row("add", "Add", "string", "off", (v) => { extra = v === "on"; }, { values: ["off", "on"] }),
+      ...(extra ? [row("extra", "Extra", "toggle", true, () => {})] : []),
+    ]);
+    const m = new ConfigPanelModel(build(), null, "T");
+    m.getHeight = () => 40;
+    m.rebuild = build;
+
+    assert.ok(!m.groups.some((g) => g.rows.some((r) => r.key === "extra")), "extra absent initially");
+    m.handleInput("\r");      // open menu
+    m.handleInput("\u001b[B"); // "on"
+    m.handleInput("\r");       // commit → rebuild
+    assert.ok(m.groups.some((g) => g.rows.some((r) => r.key === "extra")), "row added by the commit rebuild");
+  });
+
+  it("toggle and inline submit fire the rebuild too", () => {
+    let rebuilds = 0;
+    let value = "one";
+    const build = () => {
+      rebuilds++;
+      return groups([
+        row("t", "Toggle", "toggle", true, () => {}),
+        row("s", "Text", "string", value, (v) => { value = String(v); }),
+      ]);
+    };
+    const m = new ConfigPanelModel(build(), null, "T");
+    m.getHeight = () => 40;
+    m.rebuild = build;
+    const before = rebuilds;
+    m.handleInput("\r"); // toggle → rebuild
+    assert.equal(rebuilds, before + 1, "toggle commit rebuilt");
+    m.handleInput("\u001b[B"); // onto the string row
+    m.handleInput("\r");       // start the inline editor
+    for (let i = 0; i < 3; i++) m.handleInput("\u007f"); // clear "one"
+    for (const ch of "two") m.handleInput(ch);
+    m.handleInput("\r");       // submit → rebuild after the editor tears down
+    assert.equal(value, "two");
+    assert.equal(rebuilds, before + 2, "inline submit rebuilt");
+  });
+
+  it("selection clamps when a rebuild drops the rows under the cursor", () => {
+    let n = 3;
+    const build = () => groups(
+      Array.from({ length: n }, (_, i) => row(`k${i}`, `K${i}`, "toggle", true, () => { n = 1; })),
+    );
+    const m = new ConfigPanelModel(build(), null, "T");
+    m.getHeight = () => 40;
+    m.rebuild = build;
+    m.handleInput("\u001b[B");
+    m.handleInput("\u001b[B"); // cursor on the last row
+    assert.equal(m.selectedIndex, 2, "cursor on k2");
+    m.handleInput("\r");       // toggle → shrink to one row → rebuild
+    assert.equal(m.groups[0]!.rows.length, 1, "rebuilt to one row");
+    assert.equal(m.selectedIndex, 0, "selection clamped, no throw");
+  });
+});

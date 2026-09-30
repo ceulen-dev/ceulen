@@ -42,6 +42,63 @@ const TREE_FILTERS = ["default", "no-tools", "user-only", "labeled-only", "all"]
 const PROJECT_TRUST = ["ask", "always", "never"] as const;
 const OUTPUT_PADS = ["1", "0"] as const;
 
+// ── stock-/settings parity constants ─────────────────────────────────────────
+// Pi's stock /settings selector carries friendly choice sets and per-option
+// descriptions that are NOT exported from the package root; deep-importing
+// dist internals would break the peer-range drop-in promise, so the handful
+// of tiny constants are replicated here (source: pi 0.99.x
+// settings-selector.js + core/http-dispatcher.js). Cosmetic drift only.
+
+/** stock THINKING_DESCRIPTIONS — per-option submenu descriptions. */
+const THINKING_DESCRIPTIONS: Record<string, string> = {
+  off: "No reasoning",
+  minimal: "Very brief reasoning (~1k tokens)",
+  low: "Light reasoning (~2k tokens)",
+  medium: "Moderate reasoning (~8k tokens)",
+  high: "Deep reasoning (~16k tokens)",
+  xhigh: "Extra-high reasoning (~32k tokens)",
+  max: "Maximum reasoning",
+};
+
+/** stock HTTP_IDLE_TIMEOUT_CHOICES (label ↔ ms, "disabled" = 0). */
+const HTTP_TIMEOUT_CHOICES: readonly (readonly [string, number])[] = [
+  ["disabled", 0],
+  ["30 sec", 30_000],
+  ["1 min", 60_000],
+  ["2 min", 120_000],
+  ["5 min", 300_000],
+];
+const httpTimeoutLabel = (ms: number): string =>
+  HTTP_TIMEOUT_CHOICES.find(([, v]) => v === ms)?.[0] ?? `${ms / 1000} sec`;
+const httpTimeoutMs = (label: string): number | undefined =>
+  HTTP_TIMEOUT_CHOICES.find(([l]) => l === label)?.[1];
+
+/** stock DEFAULT_PROJECT_TRUST_LABELS. */
+const TRUST_LABELS: readonly (readonly [string, string])[] = [
+  ["Ask", "ask"],
+  ["Always trust", "always"],
+  ["Never trust", "never"],
+];
+const trustLabel = (v: string): string => TRUST_LABELS.find(([, e]) => e === v)?.[0] ?? v;
+const trustEnum = (label: string): string | undefined =>
+  TRUST_LABELS.find(([l]) => l === label)?.[1];
+
+/** stock fullscreen wheel-scroll choices ("auto" + line counts). */
+const WHEEL_CHOICES = ["auto", "1", "2", "3", "5", "10"] as const;
+const wheelChoices = (current: string): string[] =>
+  current && !WHEEL_CHOICES.includes(current as never) ? [current, ...WHEEL_CHOICES] : [...WHEEL_CHOICES];
+
+/** stock editor-padding / autocomplete / image-width choice sets. */
+const EDITOR_PAD_CHOICES = ["0", "1", "2", "3"] as const;
+const AUTOCOMPLETE_CHOICES = ["3", "5", "7", "10", "15", "20"] as const;
+const IMAGE_WIDTH_CHOICES = ["60", "80", "120"] as const;
+const withCurrent = (choices: readonly string[], current: string): string[] =>
+  current && !choices.includes(current) ? [current, ...choices] : [...choices];
+
+/** Per-model override clear sentinel (stock's stepped-submenu "(clear
+ *  override)" — a menu value, removed from the map on commit). */
+const CLEAR_OVERRIDE = "(clear override)";
+
 /** One declarative row spec over the manager (order defines render order). */
 interface PiRowSpec {
   key: string;
@@ -93,8 +150,9 @@ export interface PiMenuLookup {
   /** Apply a theme LIVE and persist it (ctx.ui.setTheme with the name). */
   applyTheme?(name: string): void;
   /** Model catalog entries for the Default model row (ctx.modelRegistry
-   *  .getAvailable), rendered as `provider/id`. */
-  models?(): { provider: string; id: string; description?: string }[];
+   *  .getAvailable), rendered as `provider/id`. `reasoning` is the model's
+   *  reasoning flag — non-reasoning models only support the "off" level. */
+  models?(): { provider: string; id: string; description?: string; reasoning?: boolean }[];
 }
 
 /** The Default model row value: `provider/id` (either half alone renders as
@@ -152,43 +210,43 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
     {
       key: "pi.markdown.mermaid", tab: "Appearance", section: "Display", label: "Mermaid diagrams",
       kind: "string", value: m.getMermaidRenderingMode(), values: MERMAID_MODES, defaultValue: "streaming",
-      description: "How mermaid diagrams in responses are rendered.",
+      description: "Render Mermaid code blocks as Unicode diagrams.",
       set: (v) => m.setMermaidRenderingMode(str(v) as never),
     },
     {
       key: "pi.terminal.showTerminalProgress", tab: "Appearance", section: "Display", label: "Terminal progress",
       kind: "toggle", value: m.getShowTerminalProgress(), defaultValue: false,
-      description: "Report progress to the terminal's native progress protocol.",
+      description: "Show OSC 9;4 progress indicators in the terminal tab bar.",
       set: (v) => m.setShowTerminalProgress(Boolean(v)),
     },
     {
       key: "pi.terminal.clearOnShrink", tab: "Appearance", section: "Display", label: "Clear on shrink",
       kind: "toggle", value: m.getClearOnShrink(), defaultValue: false,
-      description: "Clear stale lines when the terminal shrinks. PI_CLEAR_ON_SHRINK env overrides.",
+      description: "Clear empty rows when content shrinks (may cause flicker). PI_CLEAR_ON_SHRINK env overrides.",
       set: (v) => m.setClearOnShrink(Boolean(v)),
     },
     {
       key: "pi.showHardwareCursor", tab: "Appearance", section: "Editor", label: "Show hardware cursor",
       kind: "toggle", value: m.getShowHardwareCursor(), defaultValue: false,
-      description: "Show the terminal's real cursor in the editor. PI_HARDWARE_CURSOR env overrides.",
+      description: "Show the terminal cursor while still positioning it for IME support. PI_HARDWARE_CURSOR env overrides.",
       set: (v) => m.setShowHardwareCursor(Boolean(v)),
     },
     {
       key: "pi.editorPaddingX", tab: "Appearance", section: "Editor", label: "Editor padding",
-      kind: "number", value: m.getEditorPaddingX(), defaultValue: 0,
-      description: "Horizontal editor padding in columns (0–3).",
+      kind: "string", value: String(m.getEditorPaddingX()), values: withCurrent(EDITOR_PAD_CHOICES, String(m.getEditorPaddingX())), defaultValue: "0",
+      description: "Horizontal padding for input editor (0-3).",
       set: num((n) => m.setEditorPaddingX(n)),
     },
     {
       key: "pi.outputPad", tab: "Appearance", section: "Editor", label: "Output padding",
       kind: "string", value: String(m.getOutputPad()), values: OUTPUT_PADS, defaultValue: "1",
-      description: "Add a blank line between output blocks.",
+      description: "Horizontal padding for user messages, assistant messages, and thinking.",
       set: (v) => m.setOutputPad(Number(v) === 0 ? 0 : 1),
     },
     {
       key: "pi.autocompleteMaxVisible", tab: "Appearance", section: "Editor", label: "Autocomplete max items",
-      kind: "number", value: m.getAutocompleteMaxVisible(), defaultValue: 5,
-      description: "Most completion rows shown at once (3–20).",
+      kind: "string", value: String(m.getAutocompleteMaxVisible()), values: withCurrent(AUTOCOMPLETE_CHOICES, String(m.getAutocompleteMaxVisible())), defaultValue: "5",
+      description: "Max visible items in autocomplete dropdown (3-20).",
       set: num((n) => m.setAutocompleteMaxVisible(n)),
     },
     {
@@ -200,43 +258,57 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
     {
       key: "pi.fullscreenExitOutput", tab: "Appearance", section: "Fullscreen", label: "Fullscreen exit output",
       kind: "string", value: m.getFullscreenExitOutput(), values: FULLSCREEN_EXIT, defaultValue: "transcript",
-      description: "What the alternate screen leaves behind on exit.",
+      description: "Print the transcript or only a session resume hint when exiting fullscreen mode.",
       set: (v) => m.setFullscreenExitOutput(str(v) as never),
     },
     {
       key: "pi.fullscreenScrollbar", tab: "Appearance", section: "Fullscreen", label: "Fullscreen scrollbar",
       kind: "string", value: m.getFullscreenScrollbar(), values: FULLSCREEN_SCROLLBAR, defaultValue: "auto",
-      description: "Scrollbar visibility in fullscreen mode.",
+      description: "Scrollbar behavior in fullscreen mode; has no effect in regular mode.",
       set: (v) => m.setFullscreenScrollbar(str(v) as never),
     },
     {
       key: "pi.fullscreenCopyOnSelect", tab: "Appearance", section: "Fullscreen", label: "Copy on select",
       kind: "toggle", value: m.getFullscreenCopyOnSelect(), defaultValue: true,
-      description: "Copy selected text in fullscreen mode automatically.",
+      description: "Automatically copy selected text in fullscreen mode; disable to copy selections with Ctrl+X.",
       set: (v) => m.setFullscreenCopyOnSelect(Boolean(v)),
+    },
+    {
+      key: "pi.fullscreenWheelScrollLines", tab: "Appearance", section: "Fullscreen", label: "Wheel scrolling",
+      kind: "string", value: String(m.getFullscreenWheelScrollLines()),
+      values: wheelChoices(String(m.getFullscreenWheelScrollLines())), defaultValue: "auto",
+      description: "Lines per mouse-wheel event in fullscreen mode; 'auto' speeds up fast wheel spins where the terminal does not.",
+      set: (v) => {
+        if (v === "auto") {
+          m.setFullscreenWheelScrollLines("auto");
+          return;
+        }
+        const n = Number(v);
+        if (Number.isFinite(n)) m.setFullscreenWheelScrollLines(n); // clamps 1-100
+      },
     },
     {
       key: "pi.terminal.showImages", tab: "Appearance", section: "Images", label: "Show images",
       kind: "toggle", value: m.getShowImages(), defaultValue: true,
-      description: "Render images inline in the terminal.",
+      description: "Render images inline in terminal.",
       set: (v) => m.setShowImages(Boolean(v)),
     },
     {
       key: "pi.terminal.imageWidthCells", tab: "Appearance", section: "Images", label: "Image width",
-      kind: "number", value: m.getImageWidthCells(), defaultValue: 60,
+      kind: "string", value: String(m.getImageWidthCells()), values: withCurrent(IMAGE_WIDTH_CHOICES, String(m.getImageWidthCells())), defaultValue: "60",
       description: "Preferred inline-image width in terminal cells.",
       set: num((n) => m.setImageWidthCells(n)),
     },
     {
       key: "pi.images.autoResize", tab: "Appearance", section: "Images", label: "Auto-resize images",
       kind: "toggle", value: m.getImageAutoResize(), defaultValue: true,
-      description: "Shrink oversized images to the terminal width.",
+      description: "Resize large images to 2000x2000 max for better model compatibility.",
       set: (v) => m.setImageAutoResize(Boolean(v)),
     },
     {
       key: "pi.images.blockImages", tab: "Appearance", section: "Images", label: "Block images",
       kind: "toggle", value: m.getBlockImages(), defaultValue: false,
-      description: "Refuse to send images to the model.",
+      description: "Prevent images from being sent to LLM providers.",
       set: (v) => m.setBlockImages(Boolean(v)),
     },
 
@@ -278,27 +350,68 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
     },
     {
       key: "pi.defaultThinkingLevel", tab: "Model", section: "Thinking", label: "Default thinking level",
-      kind: "string", value: str(m.getDefaultThinkingLevel() ?? "medium"), values: THINKING_LEVELS, defaultValue: "medium",
-      description: "Thinking level for new sessions.",
+      kind: "string", value: str(m.getDefaultThinkingLevel() ?? "medium"), defaultValue: "medium",
+      description: "Thinking level for new sessions. /thinking cycles in-session.",
+      menu: () => THINKING_LEVELS.map((l) => ({ value: l, description: THINKING_DESCRIPTIONS[l] })),
       set: (v) => m.setDefaultThinkingLevel(str(v) as never),
+    },
+    // ── Per-model thinking overrides (stock /settings "Default thinking level
+    //    per model") — one row per configured override + an "Add override"
+    //    menu row; openConfigPanel runs with rebuildOnCommit so rows appear
+    //    and disappear on commit.
+    ...Object.entries(m.getAllModelThinkingLevels()).map(([key, level]) => {
+      const at = key.indexOf("/");
+      const catalog = lookup?.models?.().find((mo) => `${mo.provider}/${mo.id}` === key);
+      const levels = catalog?.reasoning === false ? ["off"] : [...THINKING_LEVELS];
+      return {
+        key: `pi.modelThinkingLevels.${key}`, tab: "Model", section: "Thinking", label: key,
+        kind: "string" as const, value: str(level), defaultValue: CLEAR_OVERRIDE,
+        menu: () => [
+          ...levels.map((l) => ({ value: l, description: THINKING_DESCRIPTIONS[l] })),
+          { value: CLEAR_OVERRIDE, description: `Revert to the default thinking level (${str(m.getDefaultThinkingLevel() ?? "medium")}).` },
+        ],
+        description: `Per-model thinking override for ${key}. Takes effect for new sessions and model switches.`,
+        set: (v: unknown) => {
+          if (v === CLEAR_OVERRIDE) {
+            if (at > 0) m.removeModelThinkingLevel(key.slice(0, at), key.slice(at + 1));
+            return;
+          }
+          if (at > 0) m.setModelThinkingLevel(key.slice(0, at), key.slice(at + 1), str(v) as never);
+        },
+      };
+    }),
+    {
+      key: "pi.modelThinkingLevels.add", tab: "Model", section: "Thinking", label: "Add model override",
+      kind: "string", value: `${Object.keys(m.getAllModelThinkingLevels()).length} set`,
+      description: "Pick a catalog model, then choose its default thinking level on the row that appears. Applies to new sessions.",
+      ...(lookup?.models
+        ? {
+            menu: () => {
+              const overridden = new Set(Object.keys(m.getAllModelThinkingLevels()));
+              return (lookup.models?.() ?? [])
+                .filter((mo) => !overridden.has(`${mo.provider}/${mo.id}`))
+                .sort((a, b) => a.provider.localeCompare(b.provider) || a.id.localeCompare(b.id))
+                .map((mo) => ({
+                  value: `${mo.provider}/${mo.id}`,
+                  label: `${mo.provider}/${mo.id}`,
+                  ...(mo.description ? { description: mo.description } : {}),
+                }));
+            },
+          }
+        : {}),
+      set: (v: unknown) => {
+        const split = splitModel(v);
+        if (!split) return;
+        const catalog = lookup?.models?.().find((mo) => mo.provider === split.provider && mo.id === split.id);
+        const initial = catalog?.reasoning === false ? "off" : str(m.getDefaultThinkingLevel() ?? "medium");
+        m.setModelThinkingLevel(split.provider, split.id, initial as never);
+      },
     },
     {
       key: "pi.hideThinkingBlock", tab: "Model", section: "Thinking", label: "Hide thinking",
       kind: "toggle", value: m.getHideThinkingBlock(), defaultValue: false,
       description: "Collapse thinking blocks in the transcript.",
       set: (v) => m.setHideThinkingBlock(Boolean(v)),
-    },
-    {
-      key: "pi.transport", tab: "Model", section: "Network", label: "Transport",
-      kind: "string", value: m.getTransport(), values: TRANSPORTS, defaultValue: "auto",
-      description: "Streaming transport for provider requests.",
-      set: (v) => m.setTransport(str(v) as never),
-    },
-    {
-      key: "pi.httpIdleTimeoutMs", tab: "Model", section: "Network", label: "HTTP idle timeout",
-      kind: "number", value: m.getHttpIdleTimeoutMs(), defaultValue: 300000,
-      description: "Drop idle provider connections after this many ms.",
-      set: num((n) => m.setHttpIdleTimeoutMs(Math.max(0, n))),
     },
     {
       key: "pi.retry.enabled", tab: "Model", section: "Retry & Fallback", label: "Retry on failure",
@@ -309,13 +422,13 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
     {
       key: "pi.cacheWarming", tab: "Model", section: "Efficiency", label: "Cache warming",
       kind: "string", value: m.getCacheWarmingMode(), values: CACHE_WARMING, defaultValue: "streaming",
-      description: "Warm the prompt cache during streaming or idle time (costs tokens).",
+      description: "off: never; streaming: while the agent runs; idle: also between runs while continuation stays profitable.",
       set: (v) => m.setCacheWarmingMode(str(v) as never),
     },
     {
       key: "pi.showCacheMissNotices", tab: "Model", section: "Efficiency", label: "Cache miss notices",
       kind: "toggle", value: m.getShowCacheMissNotices(), defaultValue: false,
-      description: "Show a notice when the prompt cache is missed.",
+      description: "Show transcript notices for cache costs and provider recovery diagnostics.",
       set: (v) => m.setShowCacheMissNotices(Boolean(v)),
     },
     {
@@ -329,70 +442,58 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
     {
       key: "pi.steeringMode", tab: "Interaction", section: "Input", label: "Steering mode",
       kind: "string", value: m.getSteeringMode(), values: STEERING_MODES, defaultValue: "one-at-a-time",
-      description: "Queue one message at a time or all of them while the agent runs.",
+      description: "Enter while streaming queues steering messages. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once.",
       set: (v) => m.setSteeringMode(str(v) as never),
     },
     {
       key: "pi.followUpMode", tab: "Interaction", section: "Input", label: "Follow-up mode",
       kind: "string", value: m.getFollowUpMode(), values: STEERING_MODES, defaultValue: "one-at-a-time",
-      description: "How follow-up messages queue after a run finishes.",
+      description: "Queues follow-up messages until the agent stops. 'one-at-a-time': deliver one, wait for response. 'all': deliver all at once.",
       set: (v) => m.setFollowUpMode(str(v) as never),
     },
     {
       key: "pi.doubleEscapeAction", tab: "Interaction", section: "Input", label: "Double-escape action",
       kind: "string", value: m.getDoubleEscapeAction(), values: DOUBLE_ESCAPE, defaultValue: "tree",
-      description: "What double-Esc opens: session tree, fork picker, or nothing.",
+      description: "Action when pressing Escape twice with an empty editor.",
       set: (v) => m.setDoubleEscapeAction(str(v) as never),
     },
     {
       key: "pi.treeFilterMode", tab: "Interaction", section: "Input", label: "Tree filter mode",
       kind: "string", value: m.getTreeFilterMode(), values: TREE_FILTERS, defaultValue: "default",
-      description: "Default filter for the session tree view.",
+      description: "Default filter when opening /tree.",
       set: (v) => m.setTreeFilterMode(str(v) as never),
     },
     {
-      key: "pi.quietStartup", tab: "Interaction", section: "Startup & Notices", label: "Quiet startup",
+      key: "pi.quietStartup", tab: "Interaction", section: "Startup & Updates", label: "Quiet startup",
       kind: "toggle", value: m.getQuietStartup(), defaultValue: false,
-      description: "Skip the startup banner.",
+      description: "Disable verbose printing at startup.",
       set: (v) => m.setQuietStartup(Boolean(v)),
     },
     {
-      key: "pi.collapseChangelog", tab: "Interaction", section: "Startup & Notices", label: "Collapse changelog",
+      key: "pi.collapseChangelog", tab: "Interaction", section: "Startup & Updates", label: "Collapse changelog",
       kind: "toggle", value: m.getCollapseChangelog(), defaultValue: false,
-      description: "Show the changelog collapsed after an update.",
+      description: "Show condensed changelog after updates.",
       set: (v) => m.setCollapseChangelog(Boolean(v)),
     },
     {
-      key: "pi.enableSkillCommands", tab: "Interaction", section: "Startup & Notices", label: "Skill commands",
-      kind: "toggle", value: m.getEnableSkillCommands(), defaultValue: true,
-      description: "Expose skills as slash commands.",
-      set: (v) => m.setEnableSkillCommands(Boolean(v)),
-    },
-    {
-      key: "pi.defaultProjectTrust", tab: "Interaction", section: "Trust & Telemetry", label: "Default project trust",
-      kind: "string", value: m.getDefaultProjectTrust(), values: PROJECT_TRUST, defaultValue: "ask",
-      description: "Whether new projects are trusted without asking.",
+      key: "pi.defaultProjectTrust", tab: "Interaction", section: "Trust", label: "Default project trust",
+      kind: "string", value: trustLabel(m.getDefaultProjectTrust()), defaultValue: "Ask",
+      values: TRUST_LABELS.map(([label]) => label),
+      description: "Fallback behavior when no extension or saved trust decision decides project trust.",
       warning: "Trusting projects automatically lets their extensions and .env files run.",
-      set: (v) => m.setDefaultProjectTrust(str(v) as never),
-    },
-    {
-      key: "pi.enableInstallTelemetry", tab: "Interaction", section: "Trust & Telemetry", label: "Install telemetry",
-      kind: "toggle", value: m.getEnableInstallTelemetry(), defaultValue: true,
-      description: "Send anonymous install/update counts.",
-      set: (v) => m.setEnableInstallTelemetry(Boolean(v)),
-    },
-    {
-      key: "pi.enableAnalytics", tab: "Interaction", section: "Trust & Telemetry", label: "Analytics",
-      kind: "toggle", value: m.getEnableAnalytics(), defaultValue: false,
-      description: "Opt in to anonymous usage analytics (generates a tracking id on first enable).",
-      set: (v) => m.setEnableAnalytics(Boolean(v)),
+      set: (v) => {
+        // Accept the stock label (what the menu commits) or the raw enum.
+        const s = str(v);
+        const e = trustEnum(s) ?? (PROJECT_TRUST.includes(s as never) ? s : undefined);
+        if (e) m.setDefaultProjectTrust(e as never);
+      },
     },
 
     // ── Context ───────────────────────────────────────────────────────────
     {
       key: "pi.compaction.enabled", tab: "Context", section: "Compaction", label: "Auto-compact",
       kind: "toggle", value: m.getCompactionEnabled(), defaultValue: true,
-      description: "Compact the conversation automatically when it approaches the context limit.",
+      description: "Automatically compact context when it gets too large.",
       set: (v) => m.setCompactionEnabled(Boolean(v)),
     },
 
@@ -414,6 +515,78 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
       kind: "string", value: joinedList(m.getNpmCommand()),
       description: "Space-separated npm command override (e.g. a registry mirror wrapper).",
       set: (v) => m.setNpmCommand(splitList(v)),
+    },
+
+    // ── Tasks (OMP: Commands & Skills) ────────────────────────────────────
+    {
+      key: "pi.enableSkillCommands", tab: "Tasks", section: "Commands & Skills", label: "Skill commands",
+      kind: "toggle", value: m.getEnableSkillCommands(), defaultValue: true,
+      description: "Register skills as /skill:name commands.",
+      set: (v) => m.setEnableSkillCommands(Boolean(v)),
+    },
+    {
+      key: "pi.paths.skills", tab: "Tasks", section: "Commands & Skills", label: "Skill dirs",
+      kind: "string", value: joinedList(m.getSkillPaths()),
+      description: "Extra skill directories, space-separated (also loads ~/.pi/agent/skills and .pi/skills).",
+      set: (v) => m.setSkillPaths(splitList(v) ?? []),
+    },
+
+    // ── Providers (OMP: Protocol / Timeouts / Privacy) ────────────────────
+    {
+      key: "pi.transport", tab: "Providers", section: "Protocol", label: "Transport",
+      kind: "string", value: m.getTransport(), values: TRANSPORTS, defaultValue: "auto",
+      description: "Preferred transport for providers that support multiple transports.",
+      set: (v) => m.setTransport(str(v) as never),
+    },
+    {
+      key: "pi.httpIdleTimeoutMs", tab: "Providers", section: "Timeouts", label: "HTTP idle timeout",
+      kind: "string", value: httpTimeoutLabel(m.getHttpIdleTimeoutMs()), defaultValue: "5 min",
+      description: "Maximum idle gap while waiting for HTTP headers or body chunks. Disable for local models that pause longer than five minutes.",
+      set: (v) => {
+        const s = str(v);
+        const known = httpTimeoutMs(s);
+        if (known !== undefined) {
+          m.setHttpIdleTimeoutMs(known);
+          return;
+        }
+        // Custom labels render as "N sec" — keep them round-trippable, and
+        // ignore anything else (the panel passes raw typed text through).
+        const sec = /^([\d.]+) sec$/.exec(s);
+        const n = sec ? Number(sec[1]) * 1000 : Number(s);
+        if (Number.isFinite(n)) m.setHttpIdleTimeoutMs(Math.max(0, n));
+      },
+    },
+    {
+      key: "pi.enableInstallTelemetry", tab: "Providers", section: "Privacy", label: "Install telemetry",
+      kind: "toggle", value: m.getEnableInstallTelemetry(), defaultValue: true,
+      description: "Send an anonymous version/update ping after changelog-detected updates.",
+      set: (v) => m.setEnableInstallTelemetry(Boolean(v)),
+    },
+    {
+      key: "pi.enableAnalytics", tab: "Providers", section: "Privacy", label: "Analytics",
+      kind: "toggle", value: m.getEnableAnalytics(), defaultValue: false,
+      description: "Opt in to anonymous usage analytics (generates a tracking id on first enable).",
+      set: (v) => m.setEnableAnalytics(Boolean(v)),
+    },
+
+    // ── Tools (OMP: Extensions) / Context (Prompt templates) / Theme ──────
+    {
+      key: "pi.paths.extensions", tab: "Tools", section: "Extensions", label: "Extension dirs",
+      kind: "string", value: joinedList(m.getExtensionPaths()),
+      description: "Extra extension paths, space-separated (also loads ~/.pi/agent/extensions and .pi/extensions).",
+      set: (v) => m.setExtensionPaths(splitList(v) ?? []),
+    },
+    {
+      key: "pi.paths.prompts", tab: "Context", section: "Prompt templates", label: "Template dirs",
+      kind: "string", value: joinedList(m.getPromptTemplatePaths()),
+      description: "Extra prompt-template directories, space-separated (also loads ~/.pi/agent/prompts and .pi/prompts).",
+      set: (v) => m.setPromptTemplatePaths(splitList(v) ?? []),
+    },
+    {
+      key: "pi.paths.themes", tab: "Appearance", section: "Theme", label: "Theme dirs",
+      kind: "string", value: joinedList(m.getThemePaths()),
+      description: "Extra theme directories, space-separated (also loads ~/.pi/agent/themes and .pi/themes).",
+      set: (v) => m.setThemePaths(splitList(v) ?? []),
     },
   ];
 }
@@ -459,6 +632,9 @@ const PI_TAB_ICONS: Record<string, string> = {
   Interaction: "⌨️",
   Context: "🧠",
   Shell: "🖥️",
+  Tools: "🧰",
+  Tasks: "🗂️",
+  Providers: "🔌",
 };
 
 /** True when a row key belongs to the pi-settings contribution. */

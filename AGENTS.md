@@ -168,6 +168,21 @@ Mechanism (registry + loader):
   `flush()` drains the write queue on save. Only settings WITH a typed setter
   are surfaced (`externalEditor`, `sessionDir`, `defaultTools`,
   `branchSummary.*`, `httpProxy` have none — they stay config-file-only).
+  Coverage is full stock-`/settings` parity plus the setter-only extras:
+  per-model thinking overrides (one row per override — `pi.modelThinkingLevels.
+  <provider/id>` — plus an **Add model override** menu row; the clear option
+  reverts to the default), Fullscreen wheel scrolling, and the extra
+  resource-dir lists (extensions/skills/prompts/themes). Friendly choice forms
+  mirror stock (`30 sec`…`disabled`, `Ask`/`Always trust`/`Never trust`, the
+  padding/autocomplete/image-width sets, per-level thinking descriptions) —
+  those constants are replicated locally because pi does not export them from
+  its package root. OMP taxonomy holds: Providers · Protocol/Timeouts/Privacy,
+  Tasks · Commands & Skills, Tools · Extensions, Context · Prompt templates.
+- The panel kernel supports dynamic row sets via `ConfigPanelOpts
+  .rebuildOnCommit` (`ConfigPanelModel.rebuild`): after any committed edit
+  (toggle, menu pick, inline submit) the groups are rebuilt from `build` and
+  swapped in — that is how per-model override rows appear/disappear on commit.
+  `/config` turns it on; static row sets leave it off.
 - `/config` builds the panel per open: pi-settings groups + every module's
   groups (Enable row prepended to the module's first section) + plugins, sorted
   by `PI_TAB_ORDER`. Every contribution renders even while its module is
