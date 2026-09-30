@@ -25,7 +25,7 @@ skills/                  skill directories shipped with the package (contributed
 - A module default-exports a factory `(pi: ExtensionAPI, deps?: ModuleLoadDeps) => void` (deps is rarely used — the config module reads the contribution map); it registers commands/tools/handlers and returns. Public extension API only.
 - No external runtime dependencies — vendor shared code under `extensions/lib/` (with a `// ponytail: vendored from <pkg> <version>` header) rather than adding `dependencies`.
 - Tests: `node:test` + tsx, in `extensions/modules/<name>/test/`. The bundle root `package.json` `test` script globs them. Test dirs are excluded from `tsc --noEmit` when they use loose harness stubs (usage, ponytail); they run under tsx.
-- To add a module: create `extensions/modules/<name>/`, append one entry to `MODULES` in `extensions/lib/registry.ts` (order matters — usage reads the `router` provider, so router loads first; config loads last, it reads the contribution map), add its test files to the `test` glob if not covered. The conflict guard covers you: a name another module already claimed throws at load.
+- To add a module: create `extensions/modules/<name>/`, append one entry to `MODULES` in `extensions/lib/registry.ts` under its category banner (each entry's `category` field is the OMP tab — the single source for /config tab placement, synthesized Enable-only sections, and /ceulen status grouping; pretty section names live in the config module's `PRETTY_OF` map). Order matters — usage reads the `router` provider, so router loads first; config loads last, it reads the contribution map. Add its test files to the `test` glob if not covered. The conflict guard covers you: a name another module already claimed throws at load.
 
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 
@@ -43,7 +43,7 @@ skills/                  skill directories shipped with the package (contributed
 
 ## Settings / kill-switch
 
-`ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). `/config` writes to whichever file currently carries the `ceulen` section (see the config-module section) — never a shadowed layer. The deprecated `"sub"` key is still treated as `"usage"`. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
+`ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). `/config` writes to whichever file currently carries the `ceulen` section (see the config-module section) — never a shadowed layer. The deprecated `"sub"` key is still treated as `"usage"`. **CORE modules** (`ModuleEntry.core: true`, today `composer`) are always loaded: `readDisabled`/`writeDisabled` filter them (a stale entry can't disable one), `nextDisabled` never lists them, and the config panel adds no Enable row. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
 
 ## Yardmaster usage contract (usage module)
 
@@ -205,7 +205,7 @@ a synthesized Enable-only section (usage → **Appearance** · `Usage footer`;
 config → **Plugins** · `Ceulen config`). The per-module kill-switch rows are
 NOT a standalone tab: `withEnableRow()` prepends the module's Enable row (key
 `ceulen.disabled.<name>`, warning "Takes effect after /reload") to its own
-section — a feature is turned on where it is configured. **Plugins**
+section — a feature is turned on where it is configured. **composer**
 (bundle-level, not a module contribution): Pi-package enable/disable, see
 above.
 

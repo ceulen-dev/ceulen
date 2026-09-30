@@ -59,11 +59,23 @@ export default function ceulen(pi: ExtensionAPI) {
   pi.registerCommand("ceulen", {
     description: "Ceulen config — module status",
     handler: async (_args, ctx) => {
-      const active = MODULES.filter((m) => !disabled.has(m.name)).map((m) => m.name);
-      const off = MODULES.filter((m) => disabled.has(m.name)).map((m) => m.name);
+      // Grouped by each module's registry category (OMP taxonomy) — same
+      // order as the registry, which is the /config tab order too.
+      const byCat = new Map<string, { active: string[]; off: string[] }>();
+      for (const m of MODULES) {
+        const g = byCat.get(m.category) ?? { active: [], off: [] };
+        (disabled.has(m.name) ? g.off : g.active).push(m.name);
+        byCat.set(m.category, g);
+      }
+      const lines: string[] = [];
+      for (const [cat, g] of byCat) {
+        lines.push(`${cat}: ${g.active.join(", ")}${g.off.length ? ` (disabled: ${g.off.join(", ")})` : ""}`);
+      }
+      const activeCount = MODULES.length - disabled.size;
+      const core = MODULES.filter((m) => m.core).map((m) => m.name);
       ctx.ui.notify(
-        `Ceulen ${active.length} module(s) active: ${active.join(", ")}` +
-          (off.length ? ` · disabled: ${off.join(", ")}` : "") +
+        `Ceulen ${activeCount} module(s) active:\n  ${lines.join("\n  ")}` +
+          (core.length ? `\nCore (always on): ${core.join(", ")}` : "") +
           "\nConfigure: /config",
         "info",
       );

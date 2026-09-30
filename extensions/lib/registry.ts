@@ -14,6 +14,7 @@ import type { PanelGroup } from "./panel.js";
 import routerModule from "../modules/router/index.ts";
 import { routerConfig } from "../modules/router/configPanel.ts";
 import usageModule from "../modules/usage/index.ts";
+import composerModule, { composerConfig } from "../modules/composer/index.ts";
 import ponytailModule, { ponytailConfig } from "../modules/ponytail/index.ts";
 import configModule from "../modules/config/index.ts";
 
@@ -36,6 +37,15 @@ export interface ModuleLoadDeps {
 
 export interface ModuleEntry {
   name: string;
+  /** Core modules are always loaded — the kill-switch can't disable them and
+   *  /config shows no Enable row (composer owns the editor surface: a
+   *  half-configured composer is worse than none). */
+  core?: boolean;
+  /** OMP-taxonomy tab the module's /config sections live in — the single
+   *  source for tab placement, synthesized Enable-only sections, and /ceulen
+   *  status grouping (the {section, icon} pretty-names stay in the config
+   *  module's local map). */
+  category: string;
   /** One-line module purpose — rendered as the kill-switch row's description
    *  and reused by /ceulen status output. */
   describe?: string;
@@ -48,15 +58,25 @@ export interface ModuleEntry {
 // ponytail: module registry grows by append — one object per module, loader
 // stays ~10 lines forever, no plugin framework
 export const MODULES: ModuleEntry[] = [
+  // ── Providers ──────────────────────────────────────────────────────────
   // Router first: usage reads the `router` provider for usage display.
-  { name: "router", describe: "Route requests to a yardmaster/OmniRoute endpoint and expose its models.", load: routerModule, config: routerConfig },
-  { name: "usage", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
-  { name: "ponytail", describe: "Lazy-senior-dev mode: prompts, status, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
+  { name: "router", category: "Providers", describe: "Route requests to a yardmaster/OmniRoute endpoint and expose its models.", load: routerModule, config: routerConfig },
+  // ── Appearance ─────────────────────────────────────────────────────────
+  { name: "usage", category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
+  { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },
+  // ── Tasks ──────────────────────────────────────────────────────────────
+  { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, status, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
+  // ── Plugins ────────────────────────────────────────────────────────────
   // Config last: it owns /config and reads the contrib map.
-  { name: "config", describe: "This panel — /config central settings for every module.", load: configModule },
+  { name: "config", category: "Plugins", describe: "This panel — /config central settings for every module.", load: configModule },
 ];
 
 // ── Kill-switch settings ─────────────────────────────────────────────────────
+
+/** True when the module is core (always loaded, never kill-switchable). */
+export function isCore(name: string): boolean {
+  return MODULES.some((m) => m.name === name && m.core === true);
+}
 
 /** Candidate settings files in read precedence: trusted project scope first
  *  (when trusted), then agent dirs. */
@@ -104,7 +124,10 @@ export function readDisabled(cwd = process.cwd()): string[] {
     const raw = (JSON.parse(readFileSync(file, "utf8"))?.ceulen ?? {}) as { disabled?: unknown };
     if (!Array.isArray(raw.disabled)) return [];
     // ponytail: deprecated "sub" alias — the module was renamed to "usage"; drop when no settings ship it
-    return raw.disabled.map((n) => (n === "sub" ? "usage" : n)).filter((n): n is string => typeof n === "string");
+    // Core modules are never disableable — a stale/foreign entry is ignored.
+    return raw.disabled
+      .map((n) => (n === "sub" ? "usage" : n))
+      .filter((n): n is string => typeof n === "string" && !isCore(n));
   } catch {
     return []; // malformed → defaults (all modules on)
   }
@@ -125,7 +148,7 @@ export function writeDisabled(list: string[], cwd = process.cwd()): string {
     }
   }
   const ceulen = (settings.ceulen ?? {}) as Record<string, unknown>;
-  ceulen.disabled = list;
+  ceulen.disabled = list.filter((n) => !isCore(n));
   settings.ceulen = ceulen;
   mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + ".tmp";

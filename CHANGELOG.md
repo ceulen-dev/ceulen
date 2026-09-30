@@ -2,6 +2,27 @@
 
 ## Unreleased
 
+- **composer** (new CORE module): Composer Shape for the input editor with
+  OMP's full vocabulary and copy — **Status Band** (default) · **Rounded Box**
+  · **Claude Code** · **Pi** · **Borderless** · **Top Rule Dock** · **Compact
+  Field** · **Accent Rail**. Browsing the Shape row renders a live preview
+  block in the panel through the same chrome builders the running editor
+  uses (no drift); Enter applies to the running editor immediately
+  (text/autocomplete/app keybindings preserved via `CustomEditor`
+  duck-typing) and persists `composer.shape`. Side borders, prompt gutters
+  and filled surfaces are composed by re-laying the editor out at the
+  shape's content width and wrapping each row — the cursor marker survives,
+  so wrapping and hardware-cursor placement stay exact. Status-bearing
+  shapes show live model · cwd · context-%; the working spinner stays
+  visible in every shape. Always on: no kill-switch (a half-configured
+  composer is worse than none).
+- **config**: rows can carry a `previewLines` hook — a read-only preview
+  block under the rows pane / selection menu that follows the highlighted
+  option (OMP's settings-screen preview window).
+- **registry**: modules are categorized — `ModuleEntry.category` (the OMP
+  tab) is now the single source for /config tab placement, synthesized
+  Enable-only sections, and `/ceulen` status grouping (now rendered per
+  category: `Providers: router · Appearance: usage, composer · …`).
 - **config**: multi-choice rows now open an **OMP-style selection menu**
   instead of cycling — press Enter on Theme, Default thinking level, Transport,
   Mermaid mode, ponytail mode, … and the panel swaps to a full option list:

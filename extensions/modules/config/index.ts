@@ -21,7 +21,7 @@
 
 import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { openConfigPanel, row, type PanelGroup } from "../../lib/panel.js";
-import { agentDirs, MODULES, disabledSource, readDisabled, writeDisabled, type ModuleConfig, type ModuleLoadDeps } from "../../lib/registry.js";
+import { agentDirs, isCore, MODULES, disabledSource, readDisabled, writeDisabled, type ModuleConfig, type ModuleLoadDeps } from "../../lib/registry.js";
 import { buildPiSettingsGroups, isPiKey, PI_TAB_ORDER, type PiMenuLookup } from "./piSettings.js";
 import { buildPluginsGroups, isPluginsKey, openPluginsWorking, savePlugins } from "./plugins.js";
 
@@ -30,6 +30,7 @@ export const KILL_SWITCH_PREFIX = "ceulen.disabled.";
 /** Read the current kill-switch state as a Set of ENABLED module names. */
 function enabledModules(): Set<string> {
   const disabled = new Set(readDisabled());
+  // Core modules are always enabled, whatever a stale settings file says.
   return new Set(MODULES.map((m) => m.name).filter((n) => !disabled.has(n)));
 }
 
@@ -54,15 +55,17 @@ export function moduleEnableRow(name: string, describe: string, working: Set<str
 
 /** Prepend a module's Enable row to the FIRST group of its contribution. */
 export function withEnableRow(groups: PanelGroup[], name: string, describe: string, working: Set<string>): PanelGroup[] {
+  // Core modules are always on — no kill-switch row (nothing to toggle).
+  if (isCore(name)) return groups;
   const [first, ...rest] = groups;
   if (!first) return groups;
   return [{ ...first, rows: [moduleEnableRow(name, describe, working), ...first.rows] }, ...rest];
 }
 
 /** The kill-switch list that results from toggling `working` (enabled set).
- *  Pure — exported for tests. */
+ *  Pure — exported for tests. Core modules are excluded (never disableable). */
 export function nextDisabled(working: Set<string>): string[] {
-  return MODULES.map((m) => m.name).filter((n) => !working.has(n));
+  return MODULES.filter((m) => !m.core).map((m) => m.name).filter((n) => !working.has(n));
 }
 
 /** Runtime lookups for the pi-settings menu rows, built from the /config
@@ -163,15 +166,22 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
   // so a save that re-registers a provider stays the owner's claim.
   const factories = deps?.configContribs ?? new Map<string, () => ModuleConfig>();
 
-  // Where each module's section lives in OMP's taxonomy. A module WITHOUT a
-  // contribution factory (usage, config) renders an Enable-only section here;
-  // unknown modules fall back to their own tab so a new module still renders.
-  const SECTION_OF: Record<string, { tab: string; section: string; icon: string }> = {
-    router: { tab: "Providers", section: "Router", icon: "🌐" },
-    usage: { tab: "Appearance", section: "Usage footer", icon: "📊" },
-    ponytail: { tab: "Tasks", section: "Ponytail", icon: "🦥" },
-    config: { tab: "Plugins", section: "Ceulen config", icon: "🧩" },
+  // Where each module's section lives in OMP's taxonomy — pretty section
+  // names + icons only; the TAB comes from the registry's `category` (one
+  // source: adding a module = one registry entry, no second map to touch).
+  // A module WITHOUT a contribution factory (usage, config) renders an
+  // Enable-only section here; unknown modules fall back to their own tab so
+  // a new module still renders.
+  const PRETTY_OF: Record<string, { section: string; icon: string }> = {
+    router: { section: "Router", icon: "🌐" },
+    usage: { section: "Usage footer", icon: "📊" },
+    composer: { section: "Composer", icon: "🎨" },
+    ponytail: { section: "Ponytail", icon: "🦥" },
+    config: { section: "Ceulen config", icon: "🧩" },
   };
+  const SECTION_OF: Record<string, { tab: string; section: string; icon: string | undefined }> = Object.fromEntries(
+    MODULES.map((m) => [m.name, { tab: m.category, section: PRETTY_OF[m.name]?.section ?? m.name, icon: PRETTY_OF[m.name]?.icon }]),
+  );
 
   pi.registerCommand("config", {
     description: "Central settings panel for all ceulen modules.",
@@ -204,10 +214,12 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
         });
         // Modules with no contribution factory still need their Enable row
         // reachable (usage, config itself) — and a disabled module needs the
-        // same synthesized section to be switchable back on.
+        // same synthesized section to be switchable back on. Core modules are
+        // always on: no synthesized Enable-only section (their contribution,
+        // if any, renders without one).
         for (const m of MODULES) {
           const section = SECTION_OF[m.name];
-          if (!section || seen.has(m.name)) continue;
+          if (!section || seen.has(m.name) || m.core) continue;
           modGroups.push({
             key: `ceulen-${m.name}`,
             label: section.section,

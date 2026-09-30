@@ -44,6 +44,24 @@ Router · command-code 5h:82% W:64% M:31% M:$12.40
 
 Needs a yardmaster API key with the **usage** permission — the same key you `/login router` with works if it has that permission.
 
+### composer — Composer Shape for the input editor
+
+Re-chrome Pi's input editor from `/config` (Appearance → Composer Shape) with
+OMP's full composer vocabulary — **Status Band** (default) · **Rounded Box** ·
+**Claude Code** · **Pi** · **Borderless** · **Top Rule Dock** · **Compact
+Field** · **Accent Rail** — each with OMP's own label and one-line
+description in the selection menu. Browsing the Shape row previews the shape
+right in the panel (rendered through the same chrome builders the live editor
+uses — no drift); Enter applies it to the running editor immediately — text,
+autocomplete and all app keybindings intact (the custom editor extends Pi's
+`CustomEditor`) — and persists `composer.shape` to the global settings.json.
+Status-bearing shapes (Band, Box, Claude, Top Rule Dock) show live session
+data — model · directory · context %; the working spinner stays visible in
+every shape. **Core module**: always loaded, no kill-switch — a
+half-configured composer is worse than none.
+
+- Config: `composer.shape` in `~/.pi/agent/settings.json` — via `/config` (Appearance tab)
+
 ### ponytail — lazy-senior-dev mode
 
 Lazy mode for the agent itself: `/ponytail off|lite|full|ultra|review` switches the over-engineering discipline level (persisted per session); `stop ponytail` / `normal mode` deactivates. The active level is injected into the system prompt each turn, shown in the status bar, and inherited by subagents. Ships the six `ponytail*` skills (`/ponytail-review|audit|gain|debt|help`).
@@ -62,7 +80,7 @@ categories don't render). A tab with several settings groups shows them as a
 left sidebar of sections with the underlined section headings repeated beside
 the detail rows, OMP style; the sidebar geometry stays identical across tabs.
 
-- **Appearance** — pi theme, display/editor/fullscreen/terminal-image settings, plus the usage-footer module switch
+- **Appearance** — pi theme, display/editor/fullscreen/terminal-image settings, plus the usage-footer and composer module switches
 - **Model** — default model/provider, thinking, network transport/timeouts, retry, cache warming
 - **Interaction** — steering/follow-up modes, double-escape + tree filter, startup notices, trust & telemetry
 - **Context / Shell** — auto-compact, shell path/prefix, npm command

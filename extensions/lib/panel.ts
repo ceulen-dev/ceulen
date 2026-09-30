@@ -88,6 +88,12 @@ export interface PanelRow {
    *  the original value back through `preview` can't restore values that
    *  aren't valid options (e.g. the "auto" theme setting). */
   previewCancel?: () => void;
+  /** Read-only preview render (OMP's settings-screen preview window): the
+   *  block rendered under the rows pane / open submenu for this row — while
+   *  browsing a submenu, `value` is the HIGHLIGHTED option's value so the
+   *  preview follows the cursor. Pure: fired per render, never mutates
+   *  anything. `width` is the body's inner width; lines are truncated to it. */
+  previewLines?: (value: string, width: number) => string[];
   /** Declared default; a current value that differs renders warning-styled so
    *  the user sees at a glance what this session changed. */
   defaultValue?: unknown;
@@ -121,6 +127,7 @@ export interface PanelRowOpts {
   menu?: () => PanelMenuOption[];
   preview?: (value: string) => void;
   previewCancel?: () => void;
+  previewLines?: (value: string, width: number) => string[];
   defaultValue?: unknown;
   completions?: () => PanelCompletionItem[];
 }
@@ -166,6 +173,7 @@ export function row(
     menu: opts.menu,
     preview: opts.preview,
     previewCancel: opts.previewCancel,
+    previewLines: opts.previewLines,
     defaultValue: opts.defaultValue,
     ...(opts.completions && { completions: opts.completions }),
     set(v: unknown) {
@@ -898,6 +906,25 @@ export class ConfigPanelModel implements Component {
         }
       }
     }
+
+    // Preview block (OMP's settings-screen preview window): a read-only
+    // render under the rows pane or the open submenu — the selected row's
+    // (menu: highlighted option's) previewLines, clamped into the remaining
+    // body budget. No key handling; the pad below still fills the frame.
+    const pvRow = this.menuItem?.row ?? selectedRow;
+    const pvValue = this.menuItem
+      ? String(this.menuItem.view[this.menuItem.idx]?.value ?? pvRow?.value ?? "")
+      : String(pvRow?.value ?? "");
+    const pvLines = pvRow?.previewLines ? pvRow.previewLines(pvValue, iw) : [];
+    if (pvLines.length > 0 && contentRows - body.length > 2) {
+      body.push("");
+      body.push(this.color("dim", "Preview:"));
+      for (const line of pvLines) {
+        if (body.length >= contentRows) break;
+        body.push(truncateToWidth(line, iw));
+      }
+    }
+
     while (body.length < contentRows) body.push("");
     for (const line of body.slice(0, contentRows)) lines.push(this.boxRow(line, w));
 
