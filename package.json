@@ -38,8 +38,8 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "^0.99.1",
-    "@earendil-works/pi-tui": "^0.99.1"
+    "@earendil-works/pi-coding-agent": ">=0.99.1 <0.101.0",
+    "@earendil-works/pi-tui": ">=0.99.1 <0.101.0"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",

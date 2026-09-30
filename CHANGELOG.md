@@ -3,8 +3,8 @@
 ## 0.5.0 — 2026-09-30
 
 - **pi 0.99.1 compatibility**: peer dependencies widened from
-  `>=0.80.8 <0.88.0` to `^0.99.1` for both `@earendil-works/pi-coding-agent`
-  and `@earendil-works/pi-tui`. No code changes — all surfaces verified:
+  `>=0.80.8 <0.88.0` to `>=0.99.1 <0.101.0` for both
+  `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`. No code changes — all surfaces verified:
   registration API (guarded() claims), composer `CustomEditor` duck-typing,
   theme Proxy/`setTheme` semantics, `session_start` re-fire, trust.json
   gating, jiti extension loading (the 0.99 tsx→type-stripping switch affects
