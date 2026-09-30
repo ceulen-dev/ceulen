@@ -1,10 +1,17 @@
 # Changelog
 
+## 0.5.1 — 2026-09-30
+
+- Widened pi peer range from `^0.99.1` to `>=0.99.1 <0.101.0`: caret on a
+  0.x dependency is patch-only (≥0.99.1 <0.100.0), too narrow for pi's fast
+  minor releases. No other changes.
+
 ## 0.5.0 — 2026-09-30
 
 - **pi 0.99.1 compatibility**: peer dependencies widened from
-  `>=0.80.8 <0.88.0` to `>=0.99.1 <0.101.0` for both
-  `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`. No code changes — all surfaces verified:
+  `>=0.80.8 <0.88.0` to `^0.99.1` for both
+  `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` (range
+  corrected to `>=0.99.1 <0.101.0` in 0.5.1). No code changes — all surfaces verified:
   registration API (guarded() claims), composer `CustomEditor` duck-typing,
   theme Proxy/`setTheme` semantics, `session_start` re-fire, trust.json
   gating, jiti extension loading (the 0.99 tsx→type-stripping switch affects
