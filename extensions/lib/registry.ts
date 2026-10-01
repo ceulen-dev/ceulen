@@ -16,6 +16,7 @@ import { routerConfig } from "../modules/router/configPanel.ts";
 import usageModule from "../modules/usage/index.ts";
 import composerModule, { composerConfig } from "../modules/composer/index.ts";
 import ponytailModule, { ponytailConfig } from "../modules/ponytail/index.ts";
+import uxModule, { uxConfig } from "../modules/ux/index.ts";
 import serenaModule from "../modules/serena/index.ts";
 import fffModule from "../modules/fff/index.ts";
 import rtkModule from "../modules/rtk/index.ts";
@@ -70,6 +71,7 @@ export const MODULES: ModuleEntry[] = [
   // ── Appearance ─────────────────────────────────────────────────────────
   { name: "usage", category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
   { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },
+  { name: "ux", category: "Appearance", describe: "Anti-slop UI/UX design discipline: /ux modes, ux_audit tool, design skills. No status-bar footprint.", load: uxModule, config: uxConfig, tools: ["ux_audit"] },
   // ── Tasks ──────────────────────────────────────────────────────────────
   { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, status, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
   // ── Tools ──────────────────────────────────────────────────────────────

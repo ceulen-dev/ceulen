@@ -82,6 +82,13 @@ Lazy mode for the agent itself: `/ponytail off|lite|full|ultra|review` switches 
 - Config: `~/.config/ponytail/config.json` or `PONYTAIL_*` envs
 - Command: `/ponytail [mode|status]` — default mode via `/config` (Tasks tab)
 
+### ux — anti-slop UI/UX design discipline
+
+Design discipline for UI work: `/ux off|lite|strict` switches the level (persisted per session; `stop ux` / `normal mode` deactivates). The active level injects the ux-design method into the system prompt each turn — tokens only, named elevation, full interaction states, no AI-slop tells — and `strict` additionally blocks handoff until the `ux_audit` tool passes (deterministic APCA-contrast/token/state/slop gates, no model needed). Ships the four `ux-*` skills (`ux-design`, `ux-presets`, `ux-routing`, `ux-capture`). Renders **no status-bar segment**.
+
+- Config: `~/.config/pi-ux/config.json` or `PI_UX_*` envs
+- Command: `/ux [mode|status]`, tool: `ux_audit` (per-tool toggle in `/config`) — default mode via `/config` (Appearance → UX discipline)
+
 ### config — central settings panel
 
 `/config` opens one fullscreen panel for **pi core settings and every ceulen
@@ -93,7 +100,7 @@ categories don't render). A tab with several settings groups shows them as a
 left sidebar of sections with the underlined section headings repeated beside
 the detail rows, OMP style; the sidebar geometry stays identical across tabs.
 
-- **Appearance** — pi theme, display/editor/fullscreen/terminal-image settings, plus the usage-footer and composer module switches
+- **Appearance** — pi theme, display/editor/fullscreen/terminal-image settings, plus the usage-footer, composer and ux-discipline module switches
 - **Model** — default model/provider, thinking, network transport/timeouts, retry, cache warming
 - **Interaction** — steering/follow-up modes, double-escape + tree filter, startup notices, trust & telemetry
 - **Context / Shell** — auto-compact, shell path/prefix, npm command

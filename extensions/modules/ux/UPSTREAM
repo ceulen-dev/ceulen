@@ -1,0 +1,24 @@
+upstream-url: https://github.com/bacnh85/pi-extensions (pi-ux package)
+upstream-version: 0.6.6
+fork-date: 2026-10-01
+fork-source: /Volumes/Dev/agents/pi-extensions/pi-ux @ 0.6.6
+
+# Port of pi-ux 0.6.6 into the ceulen ux module:
+# - hooks/ux-audit.js  → lib/audit.ts (CJS → ESM TS, logic verbatim)
+# - hooks/ux-config.js → lib/config.ts (getHideStatus dropped — no status bar)
+# - hooks/ux-instructions.js → lib/instructions.ts (SKILL.md path → package skills/)
+# - extensions/index.js → index.ts
+# - skills/ux-{design,capture,presets,routing} → package skills/ (upstream content)
+#
+# Deliberate divergences from upstream:
+# - NO status bar: no setStatus, no agent_start/agent_end sync, no hideStatus
+#   setting/env (PI_UX_HIDE_STATUS is ignored).
+# - Bare /ux reports status instead of resetting to the default (ponytail #99
+#   precedent, same as ceulen's ponytail module).
+# - /ux default <mode> subcommand dropped — the default mode is owned by the
+#   central /config panel (ux.defaultMode row) writing via writeDefaultMode.
+# - parseUxCommand/parse API mirrors ceulen's ponytail (status/set-mode/invalid).
+#
+# Config contract preserved from upstream: ~/.config/pi-ux/config.json
+# (defaultMode, quietStartup) + PI_UX_DEFAULT_MODE / PI_UX_QUIET_STARTUP env
+# overrides — existing pi-ux users keep their settings across the port.

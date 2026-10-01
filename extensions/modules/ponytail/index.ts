@@ -12,6 +12,7 @@ import type {
   ExtensionContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
+import path from "node:path";
 import {
   DEFAULT_MODE,
   RUNTIME_MODES,
@@ -178,11 +179,17 @@ export function ponytailConfig(): ModuleConfig {
 }
 
 export default function ponytailExtension(pi: ExtensionAPI) {
-  // Skills ship in-package (../skills/, 3 levels up from the module dir) and are
-  // contributed through resources_discover — NOT via the package.json `pi.skills`
-  // manifest — so the kill-switch gates them too: disabled module ⇒ factory never
-  // runs ⇒ no /skill:ponytail* entries registered.
-  pi.on("resources_discover", () => ({ skillPaths: [new URL("../../../skills/", import.meta.url).pathname] }));
+  // Skills ship in-package (../skills/ponytail*/, 3 levels up from the module
+  // dir) and are contributed through resources_discover — NOT via the
+  // package.json `pi.skills` manifest — so the kill-switch gates them too:
+  // disabled module ⇒ factory never runs ⇒ no /skill:ponytail* entries
+  // registered. Only THIS module's dirs (not the skills/ root — the ux module
+  // owns its own entries there; a whole-dir path would leak ux skills past the
+  // ux kill-switch whenever ponytail is enabled).
+  const skillsRoot = new URL("../../../skills/", import.meta.url).pathname;
+  pi.on("resources_discover", () => ({
+    skillPaths: ["ponytail", "ponytail-audit", "ponytail-debt", "ponytail-gain", "ponytail-help", "ponytail-review"].map((n) => path.join(skillsRoot, n)),
+  }));
 
   let currentMode: PonytailMode = DEFAULT_MODE;
   let configuredDefaultMode: PonytailMode = getDefaultMode();

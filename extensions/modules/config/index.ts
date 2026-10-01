@@ -232,6 +232,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
     router: { section: "Router", icon: "🌐" },
     usage: { section: "Usage footer", icon: "📊" },
     composer: { section: "Composer", icon: "🎨" },
+    ux: { section: "UX discipline", icon: "📐" },
     ponytail: { section: "Ponytail", icon: "🦥" },
     serena: { section: "Serena" },
     fff: { section: "FFF search" },

@@ -5,7 +5,8 @@
   "exclude": [
     "node_modules",
     "extensions/modules/usage/test",
-    "extensions/modules/ponytail/test"
+    "extensions/modules/ponytail/test",
+    "extensions/modules/ux/test"
   ],
   "compilerOptions": {
     "target": "ES2022",

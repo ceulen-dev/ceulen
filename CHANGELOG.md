@@ -1,6 +1,23 @@
 # Changelog
 
 ## Unreleased
+- **ux** (new module, ported from `@bacnh85/pi-ux` 0.6.6): anti-slop UI/UX
+  design discipline — `/ux off|lite|strict` (session-persisted, `stop ux` /
+  `normal mode` deactivates) injects the ux-design method into the system
+  prompt each turn; strict blocks handoff until the `ux_audit` tool passes
+  (deterministic APCA-contrast / token / state / slop-tell gates, no model).
+  Ships the four `ux-*` skills (`ux-design`, `ux-presets`, `ux-routing`,
+  `ux-capture`) through `resources_discover`, gated by the module kill-switch.
+  Configured in `/config` (Appearance → UX discipline: default mode,
+  quiet startup; per-tool toggle for `ux_audit`) — persists to
+  `~/.config/pi-ux/config.json` with `PI_UX_*` env overrides, so standalone
+  pi-ux settings carry over. **No status-bar footprint** (upstream's status
+  segment, `hideStatus` setting and `PI_UX_HIDE_STATUS` are dropped), and
+  bare `/ux` reports status instead of resetting (ponytail #99 precedent);
+  `/ux default <mode>` is gone — the central panel owns defaults. The
+  ponytail module's skill contribution was narrowed from the whole `skills/`
+  root to its own six `ponytail*` dirs so the ux kill-switch actually gates
+  the ux skills.
 - **themes** (new package resource): 104 selectable themes ship with the bundle —
   the 4 from `@bacnh85/pi-themes` (`pi-dark`, `pi-mirage`, `pi-light`,
   `pi-catppuccin-mocha`) plus 100 from oh-my-pi's collection (`dark-*` /

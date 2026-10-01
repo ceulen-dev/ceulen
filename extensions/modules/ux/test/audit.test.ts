@@ -1,0 +1,756 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
+
+import {
+  channelLuminance,
+  relativeLuminance,
+  contrastRatio,
+  parseHex,
+  parseOklch,
+  parseRgb,
+  parseHsl,
+  parseColor,
+  sRGBtoY,
+  apcaContrastLc,
+  apcaThreshold,
+  extractTokens,
+  scanOffSystem,
+  scanStates,
+  scanSlopTells,
+  audit,
+} from "../lib/audit.js";
+import { formatAuditResult, resolveAuditCss } from "../index.js";
+
+// --- WCAG math ------------------------------------------------------------
+
+test("channelLuminance linearises sRGB (0 and 255 extremes)", () => {
+  assert.equal(channelLuminance(0), 0);
+  assert.ok(channelLuminance(255) > 0.99 && channelLuminance(255) < 1.01);
+});
+
+test("relativeLuminance handles 3-digit and 6-digit hex", () => {
+  assert.equal(relativeLuminance("#000"), relativeLuminance("#000000"));
+  assert.equal(relativeLuminance("#fff"), relativeLuminance("#FFFFFF"));
+});
+
+test("relativeLuminance strips alpha from 4/8-digit hex (#RRGGBBAA / #RGBA)", () => {
+  assert.equal(relativeLuminance("#ff0000"), relativeLuminance("#ff0000ff"));
+  assert.equal(relativeLuminance("#f00"), relativeLuminance("#f00f"));
+  assert.equal(relativeLuminance("#0066ff"), relativeLuminance("#0066ff80"));
+});
+
+test("relativeLuminance returns null for garbage", () => {
+  assert.equal(relativeLuminance("red"), null);
+  assert.equal(relativeLuminance("#12345"), null);
+});
+
+test("contrastRatio: white/black = 21, identical = 1", () => {
+  assert.equal(contrastRatio("#000", "#000"), 1);
+  // ponytail: 21:1 is the WCAG maximum; allow float rounding.
+  const max = contrastRatio("#fff", "#000");
+  assert.ok(max >= 20 && max <= 21, `expected ~21, got ${max}`);
+});
+
+test("contrastRatio returns null when a colour is invalid", () => {
+  assert.equal(contrastRatio("#000", "nope"), null);
+});
+
+// --- tokens ---------------------------------------------------------------
+
+test("extractTokens indexes :root declarations by value", () => {
+  const css = `:root { --accent: #0066ff; --space-2: 8px; }`;
+  const tokens = extractTokens(css);
+  assert.equal(tokens.get("#0066ff"), "--accent");
+  assert.equal(tokens.get("8px"), "--space-2");
+});
+
+test("extractTokens indexes :root.dark and grouped :root variants", () => {
+  const css = `:root { --accent: #0066ff; } :root.dark { --accent: #82b1ff; } :root[data-theme=\"dim\"] { --bg: #111; }`;
+  const tokens = extractTokens(css);
+  assert.equal(tokens.get("#0066ff"), "--accent");
+  assert.equal(tokens.get("#82b1ff"), "--accent", "dark-mode override must be a token");
+  assert.equal(tokens.get("#111"), "--bg", "attribute-selector variant must be a token");
+});
+
+test("scanOffSystem flags hardcoded hex outside :root", () => {
+  const css = `:root { --accent: #0066ff; } .card { color: #ff0000; }`;
+  const tokens = extractTokens(css);
+  const off = scanOffSystem(css, tokens);
+  assert.deepEqual(off.hardcodedHex, ["#ff0000"]);
+  assert.deepEqual(off.adhocShadow, []);
+});
+
+test("scanOffSystem does NOT flag hex in :root.dark or grouped :root blocks", () => {
+  const css = `:root { --accent: #0066ff; } :root.dark { --accent: #82b1ff; }`;
+  const tokens = extractTokens(css);
+  const off = scanOffSystem(css, tokens);
+  assert.deepEqual(off.hardcodedHex, [], "dark-mode token values must not be flagged");
+});
+
+test("scanOffSystem does NOT flag hex values that match a token", () => {
+  const css = `:root { --accent: #0066ff; } .card { color: #0066ff; }`;
+  const tokens = extractTokens(css);
+  const off = scanOffSystem(css, tokens);
+  assert.deepEqual(off.hardcodedHex, []);
+});
+
+test("scanOffSystem ignores commented-out hex (dead code must not fail the gate)", () => {
+  const css = `:root { --accent: #0066ff; } /* .card { color: #ff0000; } */ .ok { color: var(--accent); }`;
+  const tokens = extractTokens(css);
+  const off = scanOffSystem(css, tokens);
+  assert.deepEqual(off.hardcodedHex, [], "commented-out hex is dead code, not a violation");
+  assert.deepEqual(off.adhocShadow, []);
+});
+
+test("scanOffSystem flags box-shadow not built from var()", () => {
+  const css = `.card { box-shadow: 0 4px 12px rgba(0,0,0,0.1); }`;
+  const tokens = extractTokens(css);
+  const off = scanOffSystem(css, tokens);
+  assert.ok(off.adhocShadow.length === 1);
+  assert.match(off.adhocShadow[0], /rgba/);
+});
+
+test("scanOffSystem does NOT flag box-shadow using var()", () => {
+  const css = `:root { --elev-md: 0 4px 12px rgba(0,0,0,0.1); } .card { box-shadow: var(--elev-md); }`;
+  const tokens = extractTokens(css);
+  const off = scanOffSystem(css, tokens);
+  assert.deepEqual(off.adhocShadow, []);
+});
+
+// --- states ---------------------------------------------------------------
+
+test("scanStates flags missing focus-visible and disabled", () => {
+  const css = `button { color: var(--accent); } a { text-decoration: none; }`;
+  const states = scanStates(css);
+  assert.ok(states.missingFocusVisible.length === 1);
+  assert.ok(states.missingDisabled.length === 1);
+});
+
+test("scanStates passes when focus-visible and disabled exist", () => {
+  const css = `button { color: var(--accent); } button:focus-visible { outline: 2px solid var(--accent); } button:disabled { opacity: 0.5; }`;
+  const states = scanStates(css);
+  assert.deepEqual(states.missingFocusVisible, []);
+  assert.deepEqual(states.missingDisabled, []);
+});
+
+test("scanStates returns empty when no interactive selectors present", () => {
+  const css = `.card { padding: 8px; }`;
+  const states = scanStates(css);
+  assert.deepEqual(states.missingFocusVisible, []);
+  assert.deepEqual(states.missingDisabled, []);
+});
+
+test("scanStates: motion without prefers-reduced-motion fails, with it passes", () => {
+  const base = `button { transition: opacity 120ms; } button:focus-visible { outline: none; } button:disabled { opacity: 0.5; }`;
+  const without = scanStates(base);
+  assert.deepEqual(without.missingReducedMotion, [
+    'motion (transition/animation) with no prefers-reduced-motion fallback',
+  ]);
+  const with_ = scanStates(base + `\n@media (prefers-reduced-motion: reduce) { button { transition: none; } }`);
+  assert.deepEqual(with_.missingReducedMotion, []);
+});
+
+test("scanStates: no motion → no reduced-motion finding, even with no interactive elements", () => {
+  const states = scanStates(`.hero { padding: 24px; }`);
+  assert.deepEqual(states.missingReducedMotion, []);
+});
+
+test("scanStates: transition longhands and scroll-behavior count as motion", () => {
+  const longhand = scanStates(`.a { transition-property: opacity; transition-duration: 200ms; }`);
+  assert.equal(longhand.missingReducedMotion.length, 1);
+  const fixed = scanStates(`.a { transition-property: opacity; transition-duration: 200ms; }\n@media (prefers-reduced-motion: reduce) { .a { transition: none; } }`);
+  assert.equal(fixed.missingReducedMotion.length, 0);
+  const smooth = scanStates(`html { scroll-behavior: smooth; }`);
+  assert.equal(smooth.missingReducedMotion.length, 1);
+  const inert = scanStates(`.a { transition-behavior: allow-discrete; }`);
+  assert.equal(inert.missingReducedMotion.length, 0);
+});
+
+test("scanStates reports hasInteractive", () => {
+  assert.equal(scanStates(`button { color: red; }`).hasInteractive, true);
+  assert.equal(scanStates(`.card { padding: 24px; }`).hasInteractive, false);
+});
+
+test("formatAuditResult states hints match the actual failure", () => {
+  // Fragment with motion but no reduced-motion fallback and no interactive
+  // elements: gate fails; the hint names the real fix, only conditionally
+  // suggesting the fragment case (a complete stylesheet deserves the same
+  // advice).
+  const fragment = audit({ css: `.hero { transition: opacity 200ms; }` });
+  assert.equal(fragment.gates.states.pass, false);
+  assert.equal(fragment.gates.states.hasInteractive, false);
+  const text = formatAuditResult(fragment);
+  assert.match(text, /ℹ Motion needs a prefers-reduced-motion fallback/, "hint line (not just the ✗ finding) present");
+  assert.equal(text.split("\n").filter((l) => l.includes("ℹ")).length, 1, "exactly the motion hint");
+
+  // Fragment WITH interactive selectors but focus rules elsewhere: gets the
+  // complete-stylesheet hint (this case had no hint at all before 0.4.7).
+  const focusFragment = audit({ css: `button { color: red; }` });
+  assert.equal(focusFragment.gates.states.pass, false);
+  assert.match(formatAuditResult(focusFragment), /states rules may live in another file/);
+
+  // Motion failure WITH interactive elements: the focus hint fires — button
+  // genuinely lacks :focus-visible, so that's a real finding, not a fragment
+  // mislabel. Nothing assertively claims "Fragment detected" anymore.
+  const full = audit({ css: `button { transition: opacity 200ms; }` });
+  assert.equal(full.gates.states.pass, false);
+  assert.equal(full.gates.states.hasInteractive, true);
+  const fullText = formatAuditResult(full);
+  assert.match(fullText, /states rules may live in another file/, "focus hint fires — real finding");
+  assert.equal(fullText.split("\n").filter((l) => l.includes("ℹ")).length, 1, "exactly the focus hint");
+  assert.ok(!fullText.includes("ℹ Motion needs"), "motion hint stays off when focus/disabled findings take priority");
+
+  // Interactive + motion WITH complete focus/disabled rules: real reduced-motion
+  // finding, no hint at all.
+  const statesComplete = audit({ css: `button { transition: opacity 200ms; } button:focus-visible { outline: 2px solid; } button:disabled { opacity: .5; }` });
+  assert.equal(statesComplete.gates.states.pass, false);
+  assert.equal(formatAuditResult(statesComplete).split("\n").filter((l) => l.includes("ℹ")).length, 0);
+
+  // Fragment that passes: no hint either.
+  const clean = audit({ css: `.card { padding: 24px; }` });
+  assert.equal(clean.gates.states.pass, true);
+  assert.equal(formatAuditResult(clean).split("\n").filter((l) => l.includes("ℹ")).length, 0);
+});
+
+test("scanStates: a commented-out prefers-reduced-motion block does not satisfy the check", () => {
+  const r = scanStates(`button { transition: opacity 120ms; } /* @media (prefers-reduced-motion: reduce) { button { transition: none; } } */`);
+  assert.equal(r.missingReducedMotion.length, 1);
+});
+
+// FIX (v0.6.2): a quoted word 'a' (e.g. grid-template-areas: "a b") falsely
+// matched the interactive-element regex → dialog-free CSS failed the States
+// gate in strict mode.
+test("scanStates ignores quoted strings (grid-template-areas \"a b\")", () => {
+  const css = `:root{--x:#fff} .grid{grid-template-areas:"a b";color:var(--x)}`;
+  const states = scanStates(css);
+  assert.equal(states.hasInteractive, false);
+  assert.deepEqual(states.missingFocusVisible, []);
+  assert.deepEqual(states.missingDisabled, []);
+  const r = audit({ css, pairs: [{ fg: "#111", bg: "#fff", label: "body", min: 4.5 }] });
+  assert.equal(r.gates.states.pass, true);
+});
+
+// FIX (v0.6.3): :root token names like --input-bg contain the substring
+// "input" and falsely matched the interactive-element regex.
+test("scanStates ignores :root token names (--input-bg is not an input selector)", () => {
+  const css = `:root { --input-bg: #fff; --button-fg: #111; } .card { color: var(--button-fg); background: var(--input-bg); }`;
+  const states = scanStates(css);
+  assert.equal(states.hasInteractive, false);
+  assert.deepEqual(states.missingFocusVisible, []);
+  assert.deepEqual(states.missingDisabled, []);
+  const r = audit({ css, pairs: [] });
+  assert.equal(r.gates.states.pass, true);
+});
+
+test("slop tells: eyebrow label (tracked-out uppercase at ≤13px)", () => {
+  const hit = scanSlopTells(`.eyebrow { text-transform: uppercase; font-size: 11px; letter-spacing: 0.1em; }`);
+  assert.equal(hit.tells.length, 1);
+  assert.match(hit.tells[0], /eyebrow/);
+  // 0.8125rem = 13px with wide tracking → still hits
+  assert.equal(scanSlopTells(`.k { text-transform: uppercase; font-size: 0.8125rem; letter-spacing: 0.12em; }`).tells.length, 1);
+  // normal-tracking uppercase labels are a legitimate table/label style
+  assert.equal(scanSlopTells(`.h { text-transform: uppercase; font-size: 12px; letter-spacing: 0.05em; }`).tells.length, 0);
+  assert.equal(scanSlopTells(`.display { text-transform: uppercase; font-size: 16px; letter-spacing: 0.1em; }`).tells.length, 0);
+  // uppercase without an explicit size could be a display treatment → pass
+  assert.equal(scanSlopTells(`.display { text-transform: uppercase; letter-spacing: 0.1em; }`).tells.length, 0);
+  // em tracking scales with the element's own font-size: 13px × 0.07em = 0.07em < 0.08 → pass
+  assert.equal(scanSlopTells(`.h { text-transform: uppercase; font-size: 13px; letter-spacing: 0.07em; }`).tells.length, 0);
+  // 11px × 0.09em = 0.99px — below a naive 1px threshold but ≥0.08em → hit
+  assert.equal(scanSlopTells(`.h { text-transform: uppercase; font-size: 11px; letter-spacing: 0.09em; }`).tells.length, 1);
+});
+
+test("slop tells: tinted near-black background", () => {
+  assert.ok(scanSlopTells(`.card { background: #0B0B0B; }`).tells.some((t) => /near-black/.test(t)));
+  assert.ok(scanSlopTells(`.card { background-color: #111111; }`).tells.some((t) => /near-black/.test(t)));
+  // pure #000 is a deliberate choice; near-black *text* is fine
+  assert.equal(scanSlopTells(`.card { background: #000; }`).tells.some((t) => /near-black/.test(t)), false);
+  assert.equal(scanSlopTells(`.card { color: #111111; background: var(--surface); }`).tells.some((t) => /near-black/.test(t)), false);
+  assert.ok(scanSlopTells(`.card { background: #0b0b0bcc; }`).tells.some((t) => /near-black/.test(t)));
+  // #RGBA nibbles double: #0b0b = rgba(0,187,0,.73) — translucent green, correctly NOT near-black
+  assert.equal(scanSlopTells(`.card { background: #0b0b; }`).tells.some((t) => /near-black/.test(t)), false);
+  assert.ok(scanSlopTells(`.card { background: #1112; }`).tells.some((t) => /near-black/.test(t))); // dark 4-digit alpha form
+});
+
+test("slop tells: commented-out CSS produces zero tells", () => {
+  const commented = scanSlopTells(`/* .eyebrow { text-transform: uppercase; font-size: 11px; letter-spacing: 0.1em; } */ /* .hero { background: #0B0B0B } */`);
+  assert.equal(commented.tells.length, 0);
+});
+
+test("audit: auto-extracts colour/background pairs when none are provided", () => {
+  const css = `:root { --surface: #FFFFFF; --surface-alt: #fff; --text: #0F172A; --muted: #57534E; }
+    .card { color: var(--text); background: var(--surface); }
+    .muted { color: var(--muted); }
+    .dup { color: var(--text); background: var(--surface-alt); }`;
+  const r = audit({ css, pairs: [] });
+  assert.equal(r.autoPairs, true);
+  assert.equal(r.gates.contrast.results.length, 1); // .card + .dup dedupe to one resolved pair; .muted skipped (no bg in block)
+  assert.equal(r.gates.contrast.results[0].label.startsWith("auto: "), true);
+  assert.equal(r.pass, true);
+});
+
+test("audit: keeps provided pairs and skips extraction", () => {
+  const r = audit({
+    css: ".a { color: #fff; background: #000; }",
+    pairs: [{ fg: "#579F9A", bg: "#FFFFFF", label: "graphic", min: 3 }],
+  });
+  assert.equal(r.autoPairs, false);
+  assert.equal(r.gates.contrast.results.length, 1);
+});
+
+test("audit: auto-extracted failing pair fails the gate", () => {
+  const r = audit({ css: ".bad { color: #9ca3af; background: #f9fafb; }" });
+  assert.equal(r.autoPairs, true);
+  assert.equal(r.pass, false);
+});
+
+// --- aggregate gate -------------------------------------------------------
+
+test("audit.pass is true for a clean, token-compliant stylesheet", () => {
+  const css = `
+    :root { --accent: #0066ff; --text: #111; --bg: #fff; --elev: 0 2px 8px rgba(0,0,0,0.08); }
+    .card { color: var(--text); background: var(--bg); box-shadow: var(--elev); padding: 8px; }
+    button { color: var(--accent); }
+    button:focus-visible { outline: 2px solid var(--accent); }
+    button:disabled { opacity: 0.5; }
+  `;
+  const result = audit({ css, pairs: [{ fg: "#111", bg: "#fff", label: "body", min: 4.5 }] });
+  assert.equal(result.pass, true);
+  assert.equal(result.gates.contrast.pass, true);
+  assert.equal(result.gates.tokens.pass, true);
+  assert.equal(result.gates.states.pass, true);
+});
+
+test("audit.pass is false when contrast fails", () => {
+  // light grey on white — fails AA
+  const result = audit({ css: "", pairs: [{ fg: "#bbb", bg: "#fff", min: 4.5 }] });
+  assert.equal(result.pass, false);
+  assert.equal(result.gates.contrast.pass, false);
+  assert.ok(result.gates.contrast.results[0].ratio < 4.5);
+});
+
+test("audit.pass is false when hardcoded hex present", () => {
+  const css = `:root { --accent: #0066ff; } .card { color: #ff0000; }`;
+  const result = audit({ css, pairs: [] });
+  assert.equal(result.pass, false);
+  assert.equal(result.gates.tokens.pass, false);
+});
+
+test("audit.pass is false when states missing", () => {
+  const css = `button { color: red; }`;
+  const result = audit({ css, pairs: [] });
+  assert.equal(result.pass, false);
+  assert.equal(result.gates.states.pass, false);
+});
+
+test("audit treats invalid colour as a failed contrast pair (ratio null, pass false)", () => {
+  const result = audit({ css: "", pairs: [{ fg: "not-a-color", bg: "#fff", label: "bad" }] });
+  assert.equal(result.pass, false);
+  assert.equal(result.gates.contrast.results[0].ratio, null);
+  assert.equal(result.gates.contrast.results[0].pass, false);
+});
+
+// FIX (v0.6.3 review): CSS Color-4 space syntax — rgb(17 17 17), rgb(0 0 0 / 50%),
+// hsl(0 0% 50% / 0.4) — previously returned null and hard-failed the gate.
+test("parseRgb accepts CSS Color-4 space-separated syntax", () => {
+  assert.deepEqual(parseRgb("rgb(17 17 17)"), [17, 17, 17]);
+  assert.deepEqual(parseRgb("rgb(0 0 0 / 50%)"), [0, 0, 0]);
+  assert.deepEqual(parseRgb("rgba(17, 17, 17, 0.5)"), [17, 17, 17]); // comma syntax still parses
+  assert.equal(parseRgb("rgb(17 17"), null);
+});
+
+test("parseHsl accepts slash-alpha syntax", () => {
+  assert.deepEqual(parseHsl("hsl(0 0% 50% / 0.4)"), [128, 128, 128]);
+  assert.deepEqual(parseHsl("hsl(120, 100%, 50%)"), [0, 255, 0]); // comma syntax still parses
+  assert.equal(parseHsl("hsl(0 0% 50%"), null);
+});
+
+test("audit: rgb() colour-4 pair yields a parsed passing contrast result, not n/a", () => {
+  const result = audit({ css: `.x{color:#111;background:rgb(255 255 255)}`, pairs: [] });
+  const pair = result.gates.contrast.results.find((r) => /auto: \.x/.test(r.label));
+  assert.ok(pair, "pair from rgb() background extracted");
+  assert.equal(typeof pair.ratio, "number");
+  assert.equal(pair.pass, true);
+});
+
+test("scanStates: var() with fallback does not mark stylesheet interactive", () => {
+  const states = scanStates(`.x { background: var(--input-bg, #fff); }`);
+  assert.equal(states.hasInteractive, false);
+  assert.deepEqual(states.missingFocusVisible, []);
+  assert.deepEqual(states.missingDisabled, []);
+});
+
+test("audit tolerates { pairs: null } (behaves like an empty list, no throw)", () => {
+  const result = audit({ css: "", pairs: null });
+  assert.equal(result.gates.contrast.results.length, 0);
+  assert.equal(result.gates.contrast.pass, true);
+});
+
+test("audit tolerates { css: null } (behaves like empty string, no throw)", () => {
+  const result = audit({ css: null, pairs: [] });
+  assert.equal(result.gates.tokens.pass, true);
+  assert.equal(result.gates.states.pass, true);
+});
+
+// --- colour parsing (hex + oklch) -----------------------------------------
+
+test("parseHex accepts 3/4/6/8-digit hex and strips alpha", () => {
+  assert.deepEqual(parseHex("#fff"), [255, 255, 255]);
+  assert.deepEqual(parseHex("#000000"), [0, 0, 0]);
+  assert.deepEqual(parseHex("#0066ff80"), [0, 102, 255]); // 8-digit drops alpha
+  assert.deepEqual(parseHex("#f00f"), [255, 0, 0]);       // 4-digit drops alpha
+  assert.equal(parseHex("garbage"), null);
+});
+
+test("parseOklch converts to sRGB (white and black extremes)", () => {
+  const white = parseOklch("oklch(100% 0 0)");
+  assert.ok(Math.abs(white[0] - 255) < 2, `white R ~255, got ${white[0]}`);
+  const black = parseOklch("oklch(0% 0 0)");
+  assert.deepEqual(black, [0, 0, 0]);
+});
+
+test("parseOklch returns null on garbage", () => {
+  assert.equal(parseOklch("not-a-color"), null);
+  assert.equal(parseOklch("oklch(x y z)"), null);
+});
+
+// REVIEW FIX 1 (HIGH): percentage lightness must divide by 100, not 1.
+// oklch(50% ...) is mid-grey, NOT white.
+test("parseOklch percentage L does not collapse to white (regression)", () => {
+  const mid = parseOklch("oklch(50% 0 0)");
+  assert.ok(Math.abs(mid[0] - 99) < 15, `mid-grey ~99, got ${mid[0]}`);
+  assert.ok(mid[0] < 200, "must not be near-white");
+});
+
+test("parseOklch saturates correctly (blue hue)", () => {
+  const blue = parseOklch("oklch(60% 0.18 250)");
+  assert.ok(blue[2] > blue[0], "B must dominate R");
+  assert.ok(blue[2] > blue[1], "B must dominate G");
+});
+
+// REVIEW FIX 1b (latent): linear sRGB must be gamma-encoded to sRGB before
+// *255, or APCA double-linearizes oklch values (contrast becomes wrong).
+test("parseOklch gamma-encodes (APCA contrast on oklch matches hex equivalent)", () => {
+  // oklch(~21% 0 0) ≈ #333 grey. Cross-check APCA treats them alike.
+  const hexLc = apcaContrastLc("#333333", "#ffffff");
+  const okLc = apcaContrastLc("oklch(22.6% 0 0)", "oklch(100% 0 0)");
+  assert.ok(Math.abs(hexLc - okLc) < 8, `hex ${hexLc} vs oklch ${okLc} must agree`);
+});
+
+test("parseColor routes hex and oklch to the right parser", () => {
+  assert.deepEqual(parseColor("#111111"), [17, 17, 17]);
+  assert.deepEqual(parseColor("oklch(100% 0 0)")[0], 255);
+  assert.equal(parseColor("nope"), null);
+});
+
+test("parseRgb parses rgb()/rgba(), drops alpha, rejects out-of-range", () => {
+  assert.deepEqual(parseRgb("rgb(17,17,17)"), [17, 17, 17]);
+  assert.deepEqual(parseRgb("rgb( 0 , 102 , 255 )"), [0, 102, 255]);
+  assert.deepEqual(parseRgb("rgba(0, 0, 0, 0.4)"), [0, 0, 0]); // alpha dropped
+  assert.equal(parseRgb("rgb(300,0,0)"), null);
+  assert.equal(parseRgb("rgb(1,2)"), null);
+});
+
+test("parseHsl converts to sRGB (primaries and a known mix)", () => {
+  assert.deepEqual(parseHsl("hsl(0 100% 50%)"), [255, 0, 0]);
+  assert.deepEqual(parseHsl("hsl(120deg 100% 50%)"), [0, 255, 0]);
+  assert.deepEqual(parseHsl("hsl(240 100% 50%)"), [0, 0, 255]);
+  assert.deepEqual(parseHsl("hsl(0 0% 100%)"), [255, 255, 255]);
+  assert.deepEqual(parseHsl("hsl(0 0% 0%)"), [0, 0, 0]);
+  assert.deepEqual(parseHsl("hsla(210, 100%, 20%, 0.5)"), parseHsl("hsl(210 100% 20%)")); // alpha dropped
+});
+
+test("parseColor routes rgb/hsl to the right parser", () => {
+  assert.deepEqual(parseColor("rgb(17,17,17)"), [17, 17, 17]);
+  assert.deepEqual(parseColor("hsl(0 100% 50%)"), [255, 0, 0]);
+});
+
+// FIX (v0.6.3): rgb/hsl pairs previously fell through as unparseable.
+test("audit: rgb/hsl colours feed the contrast gate (auto-extracted pair passes, bad rgb pair fails)", () => {
+  const pass = audit({ css: ".x { color: rgb(17,17,17); background: #fff; }" });
+  assert.equal(pass.autoPairs, true);
+  assert.equal(pass.gates.contrast.results.length, 1);
+  assert.equal(pass.gates.contrast.results[0].pass, true);
+  assert.equal(pass.gates.contrast.pass, true); // contrast only — the raw #fff still trips the token gate
+
+  const fail = audit({ css: ".x { color: rgb(170,170,170); background: #fff; }" });
+  assert.equal(fail.gates.contrast.results[0].pass, false);
+  assert.equal(fail.gates.contrast.pass, false);
+
+  const hsl = audit({ css: ".x { color: hsl(0 0% 7%); background: hsl(0 0% 100%); }" });
+  assert.equal(hsl.gates.contrast.results[0].pass, true);
+});
+
+// FIX (v0.6.3): layered background values ("url(x.png) #fff") resolved only
+// the first space-separated token, so the real colour was missed.
+test("audit: bg pairs with the colour token inside a layered background value", () => {
+  const r = audit({ css: ".hero { color: #111111; background: url(bg.png) no-repeat #ffffff; }" });
+  assert.equal(r.autoPairs, true);
+  assert.equal(r.gates.contrast.results.length, 1);
+  assert.equal(r.gates.contrast.results[0].bg, "#ffffff");
+  assert.equal(r.gates.contrast.results[0].pass, true);
+});
+
+// --- APCA contrast (primary gate) -----------------------------------------
+
+test("apcaContrastLc: black on white ≈ Lc 105 (near the known max)", () => {
+  const lc = apcaContrastLc("#000000", "#ffffff");
+  assert.ok(lc >= 100 && lc <= 107, `expected ~105, got ${lc}`);
+  assert.ok(lc > 0, "dark text on light bg must be positive (BoW polarity)");
+});
+
+test("apcaContrastLc: white on black is negative (WoB polarity)", () => {
+  const lc = apcaContrastLc("#ffffff", "#000000");
+  assert.ok(lc < 0, "light text on dark bg must be negative");
+  assert.ok(lc <= -100, `expected ~-106, got ${lc}`);
+});
+
+test("apcaContrastLc: dark-theme thin-text slop FAILS where WCAG passes", () => {
+  // #aaa light grey on #1e1e1e dark — the classic text-only-model dark slop.
+  // APCA catches this; WCAG ratio would pass it.
+  const lc = apcaContrastLc("#aaaaaa", "#1e1e1e");
+  assert.ok(lc < 0, "must be negative (WoB)");
+  assert.ok(Math.abs(lc) < 75, `Lc ${lc} should fail body threshold (75), proving APCA > WCAG`);
+});
+
+test("apcaContrastLc returns null for unparseable colour", () => {
+  assert.equal(apcaContrastLc("not-a-color", "#fff"), null);
+});
+
+test("apcaThreshold scales by weight and size", () => {
+  assert.equal(apcaThreshold(400, 16), 75, "body text = strictest");
+  assert.equal(apcaThreshold(700, 16), 60, "bold body stays at 60 (not 45)");
+  assert.equal(apcaThreshold(700, 14), 60, "bold small body = 60");
+  assert.equal(apcaThreshold(700, 18), 45, "bold + large relaxes to 45");
+  assert.equal(apcaThreshold(700, 24), 45, "bold + very large = 45");
+  assert.equal(apcaThreshold(400, 24), 45, "large non-bold relaxes to 45");
+  assert.equal(apcaThreshold(400, 18), 60, "regular ≥18px = 60");
+  assert.equal(apcaThreshold(500, 18), 60, "medium weight + 18px = 60");
+});
+
+test("apcaThreshold: non-text pairs gate at Lc 30", () => {
+  assert.equal(apcaThreshold(undefined, undefined, true), 30, "non-text = 30");
+  assert.equal(apcaThreshold(400, 12, false), 75, "text path unaffected");
+});
+
+test("audit: non-text pair (min 3, no size/weight) passes at Lc >= 30", () => {
+  // #579F9A on white ≈ Lc 57.5 — passes the non-text floor, would fail body 75
+  const result = audit({
+    css: ".col { background: #579F9A; }",
+    pairs: [{ fg: "#579F9A", bg: "#FFFFFF", label: "graphic", min: 3 }],
+  });
+  assert.equal(result.gates.contrast.results[0].apcaMin, 30);
+  assert.equal(result.gates.contrast.results[0].pass, true);
+});
+
+test("audit: min 3 WITH size stays a text pair (body threshold)", () => {
+  const result = audit({
+    css: ".x { color: #579F9A; }",
+    pairs: [{ fg: "#579F9A", bg: "#FFFFFF", label: "small text", min: 3, size: 12 }],
+  });
+  assert.equal(result.gates.contrast.results[0].apcaMin, 75);
+  assert.equal(result.gates.contrast.results[0].pass, false);
+});
+
+// --- audit with APCA + WCAG sidecar ---------------------------------------
+
+test("audit reports both APCA Lc and WCAG ratio in contrast results", () => {
+  const result = audit({ css: "", pairs: [{ fg: "#111111", bg: "#ffffff", label: "body", weight: 400, size: 16 }] });
+  const r = result.gates.contrast.results[0];
+  assert.ok(r.apca !== null && r.apca > 100, "APCA Lc present and high for black-on-white");
+  assert.ok(r.ratio > 15, "WCAG ratio present (~21)");
+  assert.equal(r.pass, true);
+  assert.equal(r.apcaMin, 75);
+});
+
+test("audit fails when APCA Lc is below threshold even if WCAG ratio passes", () => {
+  // #aaa on dark bg: APCA Lc ~54 (fails 75), WCAG ratio ~7.8 (passes 4.5)
+  const result = audit({ css: "", pairs: [{ fg: "#aaaaaa", bg: "#1e1e1e", label: "dark-body", min: 4.5, weight: 400, size: 16 }] });
+  assert.equal(result.gates.contrast.pass, false, "must fail on APCA");
+  assert.equal(result.pass, false);
+  const r = result.gates.contrast.results[0];
+  assert.ok(r.ratio >= 4.5, "WCAG sidecar still passes for reporting");
+});
+
+test("audit still works with legacy pairs (no weight/size) — APCA default 75", () => {
+  const result = audit({ css: "", pairs: [{ fg: "#111111", bg: "#ffffff", min: 4.5 }] });
+  assert.equal(result.gates.contrast.pass, true);
+  assert.equal(result.gates.contrast.results[0].apcaMin, 75);
+});
+
+// --- slop tells (Phase 3) --------------------------------------------------
+
+test("scanSlopTells flags glassmorphism (backdrop-filter)", () => {
+  const { tells } = scanSlopTells(".card { backdrop-filter: blur(10px); } .card { color: red; }");
+  assert.equal(tells.length, 1);
+  assert.match(tells[0], /glassmorphism/);
+});
+
+test("scanSlopTells flags the shadcn default-card reflex", () => {
+  const css = ".card { border-radius: rounded-2xl; box-shadow: shadow-lg; padding: p-6; }";
+  // ponytail: the heuristic checks class-name co-occurrence, not CSS props
+  const css2 = '<div class="rounded-2xl shadow-lg p-6">';
+  const { tells } = scanSlopTells(css2);
+  assert.equal(tells.length, 1);
+  assert.match(tells[0], /default card/);
+});
+
+test("scanSlopTells flags 1px gray card border (tailwind default)", () => {
+  const { tells } = scanSlopTells(".card { border-zinc-200: 1px; }");
+  assert.equal(tells.length, 1);
+  assert.match(tells[0], /1px gray card border/);
+});
+
+test("scanSlopTells flags 1px gray card border (literal hex)", () => {
+  const { tells } = scanSlopTells(".card { border: 1px solid #e5e7eb; }");
+  assert.equal(tells.length, 1);
+  assert.match(tells[0], /1px gray card border/);
+});
+
+test("scanSlopTells does NOT flag clean token-based elevation", () => {
+  const css = `
+    :root { --elev-md: 0 2px 8px rgba(0,0,0,0.08); }
+    .card { box-shadow: var(--elev-md); border-radius: 8px; padding: 16px; }
+  `;
+  const { tells } = scanSlopTells(css);
+  assert.deepEqual(tells, []);
+});
+
+test("scanSlopTells does NOT flag legitimate small radial highlight", () => {
+  const css = ".badge { background: radial-gradient(circle, #fff 0%, #eee 100%); }";
+  const { tells } = scanSlopTells(css);
+  assert.deepEqual(tells, [], "small radial without big blur is not an orb");
+});
+
+test("audit integrates slop-tell gate: full slop dump fails", () => {
+  const slopCss = `
+    .hero { backdrop-filter: blur(20px); }
+    .card { @apply rounded-2xl shadow-lg p-6; border-zinc-200; }
+  `;
+  const result = audit({ css: slopCss, pairs: [] });
+  assert.equal(result.gates.slopTells.pass, false);
+  assert.ok(result.gates.slopTells.tells.length >= 1);
+  assert.equal(result.pass, false);
+});
+
+test("audit.clean sheet passes all four gates", () => {
+  const css = `
+    :root { --accent: #0066ff; --text: #111; --bg: #fff; --elev: 0 2px 8px rgba(0,0,0,0.08); }
+    .card { color: var(--text); background: var(--bg); box-shadow: var(--elev); padding: 16px; }
+    button { color: var(--accent); }
+    button:focus-visible { outline: 2px solid var(--accent); }
+    button:disabled { opacity: 0.5; }
+  `;
+  const result = audit({ css, pairs: [{ fg: "#111", bg: "#fff", label: "body", weight: 400, size: 16 }] });
+  assert.equal(result.pass, true);
+  assert.equal(result.gates.slopTells.pass, true);
+  assert.equal(result.gates.contrast.pass, true);
+  assert.equal(result.gates.tokens.pass, true);
+  assert.equal(result.gates.states.pass, true);
+});
+
+// --- REVIEW FIX regressions (v0.4.2) --------------------------------------
+// These pin each reviewer-found bug to a runnable check so they can't return.
+
+// FIX 2 (MEDIUM FP): a normal accent focus shadow (≤12px blur) is NOT neon glow.
+test("scanSlopTells does NOT flag a normal accent shadow (≤12px blur)", () => {
+  const { tells } = scanSlopTells(".btn { box-shadow: 0 4px 12px rgba(0,102,255,0.35); }");
+  assert.deepEqual(tells, [], "small coloured shadow is normal, not glow");
+});
+
+// FIX 3 (MEDIUM FN): a large coloured hex shadow IS neon glow (was missed).
+test("scanSlopTells flags large coloured hex shadow as neon glow", () => {
+  const { tells } = scanSlopTells(".card { box-shadow: 0 0 40px #8b00ff; }");
+  assert.equal(tells.length, 1);
+  assert.match(tells[0], /neon glow/);
+});
+
+test("scanSlopTells flags large coloured rgba glow", () => {
+  const { tells } = scanSlopTells(".hero { box-shadow: 0 0 40px 20px rgba(139,0,255,0.6); }");
+  assert.equal(tells.length, 1);
+  assert.match(tells[0], /neon glow/);
+});
+
+test("scanSlopTells still does NOT flag greyscale large shadow", () => {
+  const { tells } = scanSlopTells(".card { box-shadow: 0 0 40px rgba(0,0,0,0.4); }");
+  assert.deepEqual(tells, [], "greyscale shadow is elevation, not glow");
+});
+
+// FIX 4 (LOW): radial-gradient with nested rgba/hsl stops is fully captured.
+test("scanSlopTells flags gradient orb with nested rgba + filter blur", () => {
+  const css = ".orb { background: radial-gradient(circle, rgba(138,43,226,0.8) 0%, #4b0082 100%); filter: blur(80px); }";
+  const { tells } = scanSlopTells(css);
+  assert.equal(tells.length, 1);
+  assert.match(tells[0], /gradient orb/);
+});
+
+test("scanSlopTells does NOT flag a small warm radial highlight", () => {
+  const css = ".badge { background: radial-gradient(circle, #fff 0%, #eee 100%); }";
+  const { tells } = scanSlopTells(css);
+  assert.deepEqual(tells, [], "non-violet small radial is not an orb");
+});
+
+// FIX 6 (LOW): alpha hex (#RRGGBBAA / #RGBA) is flagged by the token gate.
+test("scanOffSystem flags 8-digit alpha hex outside :root", () => {
+  const off = scanOffSystem(".card { color: #ff000080; }", new Map());
+  assert.deepEqual(off.hardcodedHex, ["#ff000080"]);
+});
+
+test("scanOffSystem flags 4-digit alpha hex outside :root", () => {
+  const off = scanOffSystem(".card { color: #f00f; }", new Map());
+  assert.deepEqual(off.hardcodedHex, ["#f00f"]);
+});
+
+test("scanOffSystem does NOT partial-match an 8-digit hex as a 6-digit value", () => {
+  // Regression guard: must report the full 8-digit value, not '#ff0000'.
+  const off = scanOffSystem(".card { color: #ff000080; }", new Map());
+  assert.ok(!off.hardcodedHex.includes("#ff0000"), "must not partial-match");
+  assert.ok(off.hardcodedHex.includes("#ff000080"));
+});
+
+// --- resolveAuditCss: path vs css param handling ---------------------------
+
+test("resolveAuditCss reads a file verbatim via path", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ux-audit-"));
+  const file = path.join(dir, "app.css");
+  fs.writeFileSync(file, ".card { color: #111; background: #fff; }\n");
+  try {
+    assert.equal(resolveAuditCss({ path: file }), ".card { color: #111; background: #fff; }\n");
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveAuditCss passes inline css through and enforces exclusivity", () => {
+  assert.equal(resolveAuditCss({ css: ".a { color: red; }" }), ".a { color: red; }");
+  assert.throws(() => resolveAuditCss({ css: ".a {}", path: "/tmp/x.css" }), /exactly one/);
+  assert.throws(() => resolveAuditCss({}), /Pass a stylesheet/);
+  assert.throws(() => resolveAuditCss({ css: "   " }), /Pass a stylesheet/);
+});
+
+test("resolveAuditCss resolves a relative path against the provided cwd, not process.cwd()", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ux-audit-"));
+  fs.writeFileSync(path.join(dir, "app.css"), ".x { color: red; }");
+  const prev = process.cwd();
+  try {
+    process.chdir(os.tmpdir());
+    assert.equal(resolveAuditCss({ path: "app.css" }, dir), ".x { color: red; }");
+    assert.throws(() => resolveAuditCss({ path: "app.css" }), /ENOENT/);
+  } finally {
+    process.chdir(prev);
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("resolveAuditCss rejects files over the 1MB cap with a clean error", () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "ux-audit-"));
+  const file = path.join(dir, "big.css");
+  fs.writeFileSync(file, "/* pad */ .x { color: red; }".repeat(60 * 1024)); // ~1.15MB
+  try {
+    assert.throws(() => resolveAuditCss({ path: file }), /1MB audit cap/);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});

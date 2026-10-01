@@ -16,8 +16,9 @@ extensions/
                          split layout + row descriptions/warnings + enum rows + type-to-search;
                          env.ts — trust-gated .env ingestion)
   modules/<name>/        one directory per module (self-contained: index.ts, lib/, commands/, test/)
-skills/                  skill directories shipped with the package (contributed via the ponytail
-                         module's resources_discover handler — gated by its kill-switch)
+skills/                  skill directories shipped with the package (each module contributes its OWN
+                         skill dirs via resources_discover — ponytail the six `ponytail*`, ux the four
+                         `ux-*` — never the skills/ root, so each kill-switch gates its own skills)
 themes/                 theme JSONs shipped with the package (declared via the package.json
                          `pi.themes` manifest — loaded by pi itself, no module, no kill-switch;
                          scripts/validate-themes.mjs runs in `npm test`)
@@ -59,6 +60,10 @@ With `router.baseUrl` set to a yardmaster instance, the usage module polls `GET 
 ## Ponytail config (ponytail module)
 
 Ponytail resolves its default mode from `PONYTAIL_DEFAULT_MODE`, then `~/.config/ponytail/config.json` (`{"defaultMode": "full", "quietStartup": false, "hideStatus": false}`; XDG_CONFIG_HOME respected), then `full`. `PONYTAIL_HIDE_STATUS`, `PONYTAIL_QUIET_STARTUP`, `PONYTAIL_SUBAGENT_SCOPE=off` override the config booleans. Config surface is deliberately NOT namespaced to `ceulen.*` — the `ponytail.*`/`PONYTAIL_*` names are the module's stable contract.
+
+## UX config (ux module)
+
+Ported from `@bacnh85/pi-ux` 0.6.6 (see `extensions/modules/ux/UPSTREAM`). Resolves its default mode from `PI_UX_DEFAULT_MODE`, then `~/.config/pi-ux/config.json` (`{"defaultMode": "strict", "quietStartup": false}`; XDG_CONFIG_HOME respected), then `strict`. `PI_UX_QUIET_STARTUP` overrides the saved boolean — same stable-contract policy as ponytail (standalone pi-ux settings carry over). **No status-bar footprint**: the module never calls `setStatus`, and upstream's `hideStatus` setting / `PI_UX_HIDE_STATUS` env are dropped. Bare `/ux` reports status (not upstream's reset-to-default); the default mode is owned by `/config` (Appearance → UX discipline), not a `/ux default` subcommand.
 
 ## Release flow
 
