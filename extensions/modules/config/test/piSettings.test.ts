@@ -71,8 +71,12 @@ describe("pi settings contribution", () => {
     assert.equal(m.getSteeringMode(), "all");
     rowAt(m, "pi.compaction.enabled").set(false);
     assert.equal(m.getCompactionEnabled(), false);
-    rowAt(m, "pi.quietStartup").set(true);
+    rowAt(m, "pi.quietStartup").set("true");
     assert.equal(m.getQuietStartup(), true);
+    rowAt(m, "pi.quietStartup").set("header");
+    assert.equal(m.getQuietStartup(), "header");
+    rowAt(m, "pi.quietStartup").set("false");
+    assert.equal(m.getQuietStartup(), false);
     rowAt(m, "pi.defaultProjectTrust").set("Never trust");
     assert.equal(m.getDefaultProjectTrust(), "never");
     rowAt(m, "pi.tuiMode").set("fullscreen");

@@ -39,6 +39,7 @@ const CACHE_WARMING = ["streaming", "off", "idle"] as const;
 const STEERING_MODES = ["one-at-a-time", "all"] as const;
 const DOUBLE_ESCAPE = ["tree", "fork", "none"] as const;
 const TREE_FILTERS = ["default", "no-tools", "user-only", "labeled-only", "all"] as const;
+const QUIET_STARTUP = ["true", "header", "false"] as const;
 const PROJECT_TRUST = ["ask", "always", "never"] as const;
 const OUTPUT_PADS = ["1", "0"] as const;
 
@@ -251,8 +252,8 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
     },
     {
       key: "pi.tuiMode", tab: "Appearance", section: "Fullscreen", label: "TUI mode",
-      kind: "string", value: m.getTuiMode(), values: TUI_MODES, defaultValue: "regular",
-      description: "Regular scrolling transcript or the alternate-screen fullscreen UI.",
+      kind: "string", value: m.getTuiMode(), values: TUI_MODES, defaultValue: "fullscreen",
+      description: "Interface layout; regular mode uses the terminal's normal scrollback.",
       set: (v) => m.setTuiMode(str(v) as never),
     },
     {
@@ -464,10 +465,17 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
       set: (v) => m.setTreeFilterMode(str(v) as never),
     },
     {
+      // QuietStartup widened to boolean | "header" in pi 1.0.0 — a closed set,
+      // not a toggle (stock settings-selector: "true" | "header" | "false").
       key: "pi.quietStartup", tab: "Interaction", section: "Startup & Updates", label: "Quiet startup",
-      kind: "toggle", value: m.getQuietStartup(), defaultValue: false,
-      description: "Disable verbose printing at startup.",
-      set: (v) => m.setQuietStartup(Boolean(v)),
+      kind: "string", value: String(m.getQuietStartup()), values: QUIET_STARTUP, defaultValue: "false",
+      description: "Disable verbose printing at startup (header: keep only the startup header).",
+      set: (v) => {
+        // pi's setter takes boolean | "header" — map the menu value like the
+        // stock selector (settings-selector.js onQuietStartupChange).
+        const s = str(v);
+        m.setQuietStartup(s === "header" ? "header" : s === "true");
+      },
     },
     {
       key: "pi.collapseChangelog", tab: "Interaction", section: "Startup & Updates", label: "Collapse changelog",
