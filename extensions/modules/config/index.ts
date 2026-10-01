@@ -22,10 +22,12 @@
 import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { openConfigPanel, row, type PanelGroup } from "../../lib/panel.js";
 import { agentDirs, isCore, MODULES, disabledSource, readDisabled, writeDisabled, type ModuleConfig, type ModuleLoadDeps } from "../../lib/registry.js";
+import { readDisabledTools, writeDisabledTools } from "../../lib/tools.js";
 import { buildPiSettingsGroups, isPiKey, PI_TAB_ORDER, type PiMenuLookup } from "./piSettings.js";
 import { buildPluginsGroups, isPluginsKey, openPluginsWorking, savePlugins } from "./plugins.js";
 
 export const KILL_SWITCH_PREFIX = "ceulen.disabled.";
+export const TOOL_SWITCH_PREFIX = "ceulen.disabledTools.";
 
 /** Read the current kill-switch state as a Set of ENABLED module names. */
 function enabledModules(): Set<string> {
@@ -66,6 +68,59 @@ export function withEnableRow(groups: PanelGroup[], name: string, describe: stri
  *  Pure — exported for tests. Core modules are excluded (never disableable). */
 export function nextDisabled(working: Set<string>): string[] {
   return MODULES.filter((m) => !m.core).map((m) => m.name).filter((n) => !working.has(n));
+}
+
+/** One per-tool toggle row (key `ceulen.disabledTools.<tool>` over the given
+ *  working set of ENABLED tool names). Applied live on save — no /reload. */
+export function moduleToolRow(tool: string, working: Set<string>): ReturnType<typeof row> {
+  return row(`${TOOL_SWITCH_PREFIX}${tool}`, tool, "toggle", working.has(tool), (v) => {
+    if (v) working.add(tool);
+    else working.delete(tool);
+  }, {
+    description: "Registers the tool inactive when off — applied to this session immediately on save.",
+    defaultValue: true,
+  });
+}
+
+/** Toggle rows for every tool a module declares. Exported for tests. */
+export function moduleToolRows(tools: string[] | undefined, working: Set<string>): ReturnType<typeof row>[] {
+  return (tools ?? []).map((t) => moduleToolRow(t, working));
+}
+
+/** Append the module's tool rows after its (first-section) rows. A no-op for
+ *  modules without a `tools` list. Exported for tests. */
+export function withToolRows(groups: PanelGroup[], tools: string[] | undefined, working: Set<string>): PanelGroup[] {
+  const rows = moduleToolRows(tools, working);
+  if (rows.length === 0) return groups;
+  const [first, ...rest] = groups;
+  if (!first) return groups;
+  return [{ ...first, rows: [...first.rows, ...rows] }, ...rest];
+}
+
+/** The disabled-tools list that results from toggling `working` (enabled set)
+ *  across every ceulen-declared tool. Pure — exported for tests. */
+export function nextDisabledTools(working: Set<string>): string[] {
+  return MODULES.flatMap((m) => m.tools ?? []).filter((n) => !working.has(n));
+}
+
+/** Every tool name ceulen modules declare. */
+export function allDeclaredTools(): string[] {
+  return MODULES.flatMap((m) => m.tools ?? []);
+}
+
+/** Apply the disabled-tools list to the LIVE session: drop newly disabled
+ *  tools, re-activate newly enabled ones (registered tools only — unknown
+ *  names are ignored by setActiveTools). Exported for tests. */
+export function applyToolSwitches(pi: { getActiveTools(): string[]; getAllTools(): { name: string }[]; setActiveTools(names: string[]): void }, before: Set<string>, after: Set<string>): void {
+  const registered = new Set(pi.getAllTools().map((t) => t.name));
+  const active = new Set(pi.getActiveTools());
+  for (const t of before) {
+    if (!after.has(t)) active.delete(t);
+  }
+  for (const t of after) {
+    if (!before.has(t) && registered.has(t)) active.add(t);
+  }
+  pi.setActiveTools([...active]);
 }
 
 /** Runtime lookups for the pi-settings menu rows, built from the /config
@@ -173,11 +228,14 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
   // A module WITHOUT a contribution factory (usage, config) renders an
   // Enable-only section here; unknown modules fall back to their own tab so
   // a new module still renders.
-  const PRETTY_OF: Record<string, { section: string; icon: string }> = {
+  const PRETTY_OF: Record<string, { section: string; icon?: string }> = {
     router: { section: "Router", icon: "🌐" },
     usage: { section: "Usage footer", icon: "📊" },
     composer: { section: "Composer", icon: "🎨" },
     ponytail: { section: "Ponytail", icon: "🦥" },
+    serena: { section: "Serena" },
+    fff: { section: "FFF search" },
+    rtk: { section: "RTK" },
     config: { section: "Ceulen config", icon: "🧩" },
   };
   const SECTION_OF: Record<string, { tab: string; section: string; icon: string | undefined }> = Object.fromEntries(
@@ -189,6 +247,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
     handler: async (args, ctx) => {
       const sub = String(args ?? "").trim().toLowerCase();
       const workingEnabled = new Set(enabledModules());
+      const workingTools = new Set(allDeclaredTools().filter((t) => !readDisabledTools().has(t)));
       const pluginsWorking = openPluginsWorking();
 
       // Pi core settings: an OWN SettingsManager instance over the same files
@@ -211,7 +270,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
           const groups = c.cfg.groups();
           if (!section) return groups;
           const module = MODULES.find((m) => m.name === c.name);
-          return withEnableRow(groups, c.name, module?.describe ?? "", workingEnabled);
+          return withToolRows(withEnableRow(groups, c.name, module?.describe ?? "", workingEnabled), module?.tools, workingTools);
         });
         // Modules with no contribution factory still need their Enable row
         // reachable (usage, config itself) — and a disabled module needs the
@@ -226,7 +285,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
             label: section.section,
             tab: section.tab,
             icon: section.icon,
-            rows: [moduleEnableRow(m.name, m.describe ?? "", workingEnabled)],
+            rows: [moduleEnableRow(m.name, m.describe ?? "", workingEnabled), ...moduleToolRows(m.tools, workingTools)],
           });
         }
         // Plugins' package sections precede the config module's own switch.
@@ -261,6 +320,24 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
               ctx.ui.notify(`Module kill-switch saved to ${file} — /reload (or restart) to apply.`, "info");
             } catch (e) {
               ctx.ui.notify(`Kill-switch save failed: ${e instanceof Error ? e.message : e}`, "error");
+            }
+          }
+
+          if ([...keys].some((k) => k.startsWith(TOOL_SWITCH_PREFIX))) {
+            try {
+              const before = new Set(allDeclaredTools().filter((t) => !readDisabledTools().has(t)));
+              const after = workingTools;
+              const file = writeDisabledTools(nextDisabledTools(after));
+              applyToolSwitches(pi, before, after);
+              const changed = allDeclaredTools().filter((t) => before.has(t) !== after.has(t));
+              ctx.ui.notify(
+                changed.length > 0
+                  ? `Tools ${changed.map((t) => (after.has(t) ? `+${t}` : `-${t}`)).join(" ")} — saved to ${file}, applied live.`
+                  : `Tool toggles saved to ${file}.`,
+                "info",
+              );
+            } catch (e) {
+              ctx.ui.notify(`Tool toggle save failed: ${e instanceof Error ? e.message : e}`, "error");
             }
           }
 

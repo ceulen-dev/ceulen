@@ -1,6 +1,20 @@
 # Changelog
 
 ## Unreleased
+- **serena, fff, rtk** (new modules, ported from the pi-extensions monorepo):
+  Serena semantic code tools (`serena_*`, Python worker), FFF fuzzy
+  file/content search (`ffgrep`, `ffind`, `fff_multi_grep`, `resolve_file`,
+  `related_files` + @-mention completions), and RTK bash-command rewriting
+  (`/rtk`). Every tool they register gets a **per-tool toggle row in /config**
+  (Tools · Serena / FFF search, Shell · RTK sections): toggling writes
+  `ceulen.disabledTools` and applies to the running session immediately via
+  `setActiveTools` (disabled tools re-register inactive on every load, so the
+  setting survives restarts without a /reload). rtk has no tools — its surface
+  is the module Enable row. No status-bar entries — the modules stay silent
+  in the footer. First runtime dependency: `@ff-labs/fff-node`
+  (native FFI engine, unvendorable); `typebox` joins the peer deps (pi aliases
+  it at runtime). Serena/fff tests converted to the repo's `node:test` + tsx
+  convention; rtk's were already `node:test`.
 - **config**: stock-`/settings` parity — every pi setting with a typed
   `SettingsManager` setter is now a `/config` row. New: **per-model thinking
   overrides** (one row per model + an **Add model override** row whose menu

@@ -16,6 +16,9 @@ import { routerConfig } from "../modules/router/configPanel.ts";
 import usageModule from "../modules/usage/index.ts";
 import composerModule, { composerConfig } from "../modules/composer/index.ts";
 import ponytailModule, { ponytailConfig } from "../modules/ponytail/index.ts";
+import serenaModule from "../modules/serena/index.ts";
+import fffModule from "../modules/fff/index.ts";
+import rtkModule from "../modules/rtk/index.ts";
 import configModule from "../modules/config/index.ts";
 
 /** A module's contribution to the central `/config` panel. */
@@ -49,6 +52,9 @@ export interface ModuleEntry {
   /** One-line module purpose — rendered as the kill-switch row's description
    *  and reused by /ceulen status output. */
   describe?: string;
+  /** Canonical tool names the module registers — drives the per-tool
+   *  enable/disable toggle rows in /config (ceulen.disabledTools). */
+  tools?: string[];
   load: (pi: ExtensionAPI, deps?: ModuleLoadDeps) => void;
   /** Central-config contribution factory, called with the module's OWN guarded
    *  pi once per /config open. Optional — purely additive. */
@@ -66,6 +72,21 @@ export const MODULES: ModuleEntry[] = [
   { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },
   // ── Tasks ──────────────────────────────────────────────────────────────
   { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, status, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
+  // ── Tools ──────────────────────────────────────────────────────────────
+  { name: "serena", category: "Tools", describe: "Serena semantic code tools via a persistent Python worker.", load: serenaModule, tools: [
+    "serena_status", "serena_list_tools", "serena_get_symbols_overview", "serena_find_symbol",
+    "serena_find_referencing_symbols", "serena_find_declaration", "serena_find_implementations",
+    "serena_replace_symbol_body", "serena_insert_before_symbol", "serena_insert_after_symbol",
+    "serena_rename_symbol", "serena_safe_delete_symbol", "serena_search_for_pattern",
+    "serena_replace_content", "serena_restart_language_server", "serena_restart_worker",
+    "serena_get_current_config", "serena_check_onboarding_performed", "serena_onboarding",
+    "serena_get_diagnostics_for_file",
+  ] },
+  { name: "fff", category: "Tools", describe: "FFF fuzzy file/content search (ffgrep, fffind) + @-mention completions.", load: fffModule, tools: [
+    "ffgrep", "ffind", "fff_multi_grep", "resolve_file", "related_files",
+  ] },
+  // ── Shell ──────────────────────────────────────────────────────────────
+  { name: "rtk", category: "Shell", describe: "Route shell commands through RTK for token savings.", load: rtkModule },
   // ── Plugins ────────────────────────────────────────────────────────────
   // Config last: it owns /config and reads the contrib map.
   { name: "config", category: "Plugins", describe: "This panel — /config central settings for every module.", load: configModule },

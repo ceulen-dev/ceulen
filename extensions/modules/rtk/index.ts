@@ -1,0 +1,248 @@
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { createLocalBashOperations, isToolCallEventType } from "@earendil-works/pi-coding-agent";
+import { hasUnsupportedRtkFind } from "./findFallback.js";
+import { parseSemver, supportsFindPassthrough } from "./version-gate.js";
+import { isSafeRewrite } from "./safe-rewrite.js";
+
+const REWRITE_TIMEOUT_MS = 2_000;
+const RTK_UNAVAILABLE_RETRY_MS = 30_000;
+const MIN_SUPPORTED_RTK: [number, number, number] = [0, 23, 0];
+
+// ponytail: deliberate duplicate of version-gate.js's private isAtLeastVersion —
+// pi's jiti loader pairs a reloaded index.ts with stale cached siblings, so
+// importing NEW exports from existing files crashes /reload (0.2.1 regression).
+function isAtLeastVersion(current: [number, number, number], minimum: [number, number, number]): boolean {
+  for (let i = 0; i < minimum.length; i += 1) {
+    if (current[i] > minimum[i]) return true;
+    if (current[i] < minimum[i]) return false;
+  }
+  return true;
+}
+const RTK_SUBCOMMANDS = ["enable", "disable", "status"] as const;
+
+let sessionEnabled = true;
+let rtkUnavailableNotified = false;
+let rtkAvailable: boolean | undefined;
+let rtkLastCheckedAt = 0;
+let rtkSupportsFindPassthrough = false;
+let rtkVersion: string | null = null;
+
+function rewritingEnabled(): boolean {
+  return sessionEnabled && !isRtkDisabled();
+}
+
+function isRtkDisabled(): boolean {
+  const val = process.env.RTK_DISABLED;
+  if (!val) return false;
+  const lower = val.trim().toLowerCase();
+  return lower === "1" || lower === "true" || lower === "yes" || lower === "y";
+}
+
+function notifyRtkUnavailable(ctx: ExtensionContext, message: string): void {
+  if (rtkUnavailableNotified) return;
+  rtkUnavailableNotified = true;
+  if (ctx.hasUI) ctx.ui.notify(message, "warning");
+  else console.warn(message);
+}
+
+async function getRtkVersion(pi: ExtensionAPI): Promise<string | null> {
+  const result = await pi.exec("rtk", ["--version"], { timeout: REWRITE_TIMEOUT_MS }).catch(() => undefined);
+  if (!result || result.code !== 0) return null;
+  return result.stdout.trim() || null;
+}
+
+async function checkRtkAvailable(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
+  // Availability gate: rtk >= 0.23.0 for `rtk rewrite`. A >= 0.46 binary does
+  // NOT affect availability — it only re-enables find passthrough below.
+  // Conservatively reset passthrough on every check; only a verified >=0.46
+  // binary re-enables it.
+  rtkSupportsFindPassthrough = false;
+  const version = await getRtkVersion(pi);
+  rtkVersion = version;
+  if (!version) {
+    rtkAvailable = false;
+    rtkLastCheckedAt = Date.now();
+    notifyRtkUnavailable(ctx, "[pi-rtk] rtk binary not found in PATH; shell command rewrites will pass through unchanged");
+    return false;
+  }
+
+  const parsedVersion = parseSemver(version.replace(/^rtk\s+/, ""));
+  if (parsedVersion && !isAtLeastVersion(parsedVersion, MIN_SUPPORTED_RTK)) {
+    rtkAvailable = false;
+    rtkLastCheckedAt = Date.now();
+    notifyRtkUnavailable(ctx, `[pi-rtk] ${version} is too old; need rtk >= 0.23.0 for \`rtk rewrite\`; shell command rewrites will pass through unchanged`);
+    return false;
+  }
+
+  // rtk 0.46 dispatches on find's grammar and passes unmodeled predicates
+  // through to real find (never-worse guard) — safe subset of find predicates
+  // no longer needs blocking there.
+  rtkSupportsFindPassthrough = !!parsedVersion && supportsFindPassthrough(version);
+  rtkAvailable = true;
+  rtkLastCheckedAt = Date.now();
+  rtkUnavailableNotified = false;
+  return true;
+}
+
+async function ensureRtkAvailableForRewrite(pi: ExtensionAPI, ctx: ExtensionContext): Promise<boolean> {
+  if (rtkAvailable !== false) return true;
+  if (Date.now() - rtkLastCheckedAt < RTK_UNAVAILABLE_RETRY_MS) return false;
+  return checkRtkAvailable(pi, ctx);
+}
+
+async function rewriteCommand(pi: ExtensionAPI, command: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<string | null> {
+  if (!(await ensureRtkAvailableForRewrite(pi, ctx))) return null;
+
+  const result = await pi.exec("rtk", ["rewrite", command], {
+    timeout: REWRITE_TIMEOUT_MS,
+    signal,
+  }).catch(() => undefined);
+
+  if (!result) {
+    if (signal?.aborted) return null;
+    rtkAvailable = false;
+    rtkLastCheckedAt = Date.now();
+    notifyRtkUnavailable(ctx, "[pi-rtk] rtk rewrite failed to start; shell command rewrites will pass through unchanged");
+    return null;
+  }
+
+  rtkAvailable = true;
+  rtkLastCheckedAt = Date.now();
+  rtkUnavailableNotified = false;
+  if (result.killed) return null;
+  // rtk rewrite exit codes: 0 = no rewrite (empty stdout), 1 = error,
+  // 3 = successful rewrite (rewritten command in stdout).
+  // Accept both 0 and 3 as success; we read stdout regardless of exit code.
+  if (result.code !== 0 && result.code !== 3) return null;
+
+  const rewritten = result.stdout.trim();
+  if (hasUnsupportedRtkFind(rewritten, rtkSupportsFindPassthrough)) return null;
+  return rewritten.length > 0 ? rewritten : null;
+}
+
+
+async function maybeRewriteCommand(pi: ExtensionAPI, command: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<string | null> {
+  if (!rewritingEnabled()) return null;
+  if (typeof command !== "string" || command.trim() === "") return null;
+  if (command.trimStart().startsWith("rtk ")) return null;
+  const rewritten = await rewriteCommand(pi, command, ctx, signal);
+  if (rewritten && rewritten !== command && !isSafeRewrite(command, rewritten)) return null;
+  return rewritten;
+}
+
+async function showRtkStatus(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
+  const available = await checkRtkAvailable(pi, ctx);
+  // Reuse the version checkRtkAvailable just fetched — no second spawn.
+  const version = available ? rtkVersion : null;
+  const envDisabled = isRtkDisabled();
+  const cacheState = rtkAvailable === false ? `unavailable (retry in ${Math.max(0, Math.ceil((RTK_UNAVAILABLE_RETRY_MS - (Date.now() - rtkLastCheckedAt)) / 1000))}s)` : "available";
+  const lines = [
+    `Session toggle: ${sessionEnabled ? "enabled" : "disabled"}`,
+    `RTK_DISABLED: ${envDisabled ? "1 (rewrites bypassed)" : "not set"}`,
+    `Runtime cache: ${cacheState}`,
+    `Binary: ${version ?? "rtk not detected on PATH"}`,
+    "Tip: use /rtk enable, /rtk disable, /rtk status; use RTK_DISABLED=1 for an environment-level bypass.",
+  ];
+  ctx.ui.notify(lines.join("\n"), "info");
+}
+
+async function handleRtkCommand(pi: ExtensionAPI, args: string, ctx: ExtensionContext): Promise<void> {
+  const subcommand = args.trim();
+  if (subcommand.length === 0) {
+    await showRtkStatus(pi, ctx);
+    return;
+  }
+
+  if (!(RTK_SUBCOMMANDS as readonly string[]).includes(subcommand)) {
+    ctx.ui.notify("Unknown /rtk subcommand. Valid forms: /rtk enable, /rtk disable, /rtk status.", "error");
+    return;
+  }
+
+  if (subcommand === "status") {
+    await showRtkStatus(pi, ctx);
+    return;
+  }
+
+  sessionEnabled = subcommand === "enable";
+  ctx.ui.notify(`pi-rtk ${sessionEnabled ? "enabled" : "disabled"} for this session`, "info");
+}
+
+export default function piRtkExtension(pi: ExtensionAPI) {
+  const localBashOperations = createLocalBashOperations();
+
+  pi.registerCommand("rtk", {
+    description: "Control pi-rtk shell command rewriting",
+    getArgumentCompletions: (prefix) => {
+      const items = RTK_SUBCOMMANDS
+        .filter((k) => k.startsWith(prefix.trim().toLowerCase()))
+        .map((k) => ({ value: k, label: k }));
+      return items.length > 0 ? items : null;
+    },
+    handler: async (args, ctx) => {
+      await handleRtkCommand(pi, args, ctx);
+    },
+  });
+
+  pi.on("session_start", async (_event, ctx) => {
+    // Reset per-session toggle
+    sessionEnabled = true;
+    rtkUnavailableNotified = false;
+    await checkRtkAvailable(pi, ctx);
+  });
+
+  pi.on("session_shutdown", async (_event, ctx) => {
+  });
+
+  pi.on("before_agent_start", async (event) => {
+    if (!rewritingEnabled()) return;
+    // Truth gate: when the binary is known-missing, rewrites pass through —
+    // don't tell the model its commands are rewritten. Re-checked every turn,
+    // so once the 30s re-probe flips rtkAvailable back to true, the note
+    // is injected again on subsequent turns.
+    if (rtkAvailable === false) return;
+    return {
+      systemPrompt: event.systemPrompt +
+        "\n\nYour bash commands are transparently rewritten through RTK for token savings. " +
+        "Command output reflects the rewritten command; the original command text in your tool calls is replaced before execution.",
+    };
+  });
+
+  pi.on("tool_call", async (event, ctx) => {
+    try {
+      if (!isToolCallEventType("bash", event)) return;
+
+      const originalCommand = event.input.command;
+      const rewritten = await maybeRewriteCommand(pi, originalCommand, ctx, ctx.signal);
+      if (rewritten && rewritten !== originalCommand) {
+        // Notify when a command is rewritten so the model sees the discrepancy
+        if (ctx.hasUI) {
+          ctx.ui.notify(`[pi-rtk] rewrote: ${originalCommand.slice(0, 80)} → ${rewritten.slice(0, 80)}`, "info");
+        }
+        event.input.command = rewritten;
+      }
+    } catch (error) {
+      const msg = "[pi-rtk] unexpected rewrite error; passing bash command through unchanged";
+      if (ctx.hasUI) ctx.ui.notify(msg, "warning");
+      else console.warn(msg, error);
+    }
+  });
+
+  pi.on("user_bash", async (event, ctx) => {
+    try {
+      if (event.excludeFromContext) return;
+
+      const rewritten = await maybeRewriteCommand(pi, event.command, ctx, ctx.signal);
+      if (!rewritten || rewritten === event.command) return;
+      return {
+        operations: {
+          exec: (_command, cwd, options) => localBashOperations.exec(rewritten, cwd, options),
+        },
+      };
+    } catch (error) {
+      const msg = "[pi-rtk] unexpected user_bash rewrite error; passing command through unchanged";
+      if (ctx.hasUI) ctx.ui.notify(msg, "warning");
+      else console.warn(msg, error);
+      return;
+    }
+  });
+}

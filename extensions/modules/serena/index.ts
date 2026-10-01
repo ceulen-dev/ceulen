@@ -1,0 +1,629 @@
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
+import { readDisabledTools } from "../../lib/tools";
+import { Type, type TSchema } from "typebox";
+import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
+import path from "node:path";
+import { SerenaWorkerClient, type SerenaWorkerResponse } from "./worker";
+import { SERENA_FIRST_GUIDANCE, SERENA_MISS_GUIDANCE, isSerenaActive, shouldBlockSemanticMiss } from "./lib/guidance";
+import { normalizeProject, normalizeContext, normalizeTimeoutMs, stripControlParams } from "./lib/normalize";
+import { repairSymbolNameKey } from "./lib/symbol-key";
+
+const DEFAULT_CONTEXT = "ide";
+
+const PROJECT_PARAM = Type.Optional(Type.String({ description: "Project path. Default: CWD." }));
+const CONTEXT_PARAM = Type.Optional(Type.String({ description: "Serena context name. Default: ide." }));
+const MAX_CHARS_PARAM = Type.Optional(Type.Number({ description: "Max response chars." }));
+const TIMEOUT_MS_PARAM = Type.Optional(Type.Number({ description: "Timeout in ms." }));
+
+import { truncateText } from "./lib/truncate";
+
+const controlSchema = {
+  project: PROJECT_PARAM,
+  context: CONTEXT_PARAM,
+  timeout_ms: TIMEOUT_MS_PARAM,
+};
+
+const statusSchema = Type.Object({
+  project: PROJECT_PARAM,
+  context: CONTEXT_PARAM,
+  includeAgent: Type.Optional(Type.Boolean({ description: "Include active tools/backend details via SerenaAgent." })),
+  timeout_ms: TIMEOUT_MS_PARAM,
+});
+
+const listToolsSchema = Type.Object({
+  ...controlSchema,
+  includeAgent: Type.Optional(Type.Boolean({ description: "Include SerenaAgent before listing." })),
+});
+
+const overviewSchema = Type.Object({
+  ...controlSchema,
+  relative_path: Type.String({ description: "Path relative to project root." }),
+  depth: Type.Optional(Type.Number({ description: "Overview depth." })),
+  max_answer_chars: MAX_CHARS_PARAM,
+});
+
+const findSymbolSchema = Type.Object({
+  ...controlSchema,
+  name_path_pattern: Type.String({ description: "Name path pattern, e.g. MyClass/my_method." }),
+  depth: Type.Optional(Type.Number()),
+  relative_path: Type.Optional(Type.String({ description: "Optional dir/file restriction relative to project root." })),
+  include_body: Type.Optional(Type.Boolean()),
+  include_info: Type.Optional(Type.Boolean()),
+  substring_matching: Type.Optional(Type.Boolean()),
+  max_matches: Type.Optional(Type.Number()),
+  max_answer_chars: MAX_CHARS_PARAM,
+});
+
+const referencingSchema = Type.Object({
+  ...controlSchema,
+  name_path: Type.String({ description: "Exact symbol name path from find_symbol." }),
+  relative_path: Type.String({ description: "Symbol's file, relative to project root." }),
+  include_kinds: Type.Optional(Type.Array(Type.Number({ description: "LSP kind integers to include." }))),
+  exclude_kinds: Type.Optional(Type.Array(Type.Number({ description: "LSP kind integers to exclude." }))),
+  max_answer_chars: MAX_CHARS_PARAM,
+});
+
+const replaceBodySchema = Type.Object({
+  ...controlSchema,
+  name_path: Type.String({ description: "Exact name path to replace." }),
+  relative_path: Type.String({ description: "Symbol's file, relative to project root." }),
+  body: Type.String({ description: "Complete new symbol definition/body, including signature line." }),
+});
+
+const insertSchema = Type.Object({
+  ...controlSchema,
+  name_path: Type.String({ description: "Exact name path of reference symbol." }),
+  relative_path: Type.String({ description: "Symbol's file, relative to project root." }),
+  body: Type.String({ description: "Content to insert." }),
+});
+
+const renameSchema = Type.Object({
+  ...controlSchema,
+  name_path: Type.String({ description: "Exact name path to rename." }),
+  relative_path: Type.String({ description: "Symbol's file, relative to project root." }),
+  new_name: Type.String({ description: "New symbol name." }),
+});
+
+const safeDeleteSchema = Type.Object({
+  ...controlSchema,
+  name_path_pattern: Type.String({ description: "Name path pattern to delete if unreferenced." }),
+  relative_path: Type.String({ description: "Symbol's file, relative to project root." }),
+});
+
+const emptyToolSchema = Type.Object({ ...controlSchema });
+
+const symbolRefSchema = Type.Object({
+  ...controlSchema,
+  name_path: Type.String({ description: "Exact name path to look up." }),
+  relative_path: Type.String({ description: "Symbol's file, relative to project root." }),
+});
+
+const diagnosticsSchema = Type.Object({
+  ...controlSchema,
+  relative_path: Type.String({ description: "Path relative to project root." }),
+});
+
+const searchPatternSchema = Type.Object({
+  ...controlSchema,
+  pattern: Type.String({ description: "Text or regex to search for." }),
+  relative_path: Type.Optional(Type.String({ description: "Optional dir restriction." })),
+  paths_include_glob: Type.Optional(Type.String()),
+  paths_exclude_glob: Type.Optional(Type.String()),
+  context_lines_before: Type.Optional(Type.Number()),
+  context_lines_after: Type.Optional(Type.Number()),
+  restrict_search_to_code_files: Type.Optional(Type.Boolean()),
+  multiline: Type.Optional(Type.Boolean({ description: "Unsupported; always false." })),
+  max_answer_chars: MAX_CHARS_PARAM,
+  limit: Type.Optional(Type.Number({ description: "Max matches." })),
+});
+
+const replaceContentSchema = Type.Object({
+  ...controlSchema,
+  relative_path: Type.String({ description: "Path relative to project root." }),
+  needle: Type.Optional(Type.String({ description: "Text or regex to replace." })),
+  repl: Type.Optional(Type.String({ description: "Replacement text." })),
+  mode: Type.Optional(Type.Union([Type.Literal("literal"), Type.Literal("regex")], { description: "Literal or regex." })),
+  allow_multiple_occurrences: Type.Optional(Type.Boolean()),
+});
+
+const ERROR_HINTS: Record<string, (tool?: string) => string> = {
+  language_server_error: () => " The language server may need a restart. Try serena_restart_language_server first.",
+  missing_tool: (tool) => ` The tool '${tool ?? "unknown"}' is not available. Try serena_list_tools to see available tools for this project.`,
+  inactive_tool: (tool) => ` The tool '${tool ?? "unknown"}' is not active in the current context. Try serena_list_tools to see active tools.`,
+  project_error: () => " There is a project configuration issue. Try serena_get_current_config to inspect the active project.",
+};
+
+function errorSuggestion(errorType: string | undefined, tool: string | undefined): string {
+  const hint = errorType ? ERROR_HINTS[errorType] : undefined;
+  return hint ? hint(tool) : "";
+}
+
+function resultText(response: SerenaWorkerResponse): string {
+  if (!response.ok) {
+    const suggestion = errorSuggestion(response.errorType as string | undefined, response.tool as string | undefined);
+    const errorDetail = response.error
+      ?? (typeof response.result === "string" ? response.result : undefined)
+      ?? "Unknown Serena error";
+    return `Error: ${errorDetail}${suggestion}`;
+  }
+  // For search results, show a friendly empty-state instead of raw "{}".
+  if (response.tool === "search_for_pattern") {
+    if (response.result == null || response.result === '{}' || (typeof response.result === "object" && Object.keys(response.result as object).length === 0)) {
+      return "No results found.";
+    }
+  }
+  return typeof response.result === "string" ? response.result : JSON.stringify(response.result, null, 2);
+}
+
+// Module-level singleton: the Python worker is shared across the parent session and all
+// in-process pi-subagent children. Previously this lived in the factory closure, so every
+// child session that loaded pi-serena spawned a separate Python process that leaked on
+// child dispose (no shutdown hook). One worker serves all callers.
+let worker: SerenaWorkerClient | undefined;
+
+// Actions that only read state — safe to auto-retry once after a timeout,
+// because a partial application is impossible. Mutating actions
+// (replace_symbol_body, insert_*, rename_symbol, safe_delete_symbol,
+// replace_content, restart_*, onboarding) may have applied before the worker
+// was killed; retrying them can double-apply, so their timeout surfaces as an
+// error instead. Effective action = extraPayload.tool when present (the
+// `call` action is dispatched by tool name), else the action itself.
+export const READ_ONLY_WORKER_ACTIONS: ReadonlySet<string> = new Set([
+  "get_symbols_overview",
+  "find_symbol",
+  "find_referencing_symbols",
+  "find_declaration",
+  "find_implementations",
+  "search_for_pattern",
+  "get_diagnostics_for_file",
+  "config", // serena_get_current_config
+  "check_onboarding_performed",
+  "status",
+  "list_tools",
+]);
+
+export function isReadOnlyWorkerAction(action: string, extraPayload: Record<string, unknown> = {}): boolean {
+  return READ_ONLY_WORKER_ACTIONS.has(typeof extraPayload.tool === "string" ? extraPayload.tool : action);
+}
+
+/** Retry policy for callWorkerAction, extracted so tests can pin it without
+ *  spawning a real worker: a thrown timeout-class error retries only when the
+ *  effective action is read-only (mutators may have applied before the kill). */
+export function shouldRetryAfterTimeout(
+  action: string,
+  extraPayload: Record<string, unknown>,
+  failure: { errorMessage?: string },
+): boolean {
+  if (!isReadOnlyWorkerAction(action, extraPayload)) return false;
+  const msg = failure.errorMessage || "";
+  return msg.includes("timed out") || msg.includes("killed due to timeout") || msg.includes("worker exited") || msg.includes("restarted");
+}
+
+export default function serenaToolsExtension(pi: ExtensionAPI) {
+  // Per-tool kill-switch: tools listed in ceulen.disabledTools register
+  // inactive (defaultActive: false) — /config re-activates them live via
+  // setActiveTools; the persisted list re-applies on every load.
+  const disabled = readDisabledTools();
+  const reg = <P extends TSchema, D = unknown>(tool: ToolDefinition<P, D>) =>
+    pi.registerTool({ ...tool, defaultActive: !disabled.has(tool.name) });
+
+  const getWorker = () => {
+    if (!worker) {
+      worker = new SerenaWorkerClient();
+    }
+    return worker;
+  };
+
+  const callWorkerAction = async (ctx: any, action: string, rawParams: Record<string, unknown>, extraPayload: Record<string, unknown> = {}, lockPath?: string) => {
+    const { project, context, timeoutMs, params } = stripControlParams(rawParams);
+    const payload = { action, project, context, params, ...extraPayload };
+    const requestWithRetry = async (): Promise<SerenaWorkerResponse> => {
+      try {
+        return await getWorker().request(payload, timeoutMs);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        if (!shouldRetryAfterTimeout(action, extraPayload, { errorMessage: msg })) throw error;
+        return getWorker().request(payload, timeoutMs);
+      }
+    };
+    const run = async (): Promise<{ content: { type: "text"; text: string }[]; details: SerenaWorkerResponse }> => {
+      const response = await requestWithRetry();
+      return {
+        content: [{ type: "text" as const, text: truncateText(resultText(response)) }],
+        details: response,
+      };
+    };
+    return lockPath ? withFileMutationQueue(lockPath, run) : run();
+  };
+
+  const callSerena = async (ctx: any, tool: string, rawParams: Record<string, unknown>, lockPath?: string) => {
+    return callWorkerAction(ctx, "call", rawParams, { tool }, lockPath);
+  };
+
+  const lockPathForRelativeFile = (rawParams: Record<string, unknown>): string | undefined => {
+    const project = normalizeProject(rawParams.project);
+    if (typeof rawParams.relative_path !== "string" || !rawParams.relative_path.trim()) return undefined;
+    const resolved = path.resolve(project, rawParams.relative_path);
+    const relative = path.relative(project, resolved);
+    if (relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+    return resolved;
+  };
+
+  const lockPathForProject = (rawParams: Record<string, unknown>): string => path.resolve(normalizeProject(rawParams.project));
+
+  reg({
+    name: "serena_status",
+    label: "Serena Status",
+    description: "Show Serena worker and project status.",
+    parameters: statusSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const project = normalizeProject(params.project);
+      const context = normalizeContext(params.context);
+      const response = await getWorker().request({ action: "status", project, context, includeAgent: Boolean(params.includeAgent) }, normalizeTimeoutMs(params.timeout_ms));
+      return { content: [{ type: "text", text: truncateText(JSON.stringify(response, null, 2)) }], details: response };
+    },
+  });
+
+  reg({
+    name: "serena_list_tools",
+    label: "Serena List Tools",
+    description: "List active Serena tools for project/context.",
+    parameters: listToolsSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const project = normalizeProject(params.project);
+      const context = normalizeContext(params.context);
+      const response = await getWorker().request({ action: "status", project, context, includeAgent: true }, normalizeTimeoutMs(params.timeout_ms));
+      const tools = Array.isArray(response.activeTools) ? response.activeTools : [];
+      const text = tools.length > 0 ? tools.map((tool) => `- ${tool}`).join("\n") : 'No active tools found for this project/context.';
+      return { content: [{ type: "text", text: truncateText(text) }], details: response };
+    },
+  });
+
+  reg({
+    name: "serena_get_symbols_overview",
+    label: "Serena Symbols Overview",
+    description: "Get top-level symbols via the language server.",
+    parameters: overviewSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "get_symbols_overview", params);
+    },
+  });
+
+  reg({
+    name: "serena_find_symbol",
+    label: "Serena Find Symbol",
+    description: "Find symbols by name path pattern.",
+    parameters: findSymbolSchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, true),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "find_symbol", params);
+    },
+  });
+
+  reg({
+    name: "serena_find_referencing_symbols",
+    label: "Serena Find References",
+    description: "Find symbols referencing a given symbol.",
+    parameters: referencingSchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, false),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "find_referencing_symbols", params);
+    },
+  });
+
+  reg({
+    name: "serena_replace_symbol_body",
+    label: "Serena Replace Symbol Body",
+    description: "Replace a function/class/method body via symbolic editing.",
+    parameters: replaceBodySchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, false),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "replace_symbol_body", params, lockPathForRelativeFile(params));
+    },
+  });
+
+  reg({
+    name: "serena_insert_before_symbol",
+    label: "Serena Insert Before Symbol",
+    description: "Insert content before a known symbol definition.",
+    parameters: insertSchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, false),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "insert_before_symbol", params, lockPathForRelativeFile(params));
+    },
+  });
+
+  reg({
+    name: "serena_insert_after_symbol",
+    label: "Serena Insert After Symbol",
+    description: "Insert content after a known symbol definition.",
+    parameters: insertSchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, false),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "insert_after_symbol", params, lockPathForRelativeFile(params));
+    },
+  });
+
+  reg({
+    name: "serena_rename_symbol",
+    label: "Serena Rename Symbol",
+    description: "Rename a symbol across the codebase.",
+    parameters: renameSchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, false),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "rename_symbol", params, lockPathForProject(params));
+    },
+  });
+
+  reg({
+    name: "serena_safe_delete_symbol",
+    label: "Serena Safe Delete Symbol",
+    description: "Delete a symbol with no remaining references.",
+    parameters: safeDeleteSchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, true),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "safe_delete_symbol", params, lockPathForRelativeFile(params));
+    },
+  });
+
+  reg({
+    name: "serena_search_for_pattern",
+    label: "Serena Search Pattern",
+    description: "Search project files with path filtering.",
+    parameters: searchPatternSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      if (params.multiline === true) {
+        return {
+          content: [{ type: "text" as const, text: "Error: serena_search_for_pattern does not support multiline mode. Use serena_search_for_pattern without multiline or use serena_find_symbol for symbol-aware searches instead." }],
+          details: { ok: false, error: "multiline not supported" },
+        };
+      }
+      // ponytail: rename pattern → substring_pattern for Python backend
+      const { multiline: _ml, limit: _limit, pattern, ...restParams } = params;
+      const searchParams: Record<string, unknown> = { ...restParams };
+      if (pattern) {
+        searchParams.substring_pattern = pattern;
+      }
+      const result = await callSerena(ctx, "search_for_pattern", searchParams);
+      if (_limit && result.content?.[0]?.text) {
+        try {
+          // ponytail: parse result JSON, count matches, truncate if over limit
+          const parsed = JSON.parse(result.content[0].text);
+          if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+            const entries = Object.entries(parsed) as [string, unknown[]][];
+            const total = entries.reduce((s, [, v]) => s + (Array.isArray(v) ? v.length : 0), 0);
+            if (total > _limit) {
+              let kept = 0;
+              const out: Record<string, unknown[]> = {};
+              for (const [f, arr] of entries) {
+                if (!Array.isArray(arr)) continue;
+                const need = _limit - kept;
+                if (need <= 0) break;
+                out[f] = arr.slice(0, need);
+                kept += out[f]!.length;
+              }
+              result.content[0].text = JSON.stringify(out) + `\n\n[Results truncated to ${_limit} matches out of ${total}. Refine search or increase limit.]`;
+            }
+          }
+        } catch {
+          // ponytail: not JSON, fall back to line truncation
+          const lines = result.content[0].text.split("\n");
+          if (lines.length > _limit) {
+            result.content[0].text = lines.slice(0, _limit).join("\n") + `\n\n[Results truncated to ${_limit} lines. Refine search or increase limit.]`;
+          }
+        }
+      }
+      return result;
+    },
+  });
+
+  reg({
+    name: "serena_replace_content",
+    label: "Serena Replace Content",
+    description: "Replace file content when symbolic editing isn't the right boundary.",
+    parameters: replaceContentSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const normalized = { ...params };
+      if (typeof normalized.needle !== "string") return { content: [{ type: "text" as const, text: "serena_replace_content requires string parameter 'needle'." }], details: { ok: false } };
+      if (typeof normalized.repl !== "string") return { content: [{ type: "text" as const, text: "serena_replace_content requires string parameter 'repl'." }], details: { ok: false } };
+      const mode = normalized.mode ?? "literal";
+      if (mode !== "literal" && mode !== "regex") return { content: [{ type: "text" as const, text: "serena_replace_content requires mode to be 'literal' or 'regex'." }], details: { ok: false } };
+      normalized.mode = mode;
+      return callSerena(ctx, "replace_content", normalized, lockPathForRelativeFile(params));
+    },
+  });
+
+  reg({
+    name: "serena_restart_language_server",
+    label: "Serena Restart Language Server",
+    description: "Restart the language server when diagnostics are stale.",
+    promptGuidelines: ["For a full worker restart (Python bridge), use serena_restart_worker instead."],
+    parameters: emptyToolSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callWorkerAction(ctx, "restart_language_server", params);
+    },
+  });
+
+  reg({
+    name: "serena_restart_worker",
+    label: "Serena Restart Worker",
+    description: "Restart the persistent Serena Python worker process. Use when diagnostics seem stale or after configuration changes.",
+    promptGuidelines: ["Use when the worker is unresponsive; kills and re-spawns the Python bridge."],
+    parameters: emptyToolSchema,
+    async execute(_id, _params, _signal, _onUpdate, ctx) {
+      // restart() spawns eagerly; without Python installed it throws
+      // synchronously — surface that as a tool error, never a raw throw.
+      try {
+        getWorker().restart();
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify?.(`Failed to restart Serena worker: ${msg}`, "error");
+        return {
+          content: [{ type: "text" as const, text: `Failed to restart Serena worker: ${msg}` }],
+          details: { ok: false, error: msg },
+        };
+      }
+      return {
+        content: [{ type: "text" as const, text: "Serena worker restarted." }],
+        details: { ok: true, result: "Worker restarted" },
+      };
+    },
+  });
+
+  reg({
+    name: "serena_get_current_config",
+    label: "Serena Current Config",
+    description: "Show current project/config details.",
+    parameters: emptyToolSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      const resp = await callWorkerAction(ctx, "config", params);
+      if (resp.details?.ok && typeof resp.details.result === "string") {
+        // Strip the "Available but not active" section — those are backend-only tools
+        // not callable as Pi tools, and listing them misleads the model.
+        const text = resp.details.result;
+        const cutoff = text.indexOf("\nAvailable but not active tools:");
+        if (cutoff >= 0) {
+          resp.content[0].text = text.slice(0, cutoff);
+        }
+      }
+      return resp;
+    },
+  });
+
+  reg({
+    name: "serena_check_onboarding_performed",
+    label: "Serena Check Onboarding",
+    description: "Check whether onboarding memories exist.",
+    parameters: emptyToolSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "check_onboarding_performed", params);
+    },
+  });
+
+  reg({
+    name: "serena_onboarding",
+    label: "Serena Onboarding",
+    description: "Run onboarding prompt for project memories.",
+    parameters: emptyToolSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callSerena(ctx, "onboarding", params);
+    },
+  });
+
+  // ponytail: memory tools removed — use munin_search/munin_store/munin_get for all memory operations.
+  // Serena keeps only code-navigation tools (find_symbol, find_declaration, replace_body, etc.)
+
+  reg({
+    name: "serena_find_declaration",
+    label: "Serena Find Declaration",
+    description: "Find the declaration of a symbol via the language server.",
+    parameters: symbolRefSchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, false),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callWorkerAction(ctx, "find_declaration", params);
+    },
+  });
+
+  reg({
+    name: "serena_find_implementations",
+    label: "Serena Find Implementations",
+    description: "Find implementations of a symbol via the language server.",
+    parameters: symbolRefSchema,
+    prepareArguments: (args) => repairSymbolNameKey(args, false),
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callWorkerAction(ctx, "find_implementations", params);
+    },
+  });
+
+  reg({
+    name: "serena_get_diagnostics_for_file",
+    label: "Serena File Diagnostics",
+    description: "Get LSP diagnostics (errors, warnings, hints) for a file.",
+    parameters: diagnosticsSchema,
+    async execute(_id, params, _signal, _onUpdate, ctx) {
+      return callWorkerAction(ctx, "get_diagnostics_for_file", params);
+    },
+  });
+
+  pi.registerCommand("serena-dashboard", {
+    description: "Open the Serena dashboard for the current project",
+    handler: async (args, ctx) => {
+      const project = args?.trim() || process.cwd();
+      const response = await getWorker().request({ action: "dashboard", project, context: DEFAULT_CONTEXT, open: true });
+      if (response.ok) {
+        const opened = response.opened ? "opened" : "available";
+        ctx.ui.notify(`Serena dashboard ${opened}: ${response.dashboardUrl ?? "dashboard URL unavailable"}`, "info");
+      } else {
+        ctx.ui.notify(resultText(response), "error");
+      }
+    },
+  });
+
+  pi.registerCommand("serena-restart", {
+    description: "Restart the persistent Serena worker",
+    handler: async (_args, ctx) => {
+      try {
+        getWorker().restart();
+        ctx.ui.notify("Restarted Serena worker", "info");
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(`Failed to restart Serena worker: ${msg}`, "error");
+      }
+    },
+  });
+
+  // Serena guidance — only inject when serena tools are actually active
+  pi.on("before_agent_start", async (event) => {
+    // pi.getActiveTools() is the live registry — extension-registered tools
+    // (like serena_find_symbol) never appear in systemPromptOptions.selectedTools.
+    const serenaActive = isSerenaActive(pi.getActiveTools());
+    if (!serenaActive) return;
+    return {
+      systemPrompt: `${event.systemPrompt}\n\n${SERENA_FIRST_GUIDANCE}`,
+    };
+  });
+
+  pi.on("tool_call", async (event) => {
+    // Skip semantic miss detection if serena tools are not active (e.g., plan mode)
+    if (!isSerenaActive(pi.getActiveTools())) return;
+
+    // Strict mode blocks obvious raw code reads/searches in-band; no reminder steering.
+    const strict = process.env.PI_SERENA_STRICT === "1" || process.env.PI_SERENA_STRICT_MISSES === "1";
+    if (!strict) return;
+    if (shouldBlockSemanticMiss(event.toolName, event.input as Record<string, unknown>)) {
+      return { block: true, reason: `Serena-first mode: ${SERENA_MISS_GUIDANCE}` };
+    }
+  });
+
+  // Eager startup: pre-spawn the worker on session start when SERENA_EAGER_STARTUP=1
+  pi.on("session_start", async (_event, ctx) => {
+    if (process.env.SERENA_EAGER_STARTUP === "1") {
+      // Spawn the worker via a lightweight status request to warm the Python bridge
+      getWorker().request({ action: "status", project: process.cwd(), context: DEFAULT_CONTEXT }, 30_000).catch(() => {
+        // Eager startup is best-effort; failures are handled when the tool is first used
+      });
+    }
+  });
+
+  // session_shutdown fires only on parent lifecycle events (reload/quit/new/fork/
+  // resume) — child sessions (pi-subagent) use dispose() which does NOT emit it.
+  // So stopping here is safe: it never runs for children, and the module-level
+  // singleton means children reuse this worker without spawning their own.
+  //
+  // ponytail: known race — if a child is mid-serena-request when the parent
+  // reloads, worker.stop() rejects that request with "Serena worker stopped"
+  // instead of the child seeing a clean abort. The parent session teardown aborts
+  // the child's subagent tool call in the same tick anyway, so the child fails
+  // either way; no data is lost and the worker is cleaned up. Reference-counting
+  // the worker across parent+children was considered and rejected as
+  // over-engineering for a cosmetic error-text difference during teardown.
+  pi.on("session_shutdown", async (_event, ctx) => {
+    try {
+      await worker?.stop();
+    } catch {
+      // worker stop failed — proceed with cleanup
+    } finally {
+      worker = undefined;
+    }
+  });
+}

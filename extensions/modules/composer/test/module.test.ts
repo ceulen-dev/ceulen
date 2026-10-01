@@ -294,8 +294,8 @@ describe("core module contract", () => {
   it("nextDisabled excludes core modules; withEnableRow adds no row for them", async () => {
     const { nextDisabled, withEnableRow } = await import("../../config/index.js");
     // working = enabled set; nextDisabled lists the NOT-enabled non-core modules.
-    assert.deepEqual(nextDisabled(new Set(["usage"])), ["router", "ponytail", "config"]);
-    assert.deepEqual(nextDisabled(new Set(["router", "usage", "ponytail", "config"])), [], "all-on → nothing disabled");
+    assert.deepEqual(nextDisabled(new Set(["usage"])), ["router", "ponytail", "serena", "fff", "rtk", "config"]);
+    assert.deepEqual(nextDisabled(new Set(["router", "usage", "ponytail", "serena", "fff", "rtk", "config"])), [], "all-on → nothing disabled");
     const groups = [{ key: "composer", label: "Composer Shape", rows: [{ key: "composer.shape" }] }] as never;
     const out = withEnableRow(groups, "composer", "Composer shape.", new Set(["composer"]));
     assert.deepEqual(out[0]!.rows.map((r: { key: string }) => r.key), ["composer.shape"], "no Enable row for core");

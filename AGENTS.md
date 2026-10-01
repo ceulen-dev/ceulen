@@ -24,6 +24,10 @@ skills/                  skill directories shipped with the package (contributed
 
 - A module default-exports a factory `(pi: ExtensionAPI, deps?: ModuleLoadDeps) => void` (deps is rarely used — the config module reads the contribution map); it registers commands/tools/handlers and returns. Public extension API only.
 - No external runtime dependencies — vendor shared code under `extensions/lib/` (with a `// ponytail: vendored from <pkg> <version>` header) rather than adding `dependencies`.
+  One sanctioned exception: `@ff-labs/fff-node` (fff module) is a native FFI
+  engine that cannot be vendored — pi's managed install installs real
+  `dependencies` for npm packages.
+- Tool registrations that should be per-tool toggleable list their canonical names on the module's `tools?: string[]` registry entry; names in `ceulen.disabledTools` (helpers in `extensions/lib/tools.ts`) register via `defaultActive: false`, and the config module's tool rows re-activate/deactivate them live with `setActiveTools` (no `/reload`).
 - Tests: `node:test` + tsx, in `extensions/modules/<name>/test/`. The bundle root `package.json` `test` script globs them. Test dirs are excluded from `tsc --noEmit` when they use loose harness stubs (usage, ponytail); they run under tsx.
 - To add a module: create `extensions/modules/<name>/`, append one entry to `MODULES` in `extensions/lib/registry.ts` under its category banner (each entry's `category` field is the OMP tab — the single source for /config tab placement, synthesized Enable-only sections, and /ceulen status grouping; pretty section names live in the config module's `PRETTY_OF` map). Order matters — usage reads the `router` provider, so router loads first; config loads last, it reads the contribution map. Add its test files to the `test` glob if not covered. The conflict guard covers you: a name another module already claimed throws at load.
 

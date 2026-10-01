@@ -22,6 +22,12 @@
     "LICENSE",
     "CHANGELOG.md"
   ],
+  "dependencies": {
+    "@ff-labs/fff-node": "^0.10.6"
+  },
+  "optionalDependencies": {
+    "@yuuang/ffi-rs-linux-x64-gnu": "1.3.2"
+  },
   "repository": {
     "type": "git",
     "url": "git+https://github.com/ceulen-dev/ceulen.git"
@@ -29,7 +35,7 @@
   "homepage": "https://github.com/ceulen-dev/ceulen#readme",
   "bugs": "https://github.com/ceulen-dev/ceulen/issues",
   "scripts": {
-    "test": "node --import tsx --test extensions/modules/router/test/unit.test.ts extensions/modules/router/test/guard.test.ts extensions/modules/usage/test/*.test.ts extensions/modules/ponytail/test/*.test.ts extensions/modules/config/test/*.test.ts extensions/modules/composer/test/*.test.ts",
+    "test": "node --import tsx --test extensions/modules/router/test/unit.test.ts extensions/modules/router/test/guard.test.ts extensions/modules/usage/test/*.test.ts extensions/modules/ponytail/test/*.test.ts extensions/modules/config/test/*.test.ts extensions/modules/composer/test/*.test.ts extensions/modules/serena/test/*.test.ts extensions/modules/fff/test/*.test.ts extensions/modules/rtk/test/*.test.js",
     "typecheck": "tsc --noEmit"
   },
   "pi": {
@@ -39,7 +45,8 @@
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": ">=0.99.1 <0.101.0",
-    "@earendil-works/pi-tui": ">=0.99.1 <0.101.0"
+    "@earendil-works/pi-tui": ">=0.99.1 <0.101.0",
+    "typebox": "*"
   },
   "devDependencies": {
     "@types/node": "^20.19.43",
