@@ -18,6 +18,40 @@
   Applies immediately — config resolves per tool call, no reload.
 
 ## Unreleased
+- **advisor** (new module, ported from `@bacnh85/pi-advisor` 0.3.8): a
+  second-model reviewer — after each settled turn an isolated reviewer reads the
+  transcript and may emit ONE severity-routed note (`nit` / `concern` /
+  `blocker`), steered as a follow-up turn or deferred to the next turn as an
+  LLM-visible aside during the post-steer calm-down window, under the ported
+  emission guard (content-free drop, dedupe with escalation, one note per
+  cycle). The ordered fallback chain (per-entry `:level` thinking) backs the
+  on-demand `advisor` tool (per-tool toggleable). Config: `/config` → Model →
+  Advisor — **Review settled turns** (the background watch; off = no review,
+  the consult tool keeps working), **Primary model** (catalogue picker),
+  **Thinking**, **Fallback chain** (inline model completions), min tool calls,
+  immune turns, and **Consult tool** (register the on-demand `advisor` tool);
+  saved to the GLOBAL **`advisor`** settings section and applied live through a
+  module bridge (no `/reload`). The module is **core**: always loaded, no
+  Enable row — its off-switch is an empty primary model (a stale
+  `ceulen.disabled: ["advisor"]` entry is ignored). The standalone `pi-advisor`
+  section is a read-only legacy alias (legacy `watch.enabled` folds into the new
+  `enabled`, the legacy section is deleted on the first save); the pi-plan
+  `advisorModel` migration is dropped (pi-plan's own port owns it). The
+  pi-config-panel models editor and the `ModelSelectorComponent` picker are
+  gone — `/config` is the editor. Isolated calls go through the public
+  `modelRegistry.streamSimple`, so no `@earendil-works/pi-ai` dependency is
+  added. Watch is TUI-only, fire-and-forget, pauses after 3 consecutive
+  failures, self-disarms on session shutdown, and the `advisor` tool is
+  re-synced on session_start/model_select while always honoring
+  `ceulen.disabledTools`. OMP-parity hardening: the reviewer prompt bans the
+  production noise classes (restating errors the agent already has, user-intent
+  and ceremony advice, scope policing, unsolicited back-compat, second-guessing
+  committed decisions, partial-work critique) and requires cited evidence;
+  token/cost accounting accumulates into `/advisor status` and the consult
+  tool's result; the review cursor and guard reset on `session_compact` /
+  `session_before_switch` (a re-primed reviewer may re-raise against the
+  rewritten transcript); the guard folds Unicode letters/digits (full-width
+  filler dedupes) and carries omp's larger content-free phrase list.
 - **classifier** (new module, ported from `@bacnh85/pi-classifier` 0.2.3,
   registry-backed): System One decision models (TypeSafe Jev) — the `classify`
   tool (same name/schema, per-tool toggleable) and the bash permission

@@ -81,6 +81,15 @@ describe("tool toggle rows", () => {
     assert.ok(working.has("ffgrep"));
   });
 
+  it("labels tools by name, with a pretty label/description for the ones that need explaining", () => {
+    assert.equal(moduleToolRow("ffgrep", new Set()).label, "ffgrep", "bare names stay the identity the model sees");
+    assert.match(String(moduleToolRow("ffgrep", new Set()).description), /Registers the tool inactive when off/);
+    const advisor = moduleToolRow("advisor", new Set());
+    assert.equal(advisor.label, "Consult tool", "advisor's row says what it is, not the feature's name twice");
+    assert.match(String(advisor.description), /second opinion on demand/);
+    assert.match(String(advisor.description), /background review is unaffected/);
+  });
+
   it("synthesizes rows only for declared tools; withToolRows appends to the first group", () => {
     assert.deepEqual(moduleToolRows(undefined, new Set()), []);
     const groups = [{ key: "s", label: "Serena", tab: "Tools", rows: [{ key: "ceulen.disabled.serena" }] }] as never;

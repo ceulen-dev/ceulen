@@ -30,6 +30,17 @@ import { buildPluginsGroups, isPluginsKey, openPluginsWorking, savePlugins } fro
 export const KILL_SWITCH_PREFIX = "ceulen.disabled.";
 export const TOOL_SWITCH_PREFIX = "ceulen.disabledTools.";
 
+/** Display overrides for tool rows whose bare name would not explain itself
+ *  (the row IS the tool's kill-switch, so it must say what on/off means).
+ *  Tools without an entry keep the bare tool name — the identity the model
+ *  sees — with the generic registration description. */
+const TOOL_PRETTY: Record<string, { label: string; description: string }> = {
+  advisor: {
+    label: "Consult tool",
+    description: "Registers the advisor tool so the agent can ask for a second opinion on demand. Off = not registered; the background review is unaffected.",
+  },
+};
+
 /** Read the current kill-switch state as a Set of ENABLED module names. */
 function enabledModules(): Set<string> {
   const disabled = new Set(readDisabled());
@@ -74,11 +85,12 @@ export function nextDisabled(working: Set<string>): string[] {
 /** One per-tool toggle row (key `ceulen.disabledTools.<tool>` over the given
  *  working set of ENABLED tool names). Applied live on save — no /reload. */
 export function moduleToolRow(tool: string, working: Set<string>): ReturnType<typeof row> {
-  return row(`${TOOL_SWITCH_PREFIX}${tool}`, tool, "toggle", working.has(tool), (v) => {
+  const pretty = TOOL_PRETTY[tool];
+  return row(`${TOOL_SWITCH_PREFIX}${tool}`, pretty?.label ?? tool, "toggle", working.has(tool), (v) => {
     if (v) working.add(tool);
     else working.delete(tool);
   }, {
-    description: "Registers the tool inactive when off — applied to this session immediately on save.",
+    description: pretty?.description ?? "Registers the tool inactive when off — applied to this session immediately on save.",
     defaultValue: true,
   });
 }
@@ -232,6 +244,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
   const PRETTY_OF: Record<string, { section: string; icon?: string }> = {
     router: { section: "Router", icon: "🌐" },
     classifier: { section: "Classifier (Jev)", icon: "⚖" },
+    advisor: { section: "Advisor", icon: "🧭" },
     usage: { section: "Usage footer", icon: "📊" },
     munin: { section: "Munin", icon: "🪶" },
     composer: { section: "Composer", icon: "🎨" },

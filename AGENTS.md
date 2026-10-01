@@ -54,6 +54,71 @@ same keys/values as pi-classifier, migration-free; `planGate` is left untouched
 for the future pi-plan port). Replaces the standalone package — if both are
 installed, first tool registration wins.
 
+### Advisor module (advisor)
+
+Ported from `@bacnh85/pi-advisor` 0.3.8 (see `extensions/modules/advisor/`): the
+turn-end reviewer (`agent_settled` → one isolated model call → at most ONE
+severity-routed note, steered as a follow-up turn or deferred to a next-turn
+aside inside the `immuneTurns` calm-down window), the emission guard
+(content-free/dedupe/rate-limit, Unicode-folded normalization + omp-parity
+filler list), the ordered model fallback chain, and the on-demand `advisor`
+tool. OMP-parity hardening (2026-10-01 delta analysis): the reviewer SYSTEM
+bans the omp noise classes (restating seen errors, intent/ceremony, scope
+policing, unsolicited back-compat, second-guessing, partial work) and demands
+cited evidence; `WatcherStats.usage` accumulates token/cost from the serving
+`streamSimple` result (shown in `/advisor status`, per-call in the consult
+tool result); `session_compact`/`session_before_switch` reseed the cursor and
+clear the guard (skipped when the event's session id differs from the live
+runtime's). The standalone `@bacnh85/pi-config-panel` models
+editor and the `ModelSelectorComponent` picker are DROPPED — `/config` → Model
+→ Advisor is the editor (`/advisor models` prints the chain, `/advisor
+<provider/model[, …]>` still sets it).
+
+**Settings**: the `advisor` section of the agent-dir settings.json (`enabled`,
+`models` chain with an optional `:level` per entry,
+`watch.{minToolCalls,immuneTurns}`), with a trusted project `.pi/settings.json`
+overriding per field. The standalone `pi-advisor` section is a READ-ONLY legacy
+alias — the new name wins per field inside a file, and the legacy
+`watch.enabled` folds into `enabled` at read time so the runtime has exactly ONE
+switch; the first save deletes the legacy section plus the legacy `model` string
+and `watch.enabled` key (nothing left to shadow the new state). The pi-plan
+`advisorModel` migration is deliberately NOT ported — pi-plan owns it when that
+port lands.
+
+**`/config` rows** (`advisor.*`; the Enable + tool rows are auto-generated):
+`Review settled turns` (the background review; off = no review, the consult
+tool keeps working), `Primary model`
+(catalogue menu), `Thinking` (closed set, saved as the primary's `:level`
+suffix), `Fallback chain` (comma-separated, inline model completions),
+`watch.minToolCalls`, `watch.immuneTurns`. Saving writes the agent-dir file and
+applies to the LIVE session through the module bridge (`setAdvisorBridge`: models
+swapped, master → the session watch flag, cursor reseeded on a 0 → N chain, tool
+availability re-synced) — no `/reload`. A trusted project file setting `advisor`
+or `pi-advisor` is disclosed as shadowing the global save.
+
+**Tool availability** is resolved by the module's `sync()` (session_start,
+model_select, `/advisor on|off`): the `advisor` tool follows the CHAIN — a
+configured advisor is always consultable on demand, also while `Review settled
+turns`/`/advisor watch-off` has the background review off (pi-advisor's
+semantics) — and it honors `ceulen.disabledTools` (its row is relabeled
+`Consult tool` by the config module's `TOOL_PRETTY` map, since the bare name
+`advisor` would sit right under the section of the same name). The per-tool
+kill-switch always wins, so a toggle is never silently undone. The advisor
+module is `core: true` (always loaded, no Enable row, `ceulen.disabled`
+ignores it): its real off-switch is an empty `Primary model`.
+
+**Isolated calls** go through the PUBLIC `ctx.modelRegistry.streamSimple`
+(pi's own `prepareRequest` path: request-time auth + provider wiring) — no
+`@earendil-works/pi-ai` import, so the bundle keeps zero runtime dependencies.
+The entry/message customType is `ceulen-advisor`; the opencode session header
+rides in the request options because the main loop's `transformHeaders` closure
+is unreachable from an extension. The watch is TUI-only, fire-and-forget off the
+settle barrier, pauses after 3 consecutive failures (`/advisor on` resumes), and
+self-disarms on `session_shutdown` so an in-flight review never leaks into a
+replaced session. omp's roster / per-advisor tool grants /
+`maxNotesPerUpdate` / `syncBacklog` are NOT ported — an isolated advisor
+`ToolSession` is not part of pi's public extension API.
+
 ## Munin module (munin)
 
 Ported from `@bacnh85/pi-munin` 0.5.12 (see `extensions/modules/munin/`). Eight
@@ -92,7 +157,7 @@ field's source without printing the key. Env contract is stable `MUNIN_*`
 
 ## Settings / kill-switch
 
-`ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). `/config` writes to whichever file currently carries the `ceulen` section (see the config-module section) — never a shadowed layer. The deprecated `"sub"` key is still treated as `"usage"`. **CORE modules** (`ModuleEntry.core: true`, today `composer`) are always loaded: `readDisabled`/`writeDisabled` filter them (a stale entry can't disable one), `nextDisabled` never lists them, and the config panel adds no Enable row. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
+`ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). `/config` writes to whichever file currently carries the `ceulen` section (see the config-module section) — never a shadowed layer. The deprecated `"sub"` key is still treated as `"usage"`. **CORE modules** (`ModuleEntry.core: true`, today `composer`, `advisor`) are always loaded: `readDisabled`/`writeDisabled` filter them (a stale entry can't disable one), `nextDisabled` never lists them, and the config panel adds no Enable row. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
 
 ## Yardmaster usage contract (usage module)
 
@@ -289,7 +354,13 @@ writes its own `~/.config/ponytail/config.json`; applies next session;
 **Tasks** tab, `Ponytail` section) and **munin** (`munin.project`,
 `munin.baseUrl`, `munin.apiKey` (masked, gitignore warning) — writes the
 PROJECT `.pi/settings.json` `munin` section, effective immediately (config is
-read per tool call, no reload); **Memory** tab, `Munin` section). Modules
+read per tool call, no reload); **Memory** tab, `Munin` section) and
+**advisor** (`advisor.enabled`, `advisor.model`, `advisor.thinking`,
+`advisor.fallbacks`, `advisor.watch.{minToolCalls,immuneTurns}` — writes the
+GLOBAL `advisor` section (legacy `pi-advisor` migrated on first save), applied
+live through the module bridge; **Model** tab, `Advisor` section) and
+**classifier** (`classifier.model`, `classifier.permission.*`; **Model** tab,
+`Classifier (Jev)` section). Modules
 without a contribution factory get
 a synthesized Enable-only section (usage → **Appearance** · `Usage footer`;
 config → **Plugins** · `Ceulen config`). The per-module kill-switch rows are

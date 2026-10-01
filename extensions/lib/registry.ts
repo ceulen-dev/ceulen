@@ -15,6 +15,8 @@ import routerModule from "../modules/router/index.ts";
 import { routerConfig } from "../modules/router/configPanel.ts";
 import classifierModule from "../modules/classifier/index.ts";
 import { classifierConfig } from "../modules/classifier/configPanel.js";
+import advisorModule from "../modules/advisor/index.ts";
+import { advisorConfig } from "../modules/advisor/configPanel.js";
 import usageModule from "../modules/usage/index.ts";
 import composerModule, { composerConfig } from "../modules/composer/index.ts";
 import ponytailModule, { ponytailConfig } from "../modules/ponytail/index.ts";
@@ -76,6 +78,11 @@ export const MODULES: ModuleEntry[] = [
   // from the router provider's registry catalog (needs router registered, not
   // the module object itself — order is for /config grouping readability).
   { name: "classifier", category: "Model", describe: "System One decision models (Jev): classify tool + bash permission auto-approve, via router-discovered models.", load: classifierModule, config: classifierConfig, tools: ["classify"] },
+  // Advisor right after classifier: second-model reviewer (turn-end notes +
+  // the on-demand `advisor` tool) with a catalogue-backed model picker in /config.
+  // CORE: the advisor is always loaded — its real off-switch is the model chain
+  // (an empty `Primary model` row), so it needs no kill-switch row.
+  { name: "advisor", core: true, category: "Model", describe: "Second-model reviewer: reviews each settled turn, injects severity-routed notes, plus an on-demand consult tool.", load: advisorModule, config: advisorConfig, tools: ["advisor"] },
   // ── Appearance ─────────────────────────────────────────────────────────
   { name: "usage", category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
   { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },

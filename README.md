@@ -42,6 +42,15 @@ Ported from `@bacnh85/pi-classifier`, now riding the model registry: the `classi
 - Config: `classifier.model` (empty = first available), `classifier.permission.*` — global settings; rows in `/config` (Model tab)
 - Needs the router module configured; without it the tool errors with remediation text. `planGate` lives with pi-plan (future port).
 
+### advisor — second-model reviewer
+
+Ported from `@bacnh85/pi-advisor`: after every settled turn with real work, an isolated reviewer model reads the transcript and may emit **one** severity-routed note — `nit` (consider), `concern` (address this or say why not), `blocker` (fix before continuing) — steered into the session as a follow-up turn, or deferred to the next turn (LLM-visible) while the post-steer calm-down window is open. An emission guard drops content-free phrases (Unicode-folded, omp-parity filler list), dedupes repeated notes (severity escalation still passes) and rate-limits to one note per cycle; the reviewer prompt bans the classic noise classes (restating errors the agent already sees, user-intent/ceremony advice, scope policing, unsolicited back-compat, second-guessing, partial-work critique) and requires cited evidence; the reviewer never uses the primary model, skips trivial turns (fewer than `minToolCalls` new tool calls), pauses after 3 consecutive failures, stays out of headless runs, and re-primes cursor + guard on compaction/session switch. `/advisor status` shows cumulative token/cost usage; the consult tool reports the usage of its own call.
+
+- Tool: `advisor` — consult the configured chain on demand (per-tool toggleable in `/config`)
+- Chain: ordered fallback (`provider/id`, optional `:level` per entry) — a rate-limited or dead candidate hands the review to the next
+- Config: `/config` → **Model** → Advisor — Review settled turns · Primary model (catalogue picker) · Thinking · Fallback chain · min tool calls · immune turns · Consult tool (register the on-demand `advisor` tool). Saved to the global `advisor` setting, applied live, no `/reload`; a trusted project's `.pi/settings.json` `advisor` section overrides it. Always loaded (core module); the off-switch is an empty primary model
+- Commands: `/advisor [model[, model…]|models|on|off|watch-off|status]` — `on`/`off`/`watch-off` are session-scoped overrides
+
 ### usage — subscription-usage footer
 
 A status footer showing subscription/provider usage (5-hour, weekly, monthly windows, credits). Commands: `/usage` (usage detail), `/context` (context-window detail).
@@ -127,7 +136,7 @@ left sidebar of sections with the underlined section headings repeated beside
 the detail rows, OMP style; the sidebar geometry stays identical across tabs.
 
 - **Appearance** — pi theme, display/editor/fullscreen/terminal-image settings, plus the usage-footer, composer and ux-discipline module switches
-- **Model** — default model/provider, thinking, network transport/timeouts, retry, cache warming
+- **Model** — default model/provider, thinking, network transport/timeouts, retry, cache warming, plus the classifier (Jev) and advisor (reviewer model, fallback chain, watch knobs — applies immediately)
 - **Interaction** — steering/follow-up modes, double-escape + tree filter, startup notices, trust & telemetry
 - **Memory** — munin (project, base URL, API key — saved to the **project's** `.pi/settings.json`; `MUNIN_*` env vars override; applies immediately, no reload)
 - **Context / Shell** — auto-compact, shell path/prefix, npm command

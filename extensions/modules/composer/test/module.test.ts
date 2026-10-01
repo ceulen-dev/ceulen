@@ -307,6 +307,7 @@ describe("core module contract", () => {
     // working = enabled set; nextDisabled lists the NOT-enabled non-core modules.
     assert.deepEqual(nextDisabled(new Set(["usage"])), ["router", "classifier", "ux", "munin", "ponytail", "serena", "fff", "rtk", "config"]);
     assert.deepEqual(nextDisabled(new Set(["router", "classifier", "ux", "munin", "usage", "ponytail", "serena", "fff", "rtk", "config"])), [], "all-on → nothing disabled");
+    assert.ok(!nextDisabled(new Set()).includes("advisor"), "core (advisor) is never disableable");
     const groups = [{ key: "composer", label: "Composer Shape", rows: [{ key: "composer.shape" }] }] as never;
     const out = withEnableRow(groups, "composer", "Composer shape.", new Set(["composer"]));
     assert.deepEqual(out[0]!.rows.map((r: { key: string }) => r.key), ["composer.shape"], "no Enable row for core");
