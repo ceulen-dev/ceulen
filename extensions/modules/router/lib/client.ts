@@ -1,3 +1,4 @@
+import type { ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { RouterSettings } from "./config.js";
 
 // ── Types ────────────────────────────────────────────────────────────────────
@@ -14,6 +15,14 @@ export interface RouterModelRaw {
 export interface RouterModelsResponse {
   object: string;
   data: RouterModelRaw[];
+}
+
+/** System One decision model advertisement (yardmaster GET /v1/systemone/models). */
+export interface RouterDecisionModelRaw {
+  id: string;
+  object?: string;
+  owned_by?: string;
+  family?: string;
 }
 
 /** Pi model shape with optional reasoning-level support. */
@@ -67,6 +76,32 @@ export async function fetchModels(
 
   const payload = (await response.json()) as RouterModelsResponse;
   return payload.data ?? [];
+}
+
+/** Discover decision-model ids from a yardmaster's System One endpoint:
+ *  GET {base}/v1/systemone/models. Deliberately absent on plain OmniRoute
+ *  deployments (decision ids are excluded from /v1/models there too) — 404
+ *  and any other failure returns [] so the chat catalog is unaffected. */
+export async function fetchSystemoneModels(
+  config: RouterSettings,
+  signal?: AbortSignal,
+  apiKey?: string,
+): Promise<RouterDecisionModelRaw[]> {
+  const headers: Record<string, string> = { Accept: "application/json" };
+  const key = apiKey ?? process.env.ROUTER_API_KEY ?? process.env.NINE_ROUTER_API_KEY;
+  if (key) headers.Authorization = `Bearer ${key}`;
+  // Same /v1 convention as fetchModels (never double the segment).
+  const url = /\/v1\/?$/.test(config.baseUrl)
+    ? `${config.baseUrl.replace(/\/+$/, "")}/systemone/models`
+    : `${config.baseUrl}/v1/systemone/models`;
+  try {
+    const response = await fetchWithTimeout(url, { headers, signal });
+    if (!response.ok) return [];
+    const payload = (await response.json()) as RouterModelsResponse;
+    return (payload.data ?? []).filter((m) => typeof m?.id === "string" && m.id);
+  } catch {
+    return [];
+  }
 }
 
 /** Upstreams that reject assistant turns without reasoning_content while
@@ -362,6 +397,23 @@ export function applyReasoning(model: PiModel, enableReasoning: boolean): PiMode
       ? { thinkingLevelMap: getThinkingLevelMap(model.id) }
       : { thinkingLevelMap: undefined }),
     compat: { ...model.compat!, supportsReasoningEffort: enableReasoning },
+  };
+}
+
+/** Decision-model entry for the provider catalog (pi's classifier model type).
+ *  api is set per model — the provider-level api is chat-only. 64k context is
+ *  pi-ai's catalog figure for jev; /v1/systemone/models carries no metadata. */
+type ClassifierModelConfig = Extract<ProviderModelConfig, { type: "classifier" }>;
+
+export function mapClassifierModel(raw: RouterDecisionModelRaw): ClassifierModelConfig {
+  return {
+    type: "classifier",
+    id: raw.id,
+    name: raw.id,
+    api: "typesafe-system-one",
+    input: ["text"],
+    cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+    contextWindow: 64_000,
   };
 }
 

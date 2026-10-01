@@ -32,6 +32,16 @@ Registers the generic `router` provider (models via `GET /v1/models`, chat via `
 - Auth: `/login router` in Pi (or `ROUTER_API_KEY` env)
 - Commands: `/router-status`, `/router-model` — settings via `/config` (Providers tab)
 
+**System One decision models (Jev)**: if the router serves `GET /v1/systemone/models` (yardmaster does), the catalog also lists those ids as `type: "classifier"` models — visible to `modelRegistry.getModelsOfType("classifier", "router")`, never in the chat `/model` picker. Plain OmniRoute routers 404 there and keep a chat-only catalog.
+
+### classifier — System One decision models (Jev)
+
+Ported from `@bacnh85/pi-classifier`, now riding the model registry: the `classify` tool and the bash permission auto-approve hook resolve decision models from the router provider's catalog and ask through `modelRegistry.classify()` — same credential as chat, no separate baseUrl/API key. Static RISKY list first, verdict cache, observe/enforce with a threshold, never denies, audit lines in `classifier.log`.
+
+- Tool: `classify` (per-tool toggleable in `/config`)
+- Config: `classifier.model` (empty = first available), `classifier.permission.*` — global settings; rows in `/config` (Model tab)
+- Needs the router module configured; without it the tool errors with remediation text. `planGate` lives with pi-plan (future port).
+
 ### usage — subscription-usage footer
 
 A status footer showing subscription/provider usage (5-hour, weekly, monthly windows, credits). Commands: `/usage` (usage detail), `/context` (context-window detail).

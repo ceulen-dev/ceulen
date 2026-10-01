@@ -36,6 +36,24 @@ themes/                 theme JSONs shipped with the package (declared via the p
 - Tests: `node:test` + tsx, in `extensions/modules/<name>/test/`. The bundle root `package.json` `test` script globs them. Test dirs are excluded from `tsc --noEmit` when they use loose harness stubs (usage, ponytail); they run under tsx.
 - To add a module: create `extensions/modules/<name>/`, append one entry to `MODULES` in `extensions/lib/registry.ts` under its category banner (each entry's `category` field is the OMP tab — the single source for /config tab placement, synthesized Enable-only sections, and /ceulen status grouping; pretty section names live in the config module's `PRETTY_OF` map). Order matters — usage reads the `router` provider, so router loads first; config loads last, it reads the contribution map. Add its test files to the `test` glob if not covered. The conflict guard covers you: a name another module already claimed throws at load.
 
+### Classifier module (classifier)
+
+Ported from `@bacnh85/pi-classifier` 0.2.3, rewired to the MODEL REGISTRY: the
+router module (`extensions/modules/router/lib/systemone.ts` — slim vendored
+System One transport, `// ponytail: vendored from @earendil-works/pi-ai 0.99.1`
+header) registers `classifiers: {"typesafe-system-one": …}` on the router
+provider and merges `GET <router.baseUrl>/v1/systemone/models` (404-fail-open)
+into the catalog as `type: "classifier"` entries; models-store.json persists the
+MIXED list and the offline restore branches on `type === "classifier"` (chat
+entries keep the vision/reasoning remap). The classifier module itself has no
+endpoint and no key code: the `classify` tool and the bash permission
+auto-approve hook resolve models via `modelRegistry.getAvailableOfType/findOfType`
+and ask through `modelRegistry.classify()` (never rejects). Settings stay in the
+GLOBAL `classifier` section (`model`, `permission.{enabled,mode,threshold}` —
+same keys/values as pi-classifier, migration-free; `planGate` is left untouched
+for the future pi-plan port). Replaces the standalone package — if both are
+installed, first tool registration wins.
+
 ## Munin module (munin)
 
 Ported from `@bacnh85/pi-munin` 0.5.12 (see `extensions/modules/munin/`). Eight

@@ -18,6 +18,26 @@
   Applies immediately — config resolves per tool call, no reload.
 
 ## Unreleased
+- **classifier** (new module, ported from `@bacnh85/pi-classifier` 0.2.3,
+  registry-backed): System One decision models (TypeSafe Jev) — the `classify`
+  tool (same name/schema, per-tool toggleable) and the bash permission
+  auto-approve hook (static RISKY list first, LRU verdict cache keyed by
+  command+cwd+task, observe/enforce + threshold, never denies, audit lines in
+  `classifier.log`). Every ask now goes through `modelRegistry.classify()`:
+  the **router** module discovers decision models from
+  `GET <router.baseUrl>/v1/systemone/models` (404-fail-open — plain OmniRoute
+  keeps a chat-only catalog), registers them as `type: "classifier"` models
+  with a vendored System One transport (`lib/systemone.ts`, ~130 lines), and
+  the mixed chat+classifier catalog persists/restores in models-store.json.
+  Chat `/models` stay clean; core consumers (codemode, extensions) can use
+  `router/combo/jev` via the registry. Auth is the shared ROUTER credential —
+  no separate `classifier.baseUrl`/`CLASSIFIER_API_KEY`. Config: `/config` →
+  Model tab → Classifier (Jev) (model menu from live discovery, auto-approve
+  toggle/mode/threshold). `planGate` is dropped (pi-plan removed; returns with
+  the pi-plan port). Replaces the standalone pi-classifier package — remove it
+  from `packages` to avoid a duplicate `classify` tool (first registration
+  wins); `/router-status` now shows the classifier model count.
+
 - **config**: new **Tools → Built-in tools** section — one toggle per pi
   built-in tool (`read`, `bash`, `powershell`, `edit`, `write`, `grep`,
   `find`, `ls`) plus the built-in extension tools `codemode` and

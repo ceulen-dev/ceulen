@@ -721,6 +721,9 @@ describe("provider", () => {
     const realFetch = globalThis.fetch;
     globalThis.fetch = (async (_input: unknown, init?: RequestInit) => {
       authHeader = (init?.headers as Record<string, string>)?.Authorization;
+      if (String(_input).endsWith("/systemone/models")) {
+        return new Response(JSON.stringify({ object: "list", data: [] }), { status: 404 });
+      }
       return new Response(JSON.stringify({ object: "list", data: [{ id: "net-model" }] }), { status: 200 });
     }) as typeof fetch;
     try {
@@ -760,6 +763,167 @@ describe("provider", () => {
     }
   });
 });
+
+describe("provider classifier catalog", () => {
+  // ── System One decision models (classifier catalog) ──────────────────────
+
+  it("mapClassifierModel emits pi's classifier shape with typesafe-system-one api", async () => {
+    const { mapClassifierModel } = await import("../lib/client.js");
+    const m = mapClassifierModel({ id: "combo/jev", object: "model", owned_by: "combo", family: "classifier" });
+    assert.equal(m.type, "classifier");
+    assert.equal(m.id, "combo/jev");
+    assert.equal(m.name, "combo/jev");
+    assert.equal(m.api, "typesafe-system-one");
+    assert.deepEqual(m.input, ["text"]);
+    assert.equal(m.contextWindow, 64_000);
+    assert.equal(m.cost.input, 0);
+  });
+
+  it("fetchSystemoneModels joins the /v1 segment without doubling and sends Bearer", async () => {
+    const { fetchSystemoneModels } = await import("../lib/client.js");
+    const seen: string[] = [];
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      seen.push(String(input));
+      return new Response(JSON.stringify({ object: "list", data: [{ id: "combo/jev" }, { id: "" }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      process.env.ROUTER_API_KEY = "sk-disc";
+      try {
+        await fetchSystemoneModels({ baseUrl: "http://h:20128/v1", enableReasoning: true });
+        await fetchSystemoneModels({ baseUrl: "http://h:20128/v1/", enableReasoning: true });
+        await fetchSystemoneModels({ baseUrl: "http://h:20128", enableReasoning: true }, undefined, "sk-cred");
+      } finally {
+        delete process.env.ROUTER_API_KEY;
+      }
+      assert.deepEqual(seen, [
+        "http://h:20128/v1/systemone/models",
+        "http://h:20128/v1/systemone/models",
+        "http://h:20128/v1/systemone/models",
+      ]);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("fetchSystemoneModels fails open ([]) on 404, garbage, and network error", async () => {
+    const { fetchSystemoneModels } = await import("../lib/client.js");
+    const realFetch = globalThis.fetch;
+    const responses: (() => Response)[] = [
+      () => new Response("nope", { status: 404 }),
+      () => new Response("boom", { status: 500 }),
+      () => new Response("not-json"),
+    ];
+    try {
+      for (const respond of responses) {
+        globalThis.fetch = (async () => respond()) as typeof fetch;
+        assert.deepEqual(await fetchSystemoneModels({ baseUrl: "http://h/v1", enableReasoning: true }), []);
+      }
+      globalThis.fetch = (async () => { throw new Error("ECONNREFUSED"); }) as typeof fetch;
+      assert.deepEqual(await fetchSystemoneModels({ baseUrl: "http://h/v1", enableReasoning: true }), []);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("registerProvider carries the typesafe-system-one classifier implementation", async () => {
+    const { registerProvider, PROVIDER_ID } = await import("../lib/provider.js");
+    let registered: { name: string; config: Record<string, unknown> } | null = null;
+    registerProvider({
+      registerProvider: (name: string, config: Record<string, unknown>) => { registered = { name, config }; },
+    } as never, { baseUrl: "http://x", enableReasoning: true });
+    const classifiers = (registered as unknown as { config: { classifiers?: Record<string, unknown> } }).config.classifiers;
+    assert.equal(registered!.name, PROVIDER_ID);
+    const impl = classifiers!["typesafe-system-one"] as { classify: unknown };
+    assert.equal(typeof impl.classify, "function");
+  });
+
+  it("refreshModels network path merges chat + decision models into one catalog", async () => {
+    const { registerProvider } = await import("../lib/provider.js");
+    let refreshModels: (ctx: unknown) => Promise<unknown>;
+    registerProvider({
+      registerProvider: (_n: string, config: { refreshModels: (ctx: unknown) => Promise<unknown> }) => { refreshModels = config.refreshModels; },
+      events: { emit: () => {} },
+    } as never, { baseUrl: "http://x", enableReasoning: true });
+    const ctx = {
+      stored: undefined,
+      allowNetwork: true,
+      signal: new AbortController().signal,
+      credential: { type: "api_key", key: "sk" },
+      publish: async () => {},
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      if (String(input).endsWith("/systemone/models")) {
+        return new Response(JSON.stringify({ object: "list", data: [{ id: "combo/jev" }] }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ object: "list", data: [{ id: "chat-model" }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = (await refreshModels!(ctx)) as { id: string; type?: string }[];
+      assert.equal(result.length, 2);
+      assert.equal(result[0].id, "chat-model");
+      assert.equal(result[0].type, undefined); // chat entry, no type marker
+      assert.equal(result[1].id, "combo/jev");
+      assert.equal(result[1].type, "classifier");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("refreshModels keeps a chat-only catalog when the decision endpoint fails", async () => {
+    const { registerProvider } = await import("../lib/provider.js");
+    let refreshModels: (ctx: unknown) => Promise<unknown>;
+    registerProvider({
+      registerProvider: (_n: string, config: { refreshModels: (ctx: unknown) => Promise<unknown> }) => { refreshModels = config.refreshModels; },
+      events: { emit: () => {} },
+    } as never, { baseUrl: "http://x", enableReasoning: true });
+    const ctx = {
+      stored: undefined,
+      allowNetwork: true,
+      signal: new AbortController().signal,
+      publish: async () => {},
+    };
+    const realFetch = globalThis.fetch;
+    globalThis.fetch = (async (input: unknown) => {
+      if (String(input).endsWith("/systemone/models")) return new Response("nope", { status: 404 });
+      return new Response(JSON.stringify({ object: "list", data: [{ id: "chat-model" }] }), { status: 200 });
+    }) as typeof fetch;
+    try {
+      const result = (await refreshModels!(ctx)) as { id: string; type?: string }[];
+      assert.equal(result.length, 1);
+      assert.equal(result[0].id, "chat-model");
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("refreshModels offline restore passes classifier entries through untouched", async () => {
+    const { registerProvider } = await import("../lib/provider.js");
+    let refreshModels: (ctx: unknown) => Promise<unknown>;
+    registerProvider({
+      registerProvider: (_n: string, config: { refreshModels: (ctx: unknown) => Promise<unknown> }) => { refreshModels = config.refreshModels; },
+    } as never, { baseUrl: "http://x", enableReasoning: false });
+    const classifierEntry = { type: "classifier", id: "combo/jev", name: "combo/jev", api: "typesafe-system-one", input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 64000 };
+    const ctx = {
+      stored: {
+        models: [
+          { id: "chat-model", name: "chat-model", reasoning: true, input: ["text"], cost: {}, contextWindow: 1, maxTokens: 1 },
+          classifierEntry,
+        ],
+      },
+      allowNetwork: false,
+      signal: new AbortController().signal,
+    };
+    const result = (await refreshModels!(ctx)) as { id: string; reasoning?: boolean; type?: string }[];
+    assert.equal(result.length, 2);
+    assert.equal(result[0].id, "chat-model");
+    assert.equal(result[0].reasoning, false); // chat remapped with settings flag
+    assert.equal(result[1].id, "combo/jev");
+    assert.equal(result[1].reasoning, undefined); // classifier verbatim — no reasoning graft
+  });
+});
+
 
 // ── automatic catalog refresh (TTL + in-flight guard + checkedAt persist) ────
 

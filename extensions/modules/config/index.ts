@@ -231,6 +231,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
   // a new module still renders.
   const PRETTY_OF: Record<string, { section: string; icon?: string }> = {
     router: { section: "Router", icon: "🌐" },
+    classifier: { section: "Classifier (Jev)", icon: "⚖" },
     usage: { section: "Usage footer", icon: "📊" },
     munin: { section: "Munin", icon: "🪶" },
     composer: { section: "Composer", icon: "🎨" },

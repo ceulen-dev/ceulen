@@ -80,10 +80,14 @@ export function registerCommands(pi: ExtensionAPI): void {
       const count = ctx.modelRegistry
         .getAll()
         .filter((m) => m.provider === PROVIDER_ID).length;
+      const classifiers = ctx.modelRegistry.getModelsOfType("classifier", PROVIDER_ID);
       const lines = [
         "── Router Status ──",
         configSummary(settings),
         `Models in catalog: ${count}`,
+        classifiers.length > 0
+          ? `Classifier models: ${classifiers.length} (${classifiers.map((m) => m.id).join(", ")})`
+          : "Classifier models: 0",
         "",
         "Commands:",
         "  /login router       Store API key (auth.json)",

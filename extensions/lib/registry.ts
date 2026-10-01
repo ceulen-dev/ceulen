@@ -13,6 +13,8 @@ import path from "node:path";
 import type { PanelGroup } from "./panel.js";
 import routerModule from "../modules/router/index.ts";
 import { routerConfig } from "../modules/router/configPanel.ts";
+import classifierModule from "../modules/classifier/index.ts";
+import { classifierConfig } from "../modules/classifier/configPanel.js";
 import usageModule from "../modules/usage/index.ts";
 import composerModule, { composerConfig } from "../modules/composer/index.ts";
 import ponytailModule, { ponytailConfig } from "../modules/ponytail/index.ts";
@@ -70,6 +72,10 @@ export const MODULES: ModuleEntry[] = [
   // ── Providers ──────────────────────────────────────────────────────────
   // Router first: usage reads the `router` provider for usage display.
   { name: "router", category: "Providers", describe: "Route requests to a yardmaster/OmniRoute endpoint and expose its models.", load: routerModule, config: routerConfig },
+  // Classifier right after router: its classify tool resolves decision models
+  // from the router provider's registry catalog (needs router registered, not
+  // the module object itself — order is for /config grouping readability).
+  { name: "classifier", category: "Model", describe: "System One decision models (Jev): classify tool + bash permission auto-approve, via router-discovered models.", load: classifierModule, config: classifierConfig, tools: ["classify"] },
   // ── Appearance ─────────────────────────────────────────────────────────
   { name: "usage", category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
   { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },

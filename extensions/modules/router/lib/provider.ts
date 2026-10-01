@@ -1,6 +1,7 @@
 import type { ExtensionAPI, ProviderConfig, ProviderModelConfig } from "@earendil-works/pi-coding-agent";
 import type { RouterSettings } from "./config.js";
-import { fetchModels, mapModel, applyReasoning, resolveVision, type PiModel } from "./client.js";
+import { fetchModels, fetchSystemoneModels, mapModel, mapClassifierModel, applyReasoning, resolveVision, type PiModel } from "./client.js";
+import { systemoneClassify } from "./systemone.js";
 
 export const PROVIDER_ID = "router";
 
@@ -95,6 +96,11 @@ export function registerProvider(pi: ExtensionAPI, settings: RouterSettings): vo
     apiKey: "$ROUTER_API_KEY",
     api: "openai-completions",
     models: [],
+    // System One decision models (Jev) discovered on /v1/systemone/models —
+    // the classifier implementation is keyed by the models' api (see
+    // lib/systemone.ts). The composer only wires provider.classify when this
+    // map is present.
+    classifiers: { "typesafe-system-one": { classify: systemoneClassify } },
     // SDK type says Promise<ProviderModelConfig[]>, but the composer treats a
     // falsy return as "no change" (provider-composer.js `if (refreshed)`) —
     // returning undefined keeps the restored list. Runtime-verified.
@@ -106,22 +112,37 @@ export function registerProvider(pi: ExtensionAPI, settings: RouterSettings): vo
 
       if (!context.allowNetwork || context.signal.aborted) {
         if (checkedAt !== undefined) lastFetchedAt = checkedAt;
-        // Offline: restore persisted catalog, re-mapped with current reasoning
-        // flag. Vision is re-resolved so stale persisted flags self-heal —
-        // /v1/models vision metadata lies in both directions (see client.ts
-        // VISION_OVERRIDES/VISION_DOWNGRADES) and old caches froze it verbatim.
-        return stored?.length
-          ? (stored
-              // Array.isArray guards legacy/malformed store entries (treated as text-only).
-              .map((m) => ({ ...m, input: resolveVision(m.id, Array.isArray(m.input) && m.input.includes("image")) ? ["text", "image"] : ["text"] }) as PiModel)
-              .map((m) => applyReasoning(m, settings.enableReasoning)) as unknown as ProviderModelConfig[])
-          : undefined;
+        if (!stored?.length) return undefined;
+        // Mixed persisted catalog (chat + classifier since the systemone
+        // discovery): classifier entries pass through verbatim (their
+        // baseUrl re-stamps from config in applyExtension); chat entries
+        // re-map with the current reasoning flag. Vision is re-resolved so
+        // stale persisted flags self-heal — /v1/models vision metadata lies
+        // in both directions (see client.ts VISION_OVERRIDES/VISION_DOWNGRADES)
+        // and old caches froze it verbatim.
+        return stored.map((m) =>
+          (m as { type?: string }).type === "classifier"
+            ? m
+            : applyReasoning(
+                // Array.isArray guards legacy/malformed store entries (treated as text-only).
+                { ...m, input: resolveVision(m.id, Array.isArray(m.input) && m.input.includes("image")) ? ["text", "image"] : ["text"] } as PiModel,
+                settings.enableReasoning,
+              ),
+        ) as unknown as ProviderModelConfig[];
       }
 
       const cred = context.credential as { type?: string; key?: string } | undefined;
-      const raw = await fetchModels(settings, context.signal, cred?.key);
+      // Both endpoints in parallel; a decision-endpoint failure (404 on
+      // non-yardmaster routers) degrades to a chat-only catalog.
+      const [raw, decisions] = await Promise.all([
+        fetchModels(settings, context.signal, cred?.key),
+        fetchSystemoneModels(settings, context.signal, cred?.key),
+      ]);
       if (context.signal.aborted) return undefined;
-      const models = raw.map((m) => mapModel(m, settings.enableReasoning)) as unknown as ProviderModelConfig[];
+      const models = [
+        ...raw.map((m) => mapModel(m, settings.enableReasoning)),
+        ...decisions.map(mapClassifierModel),
+      ] as unknown as ProviderModelConfig[];
       if (!models.length) return undefined; // keep restored models on empty fetch
       lastFetchedAt = Date.now();
       // persist entry is Model<Api>[] at runtime; our mapped shape is compatible
