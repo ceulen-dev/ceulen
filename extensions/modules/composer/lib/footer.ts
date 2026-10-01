@@ -69,15 +69,14 @@ export function sessionTotals(entries: readonly EntryLike[]): SessionTotals {
   return t;
 }
 
-/** pi-footer-parity session token stats for the BAND (`↑1.9M ↓377k R69M
- *  CH99.7%` — cost stays footer-only per pi's own split; "" before any usage). */
+/** Band token stats for the BAND (`↑1.9M ↓377k R69M` — cost and cache-hit
+ *  stay footer-only; "" before any usage). */
 export function statsLine(t: SessionTotals): string {
   const parts: string[] = [];
   if (t.input) parts.push(`↑${formatCompact(t.input)}`);
   if (t.output) parts.push(`↓${formatCompact(t.output)}`);
   if (t.cacheRead) parts.push(`R${formatCompact(t.cacheRead)}`);
   if (t.cacheWrite) parts.push(`W${formatCompact(t.cacheWrite)}`);
-  if ((t.cacheRead > 0 || t.cacheWrite > 0) && t.cacheHitRate !== undefined) parts.push(`CH${t.cacheHitRate.toFixed(1)}%`);
   return parts.join(" ");
 }
 

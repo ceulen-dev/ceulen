@@ -18,6 +18,7 @@ import {
   ICONS,
   parseGitStats,
   gutterWidth,
+  rateLine,
   IDENTITY_THEME,
   isShapeId,
   padRow,
@@ -192,13 +193,18 @@ describe("git branch read (.git/HEAD)", () => {
 describe("status line + surface fill", () => {
   it("statusSegments splits OMP's stock groups: identity left, context window right", () => {
     const s = statusSegments({ model: "M", provider: "router", thinkingLevel: "max", cwd: "~/dev/ceulen", branch: "main", rate: 46, pct: 42.6, window: 1_000_000 }, th);
-    assert.equal(plain(s.left), "π · (router) M (max) · 📁 ~/dev/ceulen · ⑂ main · ⚡ 46 tok/s");
+    assert.equal(plain(s.left), "π · (router) M (max) · 📁 ~/dev/ceulen · ⑂ main");
     assert.equal(plain(s.right), "42.6%/1.0M");
     // Every segment carries its icon (OMP's glyph set).
     assert.ok(plain(s.left).startsWith("π "), "brand leads the group");
     assert.ok(plain(s.left).includes("📁 ~/dev/ceulen"), "folder icon on the dir");
     assert.ok(plain(s.left).includes("⑂ main"), "branch icon on the git segment");
-    assert.ok(plain(s.left).includes("⚡ 46 tok/s"), "throughput icon on the rate");
+    // Generation rate is NOT a band segment — it renders right-justified above
+    // the band (rateLine).
+    assert.ok(!plain(s.left).includes("tok/s"), "rate moved out of the band");
+    assert.equal(plain(rateLine({ rate: 46.4 }, th, 20)), "         ⚡ 46 tok/s");
+    assert.equal(rateLine(undefined, th, 20), "", "no rate → no line");
+    assert.equal(rateLine({ rate: 0 }, th, 20), "", "zero rate → no line");
     // Blanks drop out — never wrong, just shorter. The brand only leads a
     // group that exists, so an empty session keeps the band blank.
     assert.equal(plain(statusSegments({ model: "M" }, th).left), "π · M");
@@ -225,24 +231,25 @@ describe("status line + surface fill", () => {
     assert.equal(statusSegments({ thinkingLevel: "max" }, th).left, "");
   });
 
-  it("usage + stats segments sit next to git (OMP's segment order), tone-stepped", () => {
+  it("model cluster: model only — usage/stats dropped from the band (restore: git history)", () => {
     const s = statusSegments(
       { model: "M", provider: "router", thinkingLevel: "high", branch: "main", git: { staged: 1, unstaged: 10, untracked: 4 }, usage: "(router) R:59%/2H3M W:99%/2D3H", stats: "↑1.9M ↓377k R69M CH99.7%", rate: 46 },
       th,
     );
     const left = plain(s.left);
-    // OMP order: identity → path → git → usage/counters → throughput.
-    assert.equal(left, "π · (router) M (high) · ⑂ main *10 +1 ?4 · (router) R:59%/2H3M W:99%/2D3H · ↑1.9M ↓377k R69M CH99.7% · ⚡ 46 tok/s");
+    assert.equal(left, "π · (router) M (high) · ⑂ main *10 +1 ?4");
+    // Supplied-but-dropped figures never leak into the band.
+    assert.ok(!left.includes("R:59%") && !left.includes("↑1.9M") && !left.includes("tok/s"), "usage/stats/rate stay off the band");
     // Quota tone steps with the tightest window (usage module decides).
     const stepping: ShapeTheme = {
       ...th,
       warn: (t) => `W(${t})`,
       error: (t) => `E(${t})`,
     };
-    assert.equal(plain(statusSegments({ usage: "(router) R:59%/2H3M", usageTone: "warning" }, stepping).left), "π · W((router) R:59%/2H3M)");
-    assert.equal(plain(statusSegments({ usage: "(router) R:9%/1M", usageTone: "error" }, stepping).left), "π · E((router) R:9%/1M)");
-    assert.equal(plain(statusSegments({ usage: "(router) R:59%/2H3M", usageTone: "dim" }, stepping).left), "π · (router) R:59%/2H3M");
-    // Missing figures drop their segment — never wrong, just shorter.
+    // Usage data supplied but dropped — the band shows nothing, not a stale
+    // quota figure (the tone-stepping segment lives in git history).
+    assert.equal(plain(statusSegments({ usage: "(router) R:59%/2H3M", usageTone: "warning" }, stepping).left), "");
+    assert.equal(plain(statusSegments({ usage: "(router) R:9%/1M", usageTone: "error" }, stepping).left), "");
     assert.equal(plain(statusSegments({ model: "M", usage: "  " }, th).left), "π · M");
     assert.equal(plain(statusSegments({ model: "M", stats: "" }, th).left), "π · M");
   });

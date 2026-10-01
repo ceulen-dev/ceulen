@@ -152,13 +152,16 @@ describe("applyShape dispatch", () => {
     const ed = factory({ terminal: { rows: 30 }, requestRender() {} }, { borderColor: (s: string) => s }, {});
     ed.setText("hi");
     setGenRate({ tps: 46 });
-    const line = ed.render(90).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""))[0]!;
-    assert.ok(line.includes("GLM"), line);
-    assert.ok(line.includes("/tmp/somerepo"), `cwd shown: ${line}`);
-    assert.ok(line.includes("10.0%/1.0k"), `context window shown: ${line}`);
-    assert.ok(line.includes("↑100 ↓50"), `session token stats shown: ${line}`);
-    assert.ok(line.includes("⚡ 46 tok/s"), `Generation Rate shown: ${line}`);
-    assert.ok(line.includes("10.0%/1.0k (auto)"), `auto-compact marker from pi settings: ${line}`);
+    const lines = ed.render(90).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+    const line = lines[0]!;
+    assert.ok(lines[0]!.includes("⚡ 46 tok/s"), `Generation Rate is line 1: ${lines[0]}`);
+    const band = lines[1]!;
+    assert.ok(band.includes("GLM"), band);
+    assert.ok(band.includes("/tmp/somerepo"), `cwd shown: ${band}`);
+    assert.ok(band.includes("10.0%/1.0k"), `context window shown: ${band}`);
+    // Token stats are dropped from the band for now (model-only cluster).
+    assert.ok(!band.includes("↑100 ↓50"), `token stats stay off the band: ${band}`);
+    assert.ok(band.includes("10.0%/1.0k (auto)"), `auto-compact marker from pi settings: ${band}`);
     resetGenRate();
   });
 
@@ -260,7 +263,10 @@ describe("module registration (core)", () => {
     applyShape("band", ctx);
     const factoryOf = () =>
       (ctx as unknown as { __calls: { factory: (t: unknown, th: unknown, kb: unknown) => { render(w: number): string[] } }[] }).__calls.at(-1)!.factory;
-    const render = (ed: { render(w: number): string[] }) => ed.render(120).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""))[0]!;
+    const render = (ed: { render(w: number): string[] }) => {
+      const lines = ed.render(120).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
+      return lines[0]!.includes("⚡") ? lines[1]! : lines[0]!;
+    };
     const ed1 = factoryOf()({ terminal: { rows: 30 }, requestRender() {} }, { borderColor: (s: string) => s }, {});
     assert.ok(render(ed1).includes("(high)"), "session_start ctx level");
     await events.get("thinking_level_select")!({ type: "thinking_level_select", level: "max", previousLevel: "high" }, ctx);

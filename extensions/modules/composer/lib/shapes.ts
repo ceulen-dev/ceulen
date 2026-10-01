@@ -195,15 +195,6 @@ function contextSegment(data: BandData, theme: ShapeTheme): string {
   return theme.dim(text);
 }
 
-/** Quota segment from the usage module (e.g. `(router) R:59%/2H3M`), tone-
- *  stepped: dim normally, warning/error as the quota runs out. */
-function usageSegment(data: BandData, theme: ShapeTheme): string {
-  const usage = data.usage?.trim();
-  if (!usage) return "";
-  const paint = data.usageTone === "error" ? theme.error : data.usageTone === "warning" ? theme.warn : theme.dim;
-  return paint(usage);
-}
-
 /** Git segment: `⑂ main *3 +1 ?2` — branch + OMP's working-tree indicators
  *  (`*` unstaged, `+` staged, `?` untracked). A dirty tree renders `warning`. */
 function gitSegment(data: BandData, theme: ShapeTheme): string {
@@ -238,6 +229,10 @@ export function statusSegments(
  *  → git → dir) rather than cutting one in half (OMP's overflow behavior). */
 export function identitySegments(data: BandData | undefined, theme: ShapeTheme, spinner?: string): string[] {
   const identity: string[] = [];
+  // Model cluster — model info only for now: usage windows + token stats are
+  // dropped from the band at the user's request (restore = push usageSegment
+  // + stats back into this cluster, see git history).
+  const cluster: string[] = [];
   // Model segment: `(provider) model (level)` — provider prefix from the model
   // id (a router model's upstream slug), thinking level in parens, OMP's
   // model-segment shape (its `showThinkingLevel` option).
@@ -250,19 +245,15 @@ export function identitySegments(data: BandData | undefined, theme: ShapeTheme, 
     const prefix = provider && !model.toLowerCase().startsWith(provider.toLowerCase() + "/") ? `(${provider}) ` : "";
     let label = prefix + model;
     if (level && level !== "off") label += ` (${level})`;
-    identity.push(theme.accent(label));
+    cluster.push(theme.accent(label));
   }
+  if (cluster.length > 0) identity.push(cluster.join(theme.dim(" | ")));
   const cwd = data?.cwd?.trim();
   if (cwd) identity.push(theme.dim(`${ICONS.folder} ${cwd}`));
   const git = data ? gitSegment(data, theme) : "";
   if (git) identity.push(git);
-  const usage = data ? usageSegment(data, theme) : "";
-  if (usage) identity.push(usage);
-  const stats = data?.stats?.trim();
-  if (stats) identity.push(theme.dim(stats));
-  if (typeof data?.rate === "number" && Number.isFinite(data.rate) && data.rate > 0) {
-    identity.push(theme.dim(`${ICONS.throughput} ${Math.round(data.rate)} tok/s`));
-  }
+  // Generation rate renders as its own right-justified line ABOVE the band
+  // (OMP's throughline placement) — not a band segment.
   // The brand leads ONLY a group that exists (OMP's pi segment): with nothing
   // to identify, the band stays blank so the layout never shifts on startup.
   // While a turn runs the working spinner takes the brand slot.
@@ -343,6 +334,16 @@ function bandTop(c: ShapeCtx): string {
   // ` text ` — the padding IS the separation from the context figure.
   const chip = left === "" ? "" : theme.fill(` ${left} `);
   return cap + chip + spaces(Math.max(0, maxLeft - visibleWidth(chip))) + right + scroll;
+}
+
+/** Right-justified generation-rate line (OMP's placement): `⚡ N tok/s` flush
+ *  right on its own row. Blank (no row) before the first response. */
+export function rateLine(data: BandData | undefined, theme: ShapeTheme, w: number): string {
+  const rate = data?.rate;
+  if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) return "";
+  const text = theme.dim(`${ICONS.throughput} ${Math.round(rate)} tok/s`);
+  const pad = Math.max(0, w - visibleWidth(text));
+  return spaces(pad) + text;
 }
 
 /** Width of a joined segment group (separators included). */
@@ -598,6 +599,10 @@ export class ShapeEditor extends CustomEditor {
       const c: ShapeCtx = { w: width, hidden: this.hiddenLines(), theme, gutter: shape.gutter, data: this.safeData(), spinner };
 
       const out: string[] = [];
+      // OMP's Generation Rate placement: right-justified line above the shape's
+      // own chrome (blank until the first response, so the layout never shifts).
+      const rate = rateLine(c.data, theme, width);
+      if (rate) out.push(rate);
       const top = shape.top?.(c);
       if (spinner !== undefined && !shape.embedsStatus) {
         // No status-bearing chrome on this shape — the spinner rides pi's

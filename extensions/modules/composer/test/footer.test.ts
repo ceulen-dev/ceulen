@@ -46,8 +46,8 @@ describe("session totals (band stats source)", () => {
   it("statsLine formats the band's token figures and is empty before any usage", () => {
     assert.equal(statsLine(EMPTY_TOTALS), "");
     const line = statsLine({ input: 12_000, output: 4_000, cacheRead: 100_000, cacheWrite: 2_000, cacheHitRate: 97.1 });
-    assert.equal(line, "↑12k ↓4.0k R100k W2.0k CH97.1%");
-    // Cost is NOT a band figure (the user's split: ↑↓R CH with quota windows).
+    assert.equal(line, "↑12k ↓4.0k R100k W2.0k");
+    // Cost and cache-hit are NOT band figures (footer-only).
     const noCost: SessionTotals = { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 };
     assert.equal(statsLine(noCost), "↑1 ↓1");
   });
