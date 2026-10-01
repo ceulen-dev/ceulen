@@ -1,0 +1,641 @@
+// munin module — Munin long-term memory tools for Pi.
+//
+// Ported from @bacnh85/pi-munin 0.5.12 extensions/index.ts (SDK vendored to
+// lib/sdk.ts; dotenv dropped — ceulen's bundle env.ts ingests trusted .env).
+// Registers the 8 munin_* tools (per-tool kill-switch via ceulen.disabledTools),
+// /munin-status, the Munin Memory Protocol injection (only when configured),
+// the tool_result error sanitizer, and the munin skill (resources_discover).
+// Config lives at PROJECT level (.pi/settings.json `munin` section) — see
+// configPanel.ts; resolution precedence is documented in lib/helpers.ts.
+
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+  ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
+import fs from "node:fs";
+import path from "node:path";
+import { Type } from "typebox";
+import { MuninClient } from "./lib/sdk.js";
+import {
+  formatCapabilities,
+  parseTags,
+  toTextResult,
+  truncateText,
+  validateMemoryTags,
+  validateMemoryKey,
+  validateSearchQuery,
+  validateTagMode,
+  classifyError,
+  sanitizeErrorMessage,
+  getMuninConfig,
+  extractRemediation,
+  formatRemediation,
+  type MuninResolvedConfig,
+  type Remediation,
+} from "./lib/helpers.js";
+import { withRetry } from "./lib/retry.js";
+import { readDisabledTools } from "../../lib/tools.js";
+
+// Shared schemas — per-call overrides (params win over env/settings).
+const projectParam = Type.Optional(
+  Type.String({ description: "Leave empty — defaults to $MUNIN_PROJECT.", default: "" }),
+);
+const apiKeyParam = Type.Optional(
+  Type.String({ description: "API key. Default: $MUNIN_API_KEY.", default: "" }),
+);
+const baseUrlParam = Type.Optional(
+  Type.String({
+    description: "Base URL. Default: $MUNIN_BASE_URL.",
+    default: "",
+  }),
+);
+
+const controlSchema = {
+  project: projectParam,
+  api_key: apiKeyParam,
+  base_url: baseUrlParam,
+};
+
+// ---------------------------------------------------------------------------
+// Always-on condensed Memory Protocol (injected only when Munin is configured)
+// ---------------------------------------------------------------------------
+
+// Portable home for the Munin Memory Protocol. The full deep reference lives
+// in skills/munin/SKILL.md; this is the condensed always-on form covering the
+// durable rules.
+const MUNIN_PROTOCOL_HEADER = `## Munin Memory Protocol
+
+Use Munin to recover and preserve verified project knowledge, not as a task log.
+If Munin is unavailable, state that briefly when it matters and continue from
+repository evidence.
+
+### Before acting
+
+- Search at the start of non-trivial work and before changing architecture,
+  dependencies, public behavior, setup, or a previously fixed subsystem.
+- For bugs, search the exact error or symptom with \`type:bug-fix\` before
+  attempting a new fix.
+- Build focused 4-8 word queries from exact phrases, capitalized entities,
+  subsystem names, file paths, error codes, and dependency names. Quote exact
+  strings and use tags or temporal filters when they reduce noise.
+- Use \`topK: 5\` for focused lookup and up to \`topK: 20\` for exploration. DO
+  NOT use single-word queries unless the term is a genuinely rare error code.
+- Search results are leads, not facts. Retrieve promising memories
+  (\`munin_get\`), check validity and source anchors, and reconcile with current
+  repository evidence before relying on them.
+
+### What to store
+
+Store only verified knowledge likely to help a future session: architecture or
+product decisions (with rationale and rejected options); recurring bug root
+causes (exact symptoms, fixes, verification); stable setup facts, conventions,
+constraints, dependency choices; durable user/project identity facts that
+materially guide work. Do NOT store temporary progress, routine completion
+summaries, TODOs, raw logs, unverified hypotheses, transient file state,
+generated output, or information easy to derive from authoritative files. Never
+store secrets, credentials, private keys, tokens, or encryption keys.
+
+### Memory shape
+
+- One concept per memory. Batch independent memories instead of combining
+  unrelated facts.
+- Stable descriptive key; add a date when historical rather than continuously
+  updated. Reuse a key only for an intentional upsert.
+- Include the conclusion, why it matters, evidence/verification, and durable
+  file/symbol anchors. Cross-reference related memories by mentioning their keys
+  in \`content\` (e.g. "See also: architecture/cache-policy").
+- Lowercase namespaced tags with at least one \`type:\`
+  (\`decision\`|\`bug-fix\`|\`fact\`|\`dependency\`) and one \`domain:\`
+  (\`auth\`|\`frontend\`|\`backend\`|\`infra\`|\`memory\`). Add \`status:\` or
+  \`priority:\` only when they improve retrieval.
+- Use \`validFrom\`/\`validTo\` for time-bound facts so stale information is
+  filtered automatically. Pin only durable, high-value anchors.
+
+### Lifecycle and safety
+
+- At task end, store only newly established durable knowledge. Before context
+  compaction, batch-store any outstanding memories.
+- Update or supersede stale memories when current evidence changes; delete only
+  with explicit authorization.
+- Before memory operations in an E2EE project, verify the encryption key is
+  configured. Never print or store the key. For E2EE Elite, use the official
+  Munin crypto helper.
+- Share memories across projects only when explicitly useful and when encryption
+  compatibility is confirmed.`;
+
+// ---------------------------------------------------------------------------
+// Core SDK call with retry and stale-protocol handling
+// ---------------------------------------------------------------------------
+
+function withMuninClient<T extends Record<string, unknown>>(
+  params: T,
+  callback: (client: MuninClient, projectId: string) => Promise<unknown>,
+  ctx?: { cwd?: string; isProjectTrusted?: () => boolean },
+): Promise<unknown> {
+  const { apiKey, projectId, baseUrl } = getMuninConfig(
+    params,
+    ctx?.cwd,
+    ctx?.isProjectTrusted?.() === true,
+  );
+  const client = new MuninClient({ apiKey, baseUrl });
+  return callback(client, projectId);
+}
+
+/** Fresh Error carrying the sanitized `err.message + remediation` text, with
+ *  the original preserved as `cause` — never mutates the caught error (keeps
+ *  its identity/stack intact for upstream consumers). Structured fields (`code`,
+ *  `details.remediation`) are copied onto the new Error so programmatic
+ *  consumers keep them; the message behavior is unchanged. */
+function remediatedError(err: Error, remediation?: Remediation): Error {
+  const error = new Error(
+    sanitizeErrorMessage(new Error(err.message + formatRemediation(remediation))),
+    { cause: err },
+  );
+  const withFields = error as Error & { code?: unknown; details?: Record<string, unknown> };
+  const code = (err as Error & { code?: unknown }).code;
+  if (code !== undefined) withFields.code = code;
+  const details = (err as Error & { details?: Record<string, unknown> }).details;
+  withFields.details = { ...(details && typeof details === "object" ? details : {}) };
+  if (remediation) withFields.details.remediation = remediation;
+  return error;
+}
+
+/**
+ * Core Munin invocation with retry and error sanitization.
+ * Some actions like 'delete' are not advertised in server capabilities
+ * but are still supported. Pass ensureCapability: false for those.
+ */
+export async function callMunin(
+  client: MuninClient,
+  projectId: string,
+  action: string,
+  payload: Record<string, unknown> = {},
+): Promise<unknown> {
+  const directAction = action === "get" ? "retrieve" : action;
+  // Server doesn't advertise 'delete' in capabilities, but supports it.
+  // Use ensureCapability: false to avoid capability-check rejection.
+  const invokeOptions = directAction === "delete"
+    ? { ensureCapability: false }
+    : { ensureCapability: true };
+
+  try {
+    return await withRetry(async () => invokeMuninAction(client, projectId, directAction, payload, invokeOptions));
+  } catch (error) {
+    // Layer 1: auto-recover from ERR_STALE_PROTOCOL via the server's
+    // acknowledge_setup handshake, then retry the original call exactly once.
+    // ponytail: single retry — no loop; ack is idempotent and server-side remembered.
+    const err = error instanceof Error ? error : new Error(String(error));
+    const remediation = extractRemediation(err);
+    const ack = remediation?.acknowledge_after_reading;
+    const isStale =
+      classifyError(err).type === "stale_protocol" &&
+      !!ack?.payload?.version;
+    if (isStale && typeof client.invoke === "function") {
+      const version = ack!.payload.version;
+      // Server directs the action name (default acknowledge_setup if absent).
+      const ackAction = ack!.action || "acknowledge_setup";
+      // Some servers return a non-throwing failure ({ok:false} etc.) that the
+      // SDK does not throw on — detect it via a flag instead of throwing inside
+      // the try (which the catch would re-wrap).
+      let ackFailed = false;
+      try {
+        // ack is a real action even when not advertised in capabilities.
+        const ackResult = await client.invoke(projectId, ackAction, { version }, { ensureCapability: false });
+        ackFailed = !!ackResult && typeof ackResult === "object" &&
+          ((ackResult as { ok?: boolean }).ok === false || (ackResult as { success?: boolean }).success === false || (ackResult as { acknowledged?: boolean }).acknowledged === false);
+      } catch {
+        ackFailed = true;
+      }
+      if (ackFailed) {
+        // ack failed (thrown or resolved-failure) → surface remediation, do NOT retry (no infinite loop).
+        throw remediatedError(err, remediation);
+      }
+      // Retry the original action exactly ONCE, unwrapped. ponytail: this is
+      // the total-attempt budget (plan 2026-09-29) — the previous withRetry
+      // wrapper here stacked 3+3 network attempts worst case. A stale error
+      // can't recur here (the ack succeeded), so withRetry's extra retry
+      // rounds bought nothing but stacked attempts.
+      try {
+        return await invokeMuninAction(client, projectId, directAction, payload, invokeOptions);
+      } catch (retryErr) {
+        const r = retryErr instanceof Error ? retryErr : new Error(String(retryErr));
+        // Only fall back to the original stale remediation when the retry error is itself stale.
+        // A non-stale retry failure (e.g. VALIDATION_ERROR) must surface its own cause, not a
+        // handshake that already succeeded.
+        const retryIsStale = classifyError(r).type === "stale_protocol";
+        throw remediatedError(r, extractRemediation(r) ?? (retryIsStale ? remediation : undefined));
+      }
+    }
+    // Layer 2: surface remediation in the error message even when auto-ack is skipped.
+    throw remediatedError(err, remediation);
+  }
+}
+
+/** Dispatch a single Munin action (direct method or client.invoke). Extracted for one-shot retry reuse. */
+function invokeMuninAction(
+  client: MuninClient,
+  projectId: string,
+  directAction: string,
+  payload: Record<string, unknown>,
+  invokeOptions: { ensureCapability: boolean },
+): Promise<unknown> {
+  if (directAction === "capabilities") return client.capabilities(true);
+  // ponytail: share() has different signature — skip direct call, use invoke
+  const direct = client[directAction as keyof MuninClient];
+  if (typeof direct === "function" && directAction !== "share") {
+    // .call(client, …) — extracting the method to a const loses the receiver;
+    // the class methods read `this.invoke` (real-client round-trip caught this).
+    return (direct as (this: MuninClient, projectId: string, payload: Record<string, unknown>) => Promise<unknown>).call(client, projectId, payload);
+  }
+  if (typeof client.invoke === "function") {
+    return client.invoke(projectId, directAction, payload, invokeOptions);
+  }
+  throw new Error(`Munin SDK does not support action: ${directAction}`);
+}
+
+// ---------------------------------------------------------------------------
+// Tool factory (shared shape; registered with per-tool kill-switch awareness)
+// ---------------------------------------------------------------------------
+
+// ponytail: the harness-free tool list is declared over the public
+// ToolDefinition shape with loose params — TypeBox specs don't survive the
+// generic (same pattern as ux_audit).
+type AnyTool = ToolDefinition<any, unknown>;
+
+function makeTools(): AnyTool[] {
+  return [
+    {
+      name: "munin_search",
+      label: "Munin Search",
+      description: "BEFORE work: SEARCH for relevant past fixes, decisions, context.",
+      promptSnippet: "BEFORE work: search memory for relevant context",
+      promptGuidelines: [
+        "Use munin_search before non-trivial work when prior context matters.",
+        "Give munin_search exact errors, subsystem names, file paths, and dependencies.",
+        "Use munin_search tags for targeting and topK 5-20.",
+      ],
+      parameters: Type.Object({
+        ...controlSchema,
+        query: Type.String({ description: "Query terms." }),
+        topK: Type.Optional(
+          Type.Number({ description: "Max results. Default 10.", default: 10 }),
+        ),
+        tags: Type.Optional(Type.String({ description: "Tags, comma-separated." })),
+        tag_mode: Type.Optional(
+          Type.String({ description: "Mode: 'all' or 'any'.", default: "all" }),
+        ),
+        since: Type.Optional(
+          Type.String({
+            description: "Results after this date (e.g., '2024-01-01').",
+          }),
+        ),
+        before: Type.Optional(Type.String({ description: "Results before this date." })),
+        include_total: Type.Optional(
+          Type.Boolean({ description: "Include total count.", default: false }),
+        ),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const { query, topK = 10, tags, tag_mode, since, before, include_total } = params as Record<string, any>;
+        validateSearchQuery(query);
+        const tagMode = validateTagMode(tag_mode);
+        const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
+          const searchParams: Record<string, unknown> = { query, topK };
+          if (tags) searchParams.tags = parseTags(tags);
+          if (tagMode) searchParams.tagMode = tagMode;
+          if (since) searchParams.since = since;
+          if (before) searchParams.before = before;
+          if (include_total) searchParams.includeTotal = include_total;
+          return callMunin(client, projectId, "search", searchParams);
+        }, ctx);
+        return {
+          content: [{ type: "text" as const, text: toTextResult(result) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "munin_get",
+      label: "Munin Get Memory",
+      description: "AFTER search: retrieve full memory by key.",
+      promptSnippet: "After search, get full content by key",
+      promptGuidelines: [
+        "Use munin_get after search to retrieve full content of promising results.",
+        "Verify munin_get results against current repository evidence before using them.",
+      ],
+      parameters: Type.Object({
+        ...controlSchema,
+        key: Type.String({ description: "Key to retrieve." }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const { key: rawKey } = params as Record<string, any>;
+        const key = validateMemoryKey(rawKey);
+        const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
+          return callMunin(client, projectId, "get", { key });
+        }, ctx);
+        return {
+          content: [{ type: "text" as const, text: toTextResult(result) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "munin_store",
+      label: "Munin Store Memory",
+      description:
+        "AT SESSION END (or after fix): STORE verified durable knowledge.",
+      promptSnippet: "Store durable knowledge in long-term memory",
+      promptGuidelines: ["munin_store: follow the Munin Memory Protocol for tags, content shape, and exclusions (no secrets, logs, TODOs)."],
+      parameters: Type.Object({
+        ...controlSchema,
+        key: Type.String({
+          description: "Unique kebab-case key: domain/subject.",
+        }),
+        title: Type.String({ description: "Short title." }),
+        content: Type.String({
+          description: "Conclusion, why it matters, evidence, anchors.",
+        }),
+        tags: Type.String({
+          description: "Comma-separated; one type: + one domain:.",
+        }),
+        valid_from: Type.Optional(
+          Type.String({ description: "Valid-from ISO date." }),
+        ),
+        valid_to: Type.Optional(
+          Type.String({ description: "Expiry ISO date." }),
+        ),
+        pinned: Type.Optional(
+          Type.Boolean({
+            description: "Pin for higher relevance.",
+            default: false,
+          }),
+        ),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const { key: rawKey, title, content, tags, valid_from, valid_to, pinned } = params as Record<string, any>;
+        const key = validateMemoryKey(rawKey);
+        const tagValidation = validateMemoryTags(tags);
+        if (!tagValidation.ok) throw new Error(tagValidation.message);
+        const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
+          const payload: Record<string, unknown> = { key, title, content, tags: tagValidation.tags };
+          if (valid_from) payload.validFrom = valid_from;
+          if (valid_to) payload.validTo = valid_to;
+          if (typeof pinned === "boolean") payload.pinned = pinned;
+          return callMunin(client, projectId, "store", payload);
+        }, ctx);
+        const keyStr = (result as { key?: string })?.key ?? key;
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: `Stored memory \`${keyStr}\` with tags \`${tags ?? "none"}\`.`,
+            },
+          ],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "munin_list",
+      label: "Munin List Memories",
+      description: "LIST all stored memories.",
+      promptSnippet: "List available memories",
+      promptGuidelines: [
+        "Use munin_list to explore stored knowledge while planning.",
+      ],
+      parameters: Type.Object({
+        ...controlSchema,
+        limit: Type.Optional(
+          Type.Number({ description: "Max results. Default 20.", default: 20 }),
+        ),
+        offset: Type.Optional(
+          Type.Number({ description: "Offset.", default: 0 }),
+        ),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const { limit = 20, offset = 0 } = params as Record<string, any>;
+        const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
+          return callMunin(client, projectId, "list", { limit, offset });
+        }, ctx);
+        return {
+          content: [{ type: "text" as const, text: toTextResult(result) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "munin_recent",
+      label: "Munin Recent Memories",
+      description: "CHECK recently updated memories.",
+      promptSnippet: "Show recent updates",
+      promptGuidelines: [
+        "Use munin_recent to see what was added or modified recently.",
+      ],
+      parameters: Type.Object({
+        ...controlSchema,
+        limit: Type.Optional(
+          Type.Number({ description: "Max results. Default 10.", default: 10 }),
+        ),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const { limit = 10 } = params as Record<string, any>;
+        const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
+          return callMunin(client, projectId, "recent", { limit });
+        }, ctx);
+        return {
+          content: [{ type: "text" as const, text: toTextResult(result) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "munin_delete",
+      label: "Munin Delete Memory",
+      description:
+        "DELETE memory — only when user explicitly asks.",
+      promptSnippet: "Delete a memory from storage",
+      promptGuidelines: [
+        "Use munin_delete only when the user explicitly asks; it always requires confirmation.",
+      ],
+      parameters: Type.Object({
+        ...controlSchema,
+        key: Type.String({ description: "Key to delete." }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const { key: rawKey } = params as Record<string, any>;
+        const key = validateMemoryKey(rawKey);
+        const confirmed = await ctx.ui.confirm(
+          "Delete Munin memory?",
+          `Delete memory \`${key}\` from long-term storage? This cannot be undone.`,
+        );
+        if (!confirmed) {
+          return {
+            content: [
+              { type: "text" as const, text: `Delete cancelled for memory \`${key}\`.` },
+            ],
+            details: { cancelled: true, key },
+          };
+        }
+        const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
+          return callMunin(client, projectId, "delete", { key, force: true });
+        }, ctx);
+        return {
+          content: [{ type: "text" as const, text: `Deleted memory \`${key}\`.` }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "munin_capabilities",
+      label: "Munin Capabilities",
+      description: "CHECK available Munin server features.",
+      promptSnippet: "Show Munin capabilities",
+      promptGuidelines: [
+        "Use munin_capabilities to check which server features are available.",
+      ],
+      parameters: Type.Object({
+        ...controlSchema,
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
+          return callMunin(client, projectId, "capabilities", {});
+        }, ctx);
+        return {
+          content: [{ type: "text" as const, text: truncateText(formatCapabilities(result as Record<string, unknown>)) }],
+          details: result,
+        };
+      },
+    },
+    {
+      name: "munin_share",
+      label: "Munin Share Memory",
+      description: "SHARE memories between projects.",
+      promptSnippet: "Share memories between projects",
+      promptGuidelines: [
+        "Use munin_share to share memories between projects; it always requires confirmation.",
+        "The munin_share source and target projects must be accessible with the API key.",
+      ],
+      parameters: Type.Object({
+        ...controlSchema,
+        memory_ids: Type.Array(Type.String(), { description: "Memory IDs to share." }),
+        target_project_ids: Type.Array(Type.String(), { description: "Target project IDs." }),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const { memory_ids, target_project_ids } = params as Record<string, any>;
+        const confirmed = await ctx.ui.confirm(
+          "Share Munin memories?",
+          `Share ${memory_ids.length} memories with ${target_project_ids.length} target projects?`,
+        );
+        if (!confirmed) {
+          return {
+            content: [{ type: "text" as const, text: "Memory sharing cancelled." }],
+            details: { cancelled: true },
+          };
+        }
+        const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
+          return callMunin(client, projectId, "share", { memoryIds: memory_ids, targetProjectIds: target_project_ids });
+        }, ctx);
+        return {
+          content: [{ type: "text" as const, text: toTextResult(result) }],
+          details: result,
+        };
+      },
+    },
+  ];
+}
+
+// ponytail: acknowledge_setup, encrypt, decrypt, versions, diff, rollback — speculative server features, cut until needed
+// ponytail: recall, capture, summarize — composite tools the agent can do with 1-2 primitive calls
+
+// ---------------------------------------------------------------------------
+// Extension
+// ---------------------------------------------------------------------------
+
+/** Masked status of a configured value (never prints it). */
+function maskValue(v: string | undefined): string {
+  return v ? "present" : "missing";
+}
+
+/** One-line source disclosure, e.g. "env" / "project (.pi/settings.json)". */
+function sourceLabel(source: string, cfg: MuninResolvedConfig): string {
+  if (source === "project") return cfg.projectTrusted ? "project (.pi/settings.json)" : "project";
+  return source;
+}
+
+export { MUNIN_PROTOCOL_HEADER };
+
+export default function muninExtension(pi: ExtensionAPI) {
+  // Skill ships in-package (../../../skills/munin, 3 levels up from the module
+  // dir) and is contributed through resources_discover — NOT via the
+  // package.json `pi.skills` manifest — so the kill-switch gates it too:
+  // disabled module ⇒ factory never runs ⇒ no munin skill registered.
+  const skillsRoot = new URL("../../../skills/", import.meta.url).pathname;
+  pi.on("resources_discover", () => ({
+    skillPaths: [path.join(fs.realpathSync(skillsRoot), "munin")],
+  }));
+
+  // Per-tool kill-switch (ceulen.disabledTools): listed tools register
+  // inactive — /config re-activates them live via setActiveTools.
+  const disabled = readDisabledTools();
+  for (const tool of makeTools()) {
+    pi.registerTool({ ...tool, defaultActive: !disabled.has(tool.name) } as AnyTool);
+  }
+
+  pi.registerCommand("munin-status", {
+    description:
+      "Show Munin configuration status (API key present, project, base URL)",
+    handler: async (_args, ctx) => {
+      try {
+        const cfg = getMuninConfig({}, ctx.cwd, ctx.isProjectTrusted?.() === true);
+        ctx.ui.notify(
+          `Munin Status:\n` +
+            `  API Key: ${maskValue(cfg.apiKey)} (${sourceLabel(cfg.sources.apiKey, cfg)})\n` +
+            `  Project: ${cfg.projectId} (${sourceLabel(cfg.sources.projectId, cfg)})\n` +
+            `  Base URL: ${cfg.baseUrl} (${sourceLabel(cfg.sources.baseUrl, cfg)})` +
+            (cfg.sources.apiKey === "default" ? "\n  Run /config → Memory → Munin to configure this project." : ""),
+          "info",
+        );
+      } catch (err) {
+        ctx.ui.notify(
+          `Munin Status: ${sanitizeErrorMessage(err instanceof Error ? err : new Error(String(err)))}`,
+          "error",
+        );
+      }
+    },
+  });
+
+  pi.on("before_agent_start", async (event, ctx) => {
+    try {
+      getMuninConfig({}, ctx.cwd, ctx.isProjectTrusted?.() === true);
+    } catch {
+      return; // skip header if Munin not configured
+    }
+    return {
+      systemPrompt: `${MUNIN_PROTOCOL_HEADER}\n\n---\n\n${event.systemPrompt}`,
+    };
+  });
+
+  pi.on("tool_result", async (event) => {
+    if (!event.toolName.startsWith("munin_") || !event.isError) return;
+    const text = event.content.map((part) => (part as { text?: string })?.text ?? "").join("\n");
+    // Strip any existing "Munin <type> error:" prefix to avoid double-wrapping.
+    // classifyError may add this prefix on a previous pass — loop so a
+    // doubly-wrapped stack ("Munin x error: Munin y error: ...") unwinds fully.
+    let cleanText = text;
+    while (/^Munin \w+ error: /.test(cleanText)) cleanText = cleanText.replace(/^Munin \w+ error: /, "");
+    const classified = classifyError(new Error(cleanText));
+    const sanitized = sanitizeErrorMessage(new Error(classified.message));
+    // Error messages are also bounded — a malicious server can balloon agent context
+    // via oversized remediation fields (url/version), so truncate like success paths.
+    const bounded = truncateText(`Munin ${classified.type} error: ${sanitized}`);
+    return {
+      content: [
+        {
+          type: "text" as const,
+          text: bounded,
+        },
+      ],
+      details: { errorType: classified.type, message: sanitized },
+    };
+  });
+}

@@ -18,7 +18,8 @@ extensions/
   modules/<name>/        one directory per module (self-contained: index.ts, lib/, commands/, test/)
 skills/                  skill directories shipped with the package (each module contributes its OWN
                          skill dirs via resources_discover — ponytail the six `ponytail*`, ux the four
-                         `ux-*` — never the skills/ root, so each kill-switch gates its own skills)
+                         `ux-*`, munin `munin` — never the skills/ root, so each kill-switch gates its
+                         own skills)
 themes/                 theme JSONs shipped with the package (declared via the package.json
                          `pi.themes` manifest — loaded by pi itself, no module, no kill-switch;
                          scripts/validate-themes.mjs runs in `npm test`)
@@ -34,6 +35,28 @@ themes/                 theme JSONs shipped with the package (declared via the p
 - Tool registrations that should be per-tool toggleable list their canonical names on the module's `tools?: string[]` registry entry; names in `ceulen.disabledTools` (helpers in `extensions/lib/tools.ts`) register via `defaultActive: false`, and the config module's tool rows re-activate/deactivate them live with `setActiveTools` (no `/reload`).
 - Tests: `node:test` + tsx, in `extensions/modules/<name>/test/`. The bundle root `package.json` `test` script globs them. Test dirs are excluded from `tsc --noEmit` when they use loose harness stubs (usage, ponytail); they run under tsx.
 - To add a module: create `extensions/modules/<name>/`, append one entry to `MODULES` in `extensions/lib/registry.ts` under its category banner (each entry's `category` field is the OMP tab — the single source for /config tab placement, synthesized Enable-only sections, and /ceulen status grouping; pretty section names live in the config module's `PRETTY_OF` map). Order matters — usage reads the `router` provider, so router loads first; config loads last, it reads the contribution map. Add its test files to the `test` glob if not covered. The conflict guard covers you: a name another module already claimed throws at load.
+
+## Munin module (munin)
+
+Ported from `@bacnh85/pi-munin` 0.5.12 (see `extensions/modules/munin/`). Eight
+`munin_*` tools (per-tool kill-switchable), `/munin-status`, the Munin Memory
+Protocol injection (`before_agent_start`, only when configured), the `tool_result`
+error sanitizer, and the `munin` skill (own `resources_discover` dir). The SDK is
+VENDORED to `lib/sdk.ts` (`// ponytail: vendored from @kalera/munin-sdk 1.5.0`;
+local change: capabilities cache keyed by `baseUrl|apiKey` — upstream cached one
+global). dotenv was dropped: the bundle's `env.ts` already ingests trusted `.env`.
+
+Config is PROJECT-level (unlike router's global writes): `munin.apiKey`,
+`munin.project`, `munin.baseUrl` live in `<repo>/.pi/settings.json` under a
+`munin` section, surfaced by `/config` on the **Memory** tab (`PRETTY_OF` icon
+🪶 — fills the previously empty Memory slot in `PI_TAB_ORDER`). Precedence:
+per-call params > `MUNIN_*` env > trusted project file > global agent-dir file >
+default baseUrl. The project file is read ONLY when trusted (router's rule — an
+untrusted checkout must not redirect where the API key is sent); the /config
+save always targets `<ctx.cwd>/.pi/settings.json` and warns when the project is
+untrusted (pi ignores the file until trusted). `/munin-status` discloses each
+field's source without printing the key. Env contract is stable `MUNIN_*`
+(same policy as `ponytail.*`).
 
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 
@@ -102,7 +125,11 @@ Mechanism (registry + loader):
   (fired once on Esc so the row undoes its live preview — the row owns the
   restore; `set` owns the committed effect),
   `defaultValue` (values differing from it render warning-styled),
-  `completions` (inline suggestion picker for comma-separated free text).
+  `completions` (inline suggestion picker for comma-separated free text),
+  `mask` (secret row: value renders `••••` in the panel AND the `/config show`
+  summary (config/index.ts masks in summaryLines; panel.ts:369 only blanks it
+  for search filterText) — edit starts EMPTY, never prefills the secret,
+  empty submit is a no-op).
   `ModuleEntry.describe` gives the module one-liner used by its kill-switch row.
 - Panel layout (v4, fullscreen BOXED frame + OMP's tab → section → rows
   hierarchy):
@@ -227,7 +254,11 @@ save re-registers the provider, force-refreshes the catalog, revalidates the
 active model; **Providers** tab, `Router` section) and **ponytail**
 (`ponytail.defaultMode`, `ponytail.quietStartup`, `ponytail.hideStatus` —
 writes its own `~/.config/ponytail/config.json`; applies next session;
-**Tasks** tab, `Ponytail` section). Modules without a contribution factory get
+**Tasks** tab, `Ponytail` section) and **munin** (`munin.project`,
+`munin.baseUrl`, `munin.apiKey` (masked, gitignore warning) — writes the
+PROJECT `.pi/settings.json` `munin` section, effective immediately (config is
+read per tool call, no reload); **Memory** tab, `Munin` section). Modules
+without a contribution factory get
 a synthesized Enable-only section (usage → **Appearance** · `Usage footer`;
 config → **Plugins** · `Ceulen config`). The per-module kill-switch rows are
 NOT a standalone tab: `withEnableRow()` prepends the module's Enable row (key

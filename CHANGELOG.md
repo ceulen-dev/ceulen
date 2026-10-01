@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0
+
+- **munin** (new module, ported from `@bacnh85/pi-munin` 0.5.12): Munin
+  long-term memory — eight `munin_*` tools (search/get/store/list/recent/
+  delete/capabilities/share, each per-tool toggleable in `/config`),
+  `/munin-status`, the Munin Memory Protocol injected into the system prompt
+  while Munin is configured, the `tool_result` error sanitizer, and the `munin`
+  skill (kill-switch gated via `resources_discover`). The `@kalera/munin-sdk`
+  client is vendored (152 lines, zero deps; capabilities cache now keyed by
+  `baseUrl|apiKey`) and dotenv dropped (ceulen's trust-gated `.env` ingestion
+  covers it) — no new runtime dependency. **Config is project-level**:
+  `munin.project`/`munin.baseUrl`/`munin.apiKey` saved to
+  `<repo>/.pi/settings.json` via `/config` (new **Memory** tab, masked key row
+  with a gitignore warning), read only when the project is trusted; precedence
+  per-call params > `MUNIN_*` env > project file > global file > default.
+  Applies immediately — config resolves per tool call, no reload.
+
 ## Unreleased
 - **composer**: the line above the band is now a full usage line — token
   stats + provider quota windows flush LEFT (`↑1.9M ↓377k R69M W2.0k CH99.6%

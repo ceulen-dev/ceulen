@@ -89,13 +89,29 @@ Design discipline for UI work: `/ux off|lite|strict` switches the level (persist
 - Config: `~/.config/pi-ux/config.json` or `PI_UX_*` envs
 - Command: `/ux [mode|status]`, tool: `ux_audit` (per-tool toggle in `/config`) — default mode via `/config` (Appearance → UX discipline)
 
+### munin — Munin long-term memory
+
+Native memory tools for Pi: `munin_search`, `munin_get`, `munin_store`,
+`munin_list`, `munin_recent`, `munin_delete`, `munin_capabilities`,
+`munin_share`, plus `/munin-status` and the Munin Memory Protocol injected into
+the system prompt while Munin is configured (skills: `munin`). Ported from
+`@bacnh85/pi-munin` — the SDK is vendored, no extra dependency.
+
+- Config: **project-level** — `munin.project` / `munin.baseUrl` / `munin.apiKey`
+  in `<repo>/.pi/settings.json`, via `/config` (Memory tab). `MUNIN_*` env vars
+  (incl. trusted `.env.local`) override; per-call params override everything.
+  Read only when the project is trusted; the API-key row is masked — add
+  `.pi/settings.json` to `.gitignore`.
+- Command: `/munin-status` — shows each field's source (env / project / global),
+  never the key.
+
 ### config — central settings panel
 
 `/config` opens one fullscreen panel for **pi core settings and every ceulen
 module** — the frame fills the terminal (boxed corners, tab row, pinned
 key-hint footer), so the chat is replaced while you configure and comes back
 untouched on close. Tabs follow OMP's settings taxonomy: **Appearance · Model ·
-Interaction · Context · Shell · Tasks · Providers · Plugins** (empty
+Interaction · Memory · Context · Shell · Tasks · Providers · Plugins** (empty
 categories don't render). A tab with several settings groups shows them as a
 left sidebar of sections with the underlined section headings repeated beside
 the detail rows, OMP style; the sidebar geometry stays identical across tabs.
@@ -103,6 +119,7 @@ the detail rows, OMP style; the sidebar geometry stays identical across tabs.
 - **Appearance** — pi theme, display/editor/fullscreen/terminal-image settings, plus the usage-footer, composer and ux-discipline module switches
 - **Model** — default model/provider, thinking, network transport/timeouts, retry, cache warming
 - **Interaction** — steering/follow-up modes, double-escape + tree filter, startup notices, trust & telemetry
+- **Memory** — munin (project, base URL, API key — saved to the **project's** `.pi/settings.json`; `MUNIN_*` env vars override; applies immediately, no reload)
 - **Context / Shell** — auto-compact, shell path/prefix, npm command
 - **Tasks** — ponytail (default mode `off/lite/full/ultra`, quiet startup, status-bar visibility; applies next session)
 - **Providers** — router (base URL + thinking levels; saves re-register the provider and refresh the catalog live)
@@ -112,7 +129,7 @@ the detail rows, OMP style; the sidebar geometry stays identical across tabs.
   ("custom filters"). Toggles apply after `/reload`.
 
 Each module's on/off switch lives at the top of its own section (Router → Providers,
-ponytail → Tasks, usage → Appearance, the config panel itself → Plugins) as an
+munin → Memory, ponytail → Tasks, usage → Appearance, the config panel itself → Plugins) as an
 **Enabled** row writing the `ceulen.disabled` list — a feature is turned on where
 it is configured. Pi-core rows are backed by Pi's `SettingsManager` and save to the
 global `settings.json`; they apply after `/reload` (or a new session).

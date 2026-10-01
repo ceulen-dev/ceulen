@@ -20,6 +20,8 @@ import uxModule, { uxConfig } from "../modules/ux/index.ts";
 import serenaModule from "../modules/serena/index.ts";
 import fffModule from "../modules/fff/index.ts";
 import rtkModule from "../modules/rtk/index.ts";
+import muninModule from "../modules/munin/index.ts";
+import { muninConfig } from "../modules/munin/configPanel.ts";
 import configModule from "../modules/config/index.ts";
 
 /** A module's contribution to the central `/config` panel. */
@@ -72,6 +74,10 @@ export const MODULES: ModuleEntry[] = [
   { name: "usage", category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
   { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },
   { name: "ux", category: "Appearance", describe: "Anti-slop UI/UX design discipline: /ux modes, ux_audit tool, design skills. No status-bar footprint.", load: uxModule, config: uxConfig, tools: ["ux_audit"] },
+  // ── Memory ─────────────────────────────────────────────────────────────
+  { name: "munin", category: "Memory", describe: "Munin long-term memory tools (search/get/store/list/recent/delete/capabilities/share) + memory protocol. Config at project level.", load: muninModule, config: muninConfig, tools: [
+    "munin_search", "munin_get", "munin_store", "munin_list", "munin_recent", "munin_delete", "munin_capabilities", "munin_share",
+  ] },
   // ── Tasks ──────────────────────────────────────────────────────────────
   { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, status, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
   // ── Tools ──────────────────────────────────────────────────────────────

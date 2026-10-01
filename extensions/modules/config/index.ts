@@ -231,6 +231,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
   const PRETTY_OF: Record<string, { section: string; icon?: string }> = {
     router: { section: "Router", icon: "🌐" },
     usage: { section: "Usage footer", icon: "📊" },
+    munin: { section: "Munin", icon: "🪶" },
     composer: { section: "Composer", icon: "🎨" },
     ux: { section: "UX discipline", icon: "📐" },
     ponytail: { section: "Ponytail", icon: "🦥" },

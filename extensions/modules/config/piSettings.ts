@@ -631,6 +631,7 @@ const PI_TAB_ICONS: Record<string, string> = {
   Model: "🤖",
   Interaction: "⌨️",
   Context: "🧠",
+  Memory: "🪶",
   Shell: "🖥️",
   Tools: "🧰",
   Tasks: "🗂️",

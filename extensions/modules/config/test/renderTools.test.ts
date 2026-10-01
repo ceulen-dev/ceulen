@@ -34,7 +34,7 @@ function toolGroups(): PanelGroup[] {
 describe("render smoke — ported modules' /config sections", () => {
   it("renders Enable + per-tool rows inside the boxed frame with zero overflow", () => {
     const groups = toolGroups();
-    assert.equal(groups.length, 3, "serena + fff + ux (rtk has no tools)");
+    assert.equal(groups.length, 4, "serena + fff + ux + munin (rtk has no tools)");
     const m = new ConfigPanelModel(groups, theme, "Settings");
     m.getHeight = () => 40;
     for (const w of [110, 100, 80, 60]) {
