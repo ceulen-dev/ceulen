@@ -126,6 +126,15 @@ Pi's builtin `/settings` cannot be overridden by extensions (a colliding
 command is renamed `/settings:1`); `/config` adds the ceulen modules around
 pi's own settings. Non-TUI shells get a text summary (`/config show`).
 
+## Themes
+
+The package ships **104 themes** selectable in Pi's `/theme` selector or via `/config` (Appearance → Theme — previews live as you browse). Two sources:
+
+- **Ayu + Catppuccin** (4): `pi-dark`, `pi-mirage`, `pi-light`, `pi-catppuccin-mocha` — ported from [@bacnh85/pi-themes](https://github.com/bacnh85/pi-extensions/tree/main/pi-themes) (colors from [ayu-colors](https://github.com/ayu-theme/ayu-colors) and [Catppuccin](https://github.com/catppuccin/catppuccin), MIT).
+- **omp collection** (100): `dark-*` / `light-*` families plus stone-and-gem one-offs (`alabaster`, `obsidian`, …) — ported from [oh-my-pi](https://github.com/can1357/oh-my-pi) (MIT, © Mario Zechner, Can Bölük, Stencil Labs).
+
+Theme JSONs are static package resources loaded by Pi itself (no module, no kill-switch); validation runs via `node scripts/validate-themes.mjs` (part of `npm test`).
+
 ## Kill-switches
 
 In `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):

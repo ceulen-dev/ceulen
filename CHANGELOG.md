@@ -1,6 +1,17 @@
 # Changelog
 
 ## Unreleased
+- **themes** (new package resource): 104 selectable themes ship with the bundle —
+  the 4 from `@bacnh85/pi-themes` (`pi-dark`, `pi-mirage`, `pi-light`,
+  `pi-catppuccin-mocha`) plus 100 from oh-my-pi's collection (`dark-*` /
+  `light-*` families + stone/gem one-offs). Loaded by pi itself via the
+  package manifest (`pi.themes`) — no module, no kill-switch; select in
+  `/theme` or `/config` (Appearance → Theme, live preview). omp copies were
+  re-pointed at pi's theme schema and their 8-digit RGBA `selectedBg`
+  (poimandres pair) truncated to 6-digit hex (pi's `parseColor` rejects
+  alpha). `scripts/validate-themes.mjs` (in `npm test`) enforces name
+  uniqueness, no builtin collisions (`dark`/`light`/`system`), the full
+  pi-required token set, and resolvable color values across all 104.
 - **serena, fff, rtk** (new modules, ported from the pi-extensions monorepo):
   Serena semantic code tools (`serena_*`, Python worker), FFF fuzzy
   file/content search (`ffgrep`, `ffind`, `fff_multi_grep`, `resolve_file`,
