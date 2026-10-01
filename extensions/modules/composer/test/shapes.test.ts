@@ -199,12 +199,33 @@ describe("status line + surface fill", () => {
     assert.ok(plain(s.left).startsWith("π "), "brand leads the group");
     assert.ok(plain(s.left).includes("📁 ~/dev/ceulen"), "folder icon on the dir");
     assert.ok(plain(s.left).includes("⑂ main"), "branch icon on the git segment");
-    // Generation rate is NOT a band segment — it renders right-justified above
-    // the band (rateLine).
-    assert.ok(!plain(s.left).includes("tok/s"), "rate moved out of the band");
+    // Generation rate is NOT a band segment — it renders right-justified on
+    // line 1 (rateLine) together with the token stats and quota windows.
+    assert.ok(!plain(s.left).includes("tok/s"), "rate stays off the band");
     assert.equal(plain(rateLine({ rate: 46.4 }, th, 20)), "         ⚡ 46 tok/s");
     assert.equal(rateLine(undefined, th, 20), "", "no rate → no line");
     assert.equal(rateLine({ rate: 0 }, th, 20), "", "zero rate → no line");
+    // Line 1 splits the numeric block by the composer's left/right groups:
+    // token stats + quota windows flush LEFT, tok/s justified RIGHT.
+    const full = plain(rateLine({ rate: 46, stats: "↑1.9M ↓377k R69M", usage: "(router) R:59%/2H3M" }, th, 80));
+    assert.ok(full.startsWith("↑1.9M ↓377k R69M · (router) R:59%/2H3M"), `stats+usage flush left: ${full}`);
+    assert.ok(full.endsWith("⚡ 46 tok/s"), `rate right-justified: ${full}`);
+    // Stats and usage render without a rate too (line never blank when fed).
+    assert.ok(plain(rateLine({ stats: "↑1k ↓500" }, th, 40)).startsWith("↑1k ↓500"), "stats alone sits left");
+    assert.ok(plain(rateLine({ usage: "(router) R:59%/2H3M" }, th, 40)).startsWith("(router) R:59%/2H3M"), "usage alone sits left");
+    // Usage tone steps (error/warn) with the tightest window.
+    const toneTheme: ShapeTheme = { ...th, warn: (t) => `W(${t})`, error: (t) => `E(${t})` };
+    assert.ok(plain(rateLine({ usage: "R:9%/1M", usageTone: "error" }, toneTheme, 40)).startsWith("E(R:9%/1M)"), "error tone paints");
+    // Over-budget: the LEFT group sheds whole trailing segments (usage first,
+    // then stats); the rate yields only when the left group is gone.
+    const shed = plain(rateLine({ rate: 46, stats: "↑1.9M ↓377k", usage: "(r) R:59%/2H3M" }, th, 30));
+    assert.ok(shed.startsWith("↑1.9M ↓377k") && !shed.includes("R:59%"), `usage sheds first: ${shed}`);
+    assert.ok(shed.endsWith("⚡ 46 tok/s"), `rate stays through left shedding: ${shed}`);
+    const tighter = plain(rateLine({ rate: 46, stats: "↑1.9M ↓377k" }, th, 14));
+    assert.ok(tighter.endsWith("⚡ 46 tok/s"), `stats gone, rate right: ${tighter}`);
+    // Below the rate's own width the line yields the bare rate; ShapeEditor's
+    // final truncateToWidth pass owns the clip (same as every other row).
+    assert.equal(plain(rateLine({ rate: 46, stats: "↑1.9M ↓377k" }, th, 10)), "⚡ 46 tok/s", `rate is the last thing standing: ${plain(rateLine({ rate: 46, stats: "↑1.9M ↓377k" }, th, 10))}`);
     // Blanks drop out — never wrong, just shorter. The brand only leads a
     // group that exists, so an empty session keeps the band blank.
     assert.equal(plain(statusSegments({ model: "M" }, th).left), "π · M");
@@ -231,25 +252,18 @@ describe("status line + surface fill", () => {
     assert.equal(statusSegments({ thinkingLevel: "max" }, th).left, "");
   });
 
-  it("model cluster: model only — usage/stats dropped from the band (restore: git history)", () => {
+  it("model cluster: model only — usage/stats live on line 1 (rateLine), not the band", () => {
     const s = statusSegments(
       { model: "M", provider: "router", thinkingLevel: "high", branch: "main", git: { staged: 1, unstaged: 10, untracked: 4 }, usage: "(router) R:59%/2H3M W:99%/2D3H", stats: "↑1.9M ↓377k R69M CH99.7%", rate: 46 },
       th,
     );
     const left = plain(s.left);
     assert.equal(left, "π · (router) M (high) · ⑂ main *10 +1 ?4");
-    // Supplied-but-dropped figures never leak into the band.
+    // Supplied-but-dropped figures never leak into the band — line 1
+    // (rateLine) owns rate · stats · usage.
     assert.ok(!left.includes("R:59%") && !left.includes("↑1.9M") && !left.includes("tok/s"), "usage/stats/rate stay off the band");
-    // Quota tone steps with the tightest window (usage module decides).
-    const stepping: ShapeTheme = {
-      ...th,
-      warn: (t) => `W(${t})`,
-      error: (t) => `E(${t})`,
-    };
-    // Usage data supplied but dropped — the band shows nothing, not a stale
-    // quota figure (the tone-stepping segment lives in git history).
-    assert.equal(plain(statusSegments({ usage: "(router) R:59%/2H3M", usageTone: "warning" }, stepping).left), "");
-    assert.equal(plain(statusSegments({ usage: "(router) R:9%/1M", usageTone: "error" }, stepping).left), "");
+    // Usage-only line 1 keeps tone-stepping.
+    assert.equal(plain(rateLine({ usage: "(r) R:59%/2H3M", usageTone: "warning" }, { ...th, warn: (t) => `W(${t})` }, 40)), "W((r) R:59%/2H3M)");
     assert.equal(plain(statusSegments({ model: "M", usage: "  " }, th).left), "π · M");
     assert.equal(plain(statusSegments({ model: "M", stats: "" }, th).left), "π · M");
   });

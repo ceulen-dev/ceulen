@@ -1,6 +1,14 @@
 # Changelog
 
 ## Unreleased
+- **composer**: the line above the band is now a full usage line — token
+  stats + provider quota windows flush LEFT (`↑1.9M ↓377k R69M W2.0k CH99.6%
+  · (router) R:59%/2H3M`), Generation Rate justified RIGHT (`⚡ N tok/s`),
+  split by the composer's stock left/right groups. `CH` (cache-hit share of
+  the latest assistant prompt) joins the stats figures; cost stays `/usage`-
+  only. Under width pressure the left group sheds whole segments (usage →
+  stats) while the rate stands; rate alone still right-justifies. The band
+  itself stays identity-only (π · model · dir · git + context%).
 - **ux** (new module, ported from `@bacnh85/pi-ux` 0.6.6): anti-slop UI/UX
   design discipline — `/ux off|lite|strict` (session-persisted, `stop ux` /
   `normal mode` deactivates) injects the ux-design method into the system

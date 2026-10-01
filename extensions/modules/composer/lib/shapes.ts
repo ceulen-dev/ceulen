@@ -336,14 +336,28 @@ function bandTop(c: ShapeCtx): string {
   return cap + chip + spaces(Math.max(0, maxLeft - visibleWidth(chip))) + right + scroll;
 }
 
-/** Right-justified generation-rate line (OMP's placement): `⚡ N tok/s` flush
- *  right on its own row. Blank (no row) before the first response. */
+/** Line 1 (OMP's Generation Rate placement): the numeric block split by the
+ *  composer's stock left/right groups — token stats + quota windows flush
+ *  LEFT, tok/s justified RIGHT — so the band stays identity-only. Blank (no
+ *  row) while there is nothing to show. Narrow widths shed whole trailing
+ *  left segments (usage → stats) before the rate yields anything. */
 export function rateLine(data: BandData | undefined, theme: ShapeTheme, w: number): string {
+  const left: string[] = [];
+  const stats = data?.stats?.trim();
+  if (stats) left.push(theme.dim(stats));
+  const usage = data?.usage?.trim();
+  const paint = data?.usageTone === "error" ? theme.error : data?.usageTone === "warning" ? theme.warn : theme.dim;
+  if (usage) left.push(paint(usage));
   const rate = data?.rate;
-  if (typeof rate !== "number" || !Number.isFinite(rate) || rate <= 0) return "";
-  const text = theme.dim(`${ICONS.throughput} ${Math.round(rate)} tok/s`);
-  const pad = Math.max(0, w - visibleWidth(text));
-  return spaces(pad) + text;
+  const right = typeof rate === "number" && Number.isFinite(rate) && rate > 0 ? theme.dim(`${ICONS.throughput} ${Math.round(rate)} tok/s`) : "";
+  if (left.length === 0 && !right) return "";
+  const sep = theme.dim(" · ");
+  let keep = left.length;
+  while (keep > 0 && visibleWidth(left.slice(0, keep).join(sep)) + (right ? visibleWidth(right) + 1 : 0) > w) keep--;
+  const leftText = left.slice(0, keep).join(sep);
+  if (!right) return leftText;
+  if (!leftText) return spaces(Math.max(0, w - visibleWidth(right))) + right;
+  return composeStatus(leftText, right, w);
 }
 
 /** Width of a joined segment group (separators included). */

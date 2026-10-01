@@ -141,6 +141,7 @@ describe("applyShape dispatch", () => {
 
   it("the live factory carries the stock status: cwd, branch, context window, Generation Rate", async () => {
     const { setGenRate, resetGenRate } = await import("../../../lib/rate.js");
+    const { setUsageItem, resetUsageItem } = await import("../../../lib/usage-store.js");
     const ctx = stubCtx();
     await startModule(ctx); // liveCtx = ctx — the same data source the factory reads
     applyShape("band", ctx);
@@ -152,17 +153,21 @@ describe("applyShape dispatch", () => {
     const ed = factory({ terminal: { rows: 30 }, requestRender() {} }, { borderColor: (s: string) => s }, {});
     ed.setText("hi");
     setGenRate({ tps: 46 });
+    setUsageItem({ provider: "router", windows: "R:59%/2H3M" });
     const lines = ed.render(90).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
     const line = lines[0]!;
     assert.ok(lines[0]!.includes("⚡ 46 tok/s"), `Generation Rate is line 1: ${lines[0]}`);
+    // Line 1 carries the numeric block: rate · session token stats · quota windows.
+    assert.ok(line.includes("↑100 ↓50"), `token stats on line 1: ${line}`);
+    assert.ok(line.includes("R:59%"), `quota windows on line 1: ${line}`);
     const band = lines[1]!;
     assert.ok(band.includes("GLM"), band);
     assert.ok(band.includes("/tmp/somerepo"), `cwd shown: ${band}`);
     assert.ok(band.includes("10.0%/1.0k"), `context window shown: ${band}`);
-    // Token stats are dropped from the band for now (model-only cluster).
-    assert.ok(!band.includes("↑100 ↓50"), `token stats stay off the band: ${band}`);
+    assert.ok(!band.includes("↑100 ↓50") && !band.includes("R:59%"), `stats/quota stay off the band: ${band}`);
     assert.ok(band.includes("10.0%/1.0k (auto)"), `auto-compact marker from pi settings: ${band}`);
     resetGenRate();
+    resetUsageItem();
   });
 
   it("replaces pi's footer only on band-embedding shapes (no duplicated info)", () => {
@@ -265,7 +270,7 @@ describe("module registration (core)", () => {
       (ctx as unknown as { __calls: { factory: (t: unknown, th: unknown, kb: unknown) => { render(w: number): string[] } }[] }).__calls.at(-1)!.factory;
     const render = (ed: { render(w: number): string[] }) => {
       const lines = ed.render(120).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
-      return lines[0]!.includes("⚡") ? lines[1]! : lines[0]!;
+      return lines.find((l) => l.includes("π ·")) ?? lines[0]!;
     };
     const ed1 = factoryOf()({ terminal: { rows: 30 }, requestRender() {} }, { borderColor: (s: string) => s }, {});
     assert.ok(render(ed1).includes("(high)"), "session_start ctx level");

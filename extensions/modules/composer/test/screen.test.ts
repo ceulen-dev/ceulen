@@ -66,7 +66,7 @@ function editor(id: string, txt = "hello") {
     shapeById(id),
     {
       theme: () => IDENTITY_THEME,
-      data: () => ({ model: "GLM-5.3", cwd: "~/dev/ceulen", branch: "main", git: { staged: 1, unstaged: 3, untracked: 2 }, pct: 12, window: 1_000_000, rate: 46 }),
+      data: () => ({ model: "GLM-5.3", cwd: "~/dev/ceulen", branch: "main", git: { staged: 1, unstaged: 3, untracked: 2 }, pct: 12, window: 1_000_000, rate: 46, stats: "↑1.9M ↓377k R69M", usage: "(router) R:59%/2H3M" }),
     },
     tui,
     theme as never,
@@ -121,8 +121,9 @@ describe("composed screen through the real TUI renderer", () => {
 
   it("band carries the stock status on screen: icons on every segment, context right-justified", () => {
     // At the default 60 cols the band keeps brand+model+dir and sheds the rest
-    // whole; the widest capture exercises every segment at once. The rate line
-    // (right-justified, OMP placement) sits above the band when present.
+    // whole; the widest capture exercises every segment at once. Line 1 (right-
+    // justified, OMP placement) sits above the band when present: rate · stats
+    // · usage on one row.
     const narrowBand = (l: string) => l.includes("π ·");
     const narrow = compose(editor("band")).lines.find(narrowBand)!;
     assert.ok(narrow.includes("π · GLM-5.3"), narrow);
@@ -132,7 +133,9 @@ describe("composed screen through the real TUI renderer", () => {
 
     const wide = compose(editor("band"), 120);
     const wideBand = wide.lines.find((l) => l.includes("π ·"))!;
-    assert.ok(wide.lines.some((l) => l.includes("⚡ 46 tok/s")), `rate line above the band: ${wide.lines.join("\n")}`);
+    const usageLine = wide.lines.find((l) => l.includes("⚡ 46 tok/s"))!;
+    assert.ok(usageLine.includes("↑1.9M ↓377k R69M") && usageLine.includes("R:59%"), `rate · stats · usage on line 1: ${usageLine}`);
+    assert.ok(!wideBand.includes("⚡"), `line 1 sits above the band: ${wide.lines.join("\n")}`);
     assert.ok(wideBand.includes("⑂ main *3 +1 ?2"), wideBand);
     assert.ok(wideBand.includes("12.0%/1.0M"), wideBand); // right-justification asserted purely in shapes.test
 
