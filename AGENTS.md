@@ -205,8 +205,22 @@ Mechanism (registry + loader):
   agentDir)`): typed getters give effective values (global ⊕ project), typed
   setters persist to the GLOBAL settings.json with pi's locking/atomicity, and
   `flush()` drains the write queue on save. Only settings WITH a typed setter
-  are surfaced (`externalEditor`, `sessionDir`, `defaultTools`,
-  `branchSummary.*`, `httpProxy` have none — they stay config-file-only).
+  are surfaced (`externalEditor`, `sessionDir`, `branchSummary.*`,
+  `httpProxy` have none — they stay config-file-only). THE ONE SANCTIONED
+  EXCEPTION is `defaultTools` (extensions/modules/config/defaultTools.ts):
+  SettingsManager exposes `getDefaultTools()` but no setter, so the Tools →
+  "Built-in tools" section renders one toggle per built-in tool (read, bash,
+  powershell, edit, write, grep, find, ls + the built-in extension tools
+  codemode, tool_search; stock four default-on) over a working Set, and the
+  save path hand-writes the resolved absolute list into the GLOBAL
+  settings.json with the shared atomic-write pattern — stock-equal lists
+  DELETE the key (pi's reset semantics; an empty array would mean NO tools).
+  The same save applies the delta to the live session via
+  `applyToolSwitches`, so a toggle needs no /reload. A plain defaultTools
+  list only replaces the BUILT-IN startup selection — extension tools with
+  `defaultActive: true` self-activate regardless, so ceulen's tools are
+  never touched. `STOCK_DEFAULT_TOOLS` replicates pi's unexported
+  DEFAULT_TOOL_NAMES.
   Coverage is full stock-`/settings` parity plus the setter-only extras:
   per-model thinking overrides (one row per override — `pi.modelThinkingLevels.
   <provider/id>` — plus an **Add model override** menu row; the clear option

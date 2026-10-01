@@ -20,6 +20,7 @@
  */
 
 import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { builtinToolRows, DEFAULT_TOOLS_PREFIX, nextDefaultTools, startupToolSet, writeDefaultTools } from "./defaultTools.js";
 import { openConfigPanel, row, type PanelGroup } from "../../lib/panel.js";
 import { agentDirs, isCore, MODULES, disabledSource, readDisabled, writeDisabled, type ModuleConfig, type ModuleLoadDeps } from "../../lib/registry.js";
 import { readDisabledTools, writeDisabledTools } from "../../lib/tools.js";
@@ -251,11 +252,17 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
       const workingEnabled = new Set(enabledModules());
       const workingTools = new Set(allDeclaredTools().filter((t) => !readDisabledTools().has(t)));
       const pluginsWorking = openPluginsWorking();
-
       // Pi core settings: an OWN SettingsManager instance over the same files
       // (typed setters persist to global settings.json with pi's own locking;
       // the running session picks changes up on /reload).
       const piSettings = SettingsManager.create(ctx.cwd, agentDirs()[0]);
+
+      // Pi's built-in tools (defaultTools setting): one working Set of
+      // enabled names, toggled by the Built-in tools rows and diffed on save
+      // (persist + live apply). initialStartup is the pre-panel state the
+      // live-apply diff runs against.
+      const initialStartup = startupToolSet(piSettings);
+      const workingStartup = new Set(initialStartup);
 
       // A DISABLED module has no registered factory (the loader skips it), so
       // its section collapses to the Enable row below — settings are moot
@@ -291,7 +298,16 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
           });
         }
         // Plugins' package sections precede the config module's own switch.
-        const all = [...buildPiSettingsGroups(piSettings, piMenuLookup(ctx)), ...buildPluginsGroups(pluginsWorking), ...modGroups];
+        const piGroups = buildPiSettingsGroups(piSettings, piMenuLookup(ctx));
+        // Built-in tools lead the Tools tab (before the extension-dirs rows).
+        const toolsAt = piGroups.findIndex((g) => g.tab === "Tools");
+        piGroups.splice(toolsAt === -1 ? piGroups.length : toolsAt, 0, {
+          key: "pi-tools-builtin",
+          label: "Built-in tools",
+          tab: "Tools",
+          rows: builtinToolRows(workingStartup),
+        });
+        const all = [...piGroups, ...buildPluginsGroups(pluginsWorking), ...modGroups];
         const rank = (g: PanelGroup) => {
           const at = PI_TAB_ORDER.indexOf((g.tab ?? g.label) as (typeof PI_TAB_ORDER)[number]);
           return at === -1 ? PI_TAB_ORDER.length : at;
@@ -359,9 +375,31 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
           // block the others (nor the kill-switch above).
           await saveContributions(contributions, keys, ctx);
 
+          // Pi's built-in tools: persist the selection (stock-equal deletes
+          // the key) and apply the delta to the LIVE session — the startup
+          // selection is also the current session's tool set.
+          if ([...keys].some((k) => k.startsWith(DEFAULT_TOOLS_PREFIX))) {
+            try {
+              const file = writeDefaultTools(nextDefaultTools(workingStartup));
+              applyToolSwitches(pi, initialStartup, workingStartup);
+              const changed = [...initialStartup].filter((t) => !workingStartup.has(t))
+                .concat([...workingStartup].filter((t) => !initialStartup.has(t)));
+              ctx.ui.notify(
+                changed.length > 0
+                  ? `Default tools ${changed.map((t) => (workingStartup.has(t) ? `+${t}` : `-${t}`)).join(" ")} — saved to ${file}, applied live.`
+                  : `Default tools saved to ${file}.`,
+                "info",
+              );
+            } catch (e) {
+              ctx.ui.notify(`Default tools save failed: ${e instanceof Error ? e.message : e}`, "error");
+            }
+          }
+
           // Pi core settings: setters already queued their writes; flush the
-          // manager's write queue and surface any persistence errors.
-          if ([...keys].some(isPiKey)) {
+          // manager's write queue and surface any persistence errors. The
+          // built-in-tools rows above persist through their own file write,
+          // not the manager — they never enter this branch.
+          if ([...keys].some((k) => isPiKey(k) && !k.startsWith(DEFAULT_TOOLS_PREFIX))) {
             try {
               await piSettings.flush();
               const errors = piSettings.drainErrors();

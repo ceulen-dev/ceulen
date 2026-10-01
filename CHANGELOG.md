@@ -18,6 +18,14 @@
   Applies immediately — config resolves per tool call, no reload.
 
 ## Unreleased
+- **config**: new **Tools → Built-in tools** section — one toggle per pi
+  built-in tool (`read`, `bash`, `powershell`, `edit`, `write`, `grep`,
+  `find`, `ls`) plus the built-in extension tools `codemode` and
+  `tool_search`; the stock four (`read`, `bash`, `edit`, `write`) default on.
+  Toggling writes the `defaultTools` setting (global settings.json; a
+  stock-equal selection deletes the key again) and applies to the current
+  session immediately — enabling grep/codemode no longer needs a settings
+  edit or a restart.
 - **composer**: the line above the band is now a full usage line — token
   stats + provider quota windows flush LEFT (`↑1.9M ↓377k R69M W2.0k CH99.6%
   · (router) R:59%/2H3M`), Generation Rate justified RIGHT (`⚡ N tok/s`),
