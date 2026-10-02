@@ -2,7 +2,7 @@
 
 **The Pi coding agent, fully dressed.**
 
-One extension bundle that turns [Pi](https://github.com/earendil-works/pi) into a fully equipped coding agent: a router provider, a second-model reviewer, long-term memory, usage display, themes, and a central settings panel — one install, one command surface, every module individually switchable.
+One extension bundle that turns [Pi](https://github.com/earendil-works/pi) into a fully equipped coding agent: a router provider, a second-model reviewer, long-term memory, usage display, themes, and a central settings panel — one install, one command surface, most modules individually switchable.
 
 Named for Ludolph van Ceulen, who computed π to 35 digits — they're carved on his tombstone.
 
@@ -100,10 +100,12 @@ Pick the input editor's look from `/config` → Appearance → Composer Shape: S
 ## Turning modules off
 
 ```json
-{ "ceulen": { "disabled": ["usage"] } }
+{ "ceulen": { "disabled": ["munin", "ponytail"] } }
 ```
 
 In `~/.pi/agent/settings.json` or a trusted project's `.pi/settings.json`. `/ceulen` lists what's active; `/config` toggles the same list. Individual tools can be toggled too (Tools tab). Disabled modules register nothing.
+
+The core set — router, usage, ux, classifier, composer, advisor, and the `/config` panel itself — is always on and never appears in the kill-switch list.
 
 ## License
 

@@ -48,8 +48,10 @@ export interface ModuleLoadDeps {
 export interface ModuleEntry {
   name: string;
   /** Core modules are always loaded — the kill-switch can't disable them and
-   *  /config shows no Enable row (composer owns the editor surface: a
-   *  half-configured composer is worse than none). */
+   *  /config shows no Enable row. Core is for modules with no meaningful
+   *  half-state: composer owns the editor surface, advisor's off-switch is its
+   *  model chain, usage reads the router provider, and the settings panel
+   *  itself (config) must stay reachable. */
   core?: boolean;
   /** OMP-taxonomy tab the module's /config sections live in — the single
    *  source for tab placement, synthesized Enable-only sections, and /ceulen
@@ -73,26 +75,28 @@ export interface ModuleEntry {
 export const MODULES: ModuleEntry[] = [
   // ── Providers ──────────────────────────────────────────────────────────
   // Router first: usage reads the `router` provider for usage display.
-  { name: "router", category: "Providers", describe: "Route requests to a yardmaster/OmniRoute endpoint and expose its models.", load: routerModule, config: routerConfig },
+  // CORE: usage depends on the router provider — a switch that can empty the
+  // catalogue out from under usage is a footgun, so the provider is always on.
+  { name: "router", core: true, category: "Providers", describe: "Route requests to a yardmaster/OmniRoute endpoint and expose its models.", load: routerModule, config: routerConfig },
   // Classifier right after router: its classify tool resolves decision models
   // from the router provider's registry catalog (needs router registered, not
   // the module object itself — order is for /config grouping readability).
-  { name: "classifier", category: "Model", describe: "System One decision models (Jev): classify tool + bash permission auto-approve, via router-discovered models.", load: classifierModule, config: classifierConfig, tools: ["classify"] },
+  { name: "classifier", core: true, category: "Model", describe: "System One decision models (Jev): classify tool + bash permission auto-approve, via router-discovered models.", load: classifierModule, config: classifierConfig, tools: ["classify"] },
   // Advisor right after classifier: second-model reviewer (turn-end notes +
   // the on-demand `advisor` tool) with a catalogue-backed model picker in /config.
   // CORE: the advisor is always loaded — its real off-switch is the model chain
   // (an empty `Primary model` row), so it needs no kill-switch row.
   { name: "advisor", core: true, category: "Model", describe: "Second-model reviewer: reviews each settled turn, injects severity-routed notes, plus an on-demand consult tool.", load: advisorModule, config: advisorConfig, tools: ["advisor"] },
   // ── Appearance ─────────────────────────────────────────────────────────
-  { name: "usage", category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
+  { name: "usage", core: true, category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
   { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },
-  { name: "ux", category: "Appearance", describe: "Anti-slop UI/UX design discipline: /ux modes, ux_audit tool, design skills. No status-bar footprint.", load: uxModule, config: uxConfig, tools: ["ux_audit"] },
+  { name: "ux", core: true, category: "Appearance", describe: "Anti-slop UI/UX design discipline: /ux modes, ux_audit tool, design skills. No status-bar footprint.", load: uxModule, config: uxConfig, tools: ["ux_audit"] },
   // ── Memory ─────────────────────────────────────────────────────────────
   { name: "munin", category: "Memory", describe: "Munin long-term memory tools (search/get/store/list/recent/delete/capabilities/share) + memory protocol. Config at project level.", load: muninModule, config: muninConfig, tools: [
     "munin_search", "munin_get", "munin_store", "munin_list", "munin_recent", "munin_delete", "munin_capabilities", "munin_share",
   ] },
   // ── Tasks ──────────────────────────────────────────────────────────────
-  { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, status, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
+  { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
   // ── Tools ──────────────────────────────────────────────────────────────
   { name: "serena", category: "Tools", describe: "Serena semantic code tools via a persistent Python worker.", load: serenaModule, tools: [
     "serena_status", "serena_list_tools", "serena_get_symbols_overview", "serena_find_symbol",
@@ -109,8 +113,10 @@ export const MODULES: ModuleEntry[] = [
   // ── Shell ──────────────────────────────────────────────────────────────
   { name: "rtk", category: "Shell", describe: "Route shell commands through RTK for token savings.", load: rtkModule },
   // ── Plugins ────────────────────────────────────────────────────────────
-  // Config last: it owns /config and reads the contrib map.
-  { name: "config", category: "Plugins", describe: "This panel — /config central settings for every module.", load: configModule },
+  // Config last: it owns /config and reads the contrib map. CORE: the panel is
+  // the only in-app way back from a misconfiguration — it can never be the
+  // module you accidentally switched off.
+  { name: "config", core: true, category: "Plugins", describe: "This panel — /config central settings for every module.", load: configModule },
 ];
 
 // ── Kill-switch settings ─────────────────────────────────────────────────────

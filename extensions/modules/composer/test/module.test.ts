@@ -286,28 +286,30 @@ describe("core module contract", () => {
     const entry = MODULES.find((m) => m.name === "composer")!;
     assert.equal(entry.core, true, "composer is core");
     assert.equal(isCore("composer"), true);
-    assert.equal(isCore("usage"), false);
+    assert.equal(isCore("munin"), false);
 
-    // A settings file that (wrongly) lists composer as disabled must not
+    // A settings file that (wrongly) lists a core module as disabled must not
     // disable it — readDisabled filters core modules out.
-    writeFileSync(settingsFile(), JSON.stringify({ ceulen: { disabled: ["composer", "usage"] } }), "utf8");
-    assert.deepEqual(readDisabled(), ["usage"], "core module filtered from the kill-switch");
+    writeFileSync(settingsFile(), JSON.stringify({ ceulen: { disabled: ["composer", "munin"] } }), "utf8");
+    assert.deepEqual(readDisabled(), ["munin"], "core module filtered from the kill-switch");
     writeFileSync(settingsFile(), "{}", "utf8");
   });
 
   it("writeDisabled never persists a core module", async () => {
     const { writeDisabled } = await import("../../../lib/registry.js");
-    writeDisabled(["composer", "usage"]);
-    assert.deepEqual((readSettings().ceulen as { disabled: string[] }).disabled, ["usage"]);
+    writeDisabled(["composer", "munin"]);
+    assert.deepEqual((readSettings().ceulen as { disabled: string[] }).disabled, ["munin"]);
     writeFileSync(settingsFile(), "{}", "utf8");
   });
 
   it("nextDisabled excludes core modules; withEnableRow adds no row for them", async () => {
     const { nextDisabled, withEnableRow } = await import("../../config/index.js");
     // working = enabled set; nextDisabled lists the NOT-enabled non-core modules.
-    assert.deepEqual(nextDisabled(new Set(["usage"])), ["router", "classifier", "ux", "munin", "ponytail", "serena", "fff", "rtk", "config"]);
+    assert.deepEqual(nextDisabled(new Set(["munin"])), ["ponytail", "serena", "fff", "rtk"]);
     assert.deepEqual(nextDisabled(new Set(["router", "classifier", "ux", "munin", "usage", "ponytail", "serena", "fff", "rtk", "config"])), [], "all-on → nothing disabled");
-    assert.ok(!nextDisabled(new Set()).includes("advisor"), "core (advisor) is never disableable");
+    for (const core of ["composer", "advisor", "router", "classifier", "usage", "ux", "config"]) {
+      assert.ok(!nextDisabled(new Set()).includes(core), `core (${core}) is never disableable`);
+    }
     const groups = [{ key: "composer", label: "Composer Shape", rows: [{ key: "composer.shape" }] }] as never;
     const out = withEnableRow(groups, "composer", "Composer shape.", new Set(["composer"]));
     assert.deepEqual(out[0]!.rows.map((r: { key: string }) => r.key), ["composer.shape"], "no Enable row for core");

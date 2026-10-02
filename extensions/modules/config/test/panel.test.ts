@@ -31,9 +31,9 @@ describe("registry kill-switch", () => {
   it("writeDisabled round-trips through the same file readDisabled resolves", async () => {
     try { unlinkSync(settingsPath()); } catch { /* ignore */ }
     const { readDisabled, writeDisabled, disabledSource } = await import("../../../lib/registry.js");
-    const written = writeDisabled(["usage"]);
+    const written = writeDisabled(["ponytail"]);
     assert.equal(written, settingsPath());
-    assert.deepEqual(readDisabled(), ["usage"]);
+    assert.deepEqual(readDisabled(), ["ponytail"]);
     assert.equal(disabledSource().isProject, false);
   });
 
@@ -58,10 +58,13 @@ describe("registry kill-switch", () => {
     assert.ok(!existsSync(settingsPath() + ".tmp"));
   });
 
-  it("deprecated \"sub\" alias reads as \"usage\"", async () => {
-    writeFileSync(settingsPath(), JSON.stringify({ ceulen: { disabled: ["sub"] } }));
+  it("deprecated \"sub\" alias still maps (to the now-core usage module, so it disables nothing)", async () => {
+    // A "sub" entry maps to "usage"; core modules are filtered, so only the
+    // non-core sibling survives — proving the alias resolved (an unknown
+    // string would have survived verbatim).
+    writeFileSync(settingsPath(), JSON.stringify({ ceulen: { disabled: ["sub", "ponytail"] } }));
     const { readDisabled } = await import("../../../lib/registry.js");
-    assert.deepEqual(readDisabled(), ["usage"]);
+    assert.deepEqual(readDisabled(), ["ponytail"]);
   });
 
   // Project scope: temp cwd + trust.json in the agent dir. readDisabled(cwd)/
@@ -85,9 +88,9 @@ describe("registry kill-switch", () => {
       assert.equal(source.path, projectSettings);
       assert.equal(source.isProject, true);
 
-      const written = writeDisabled(["config"], projectCwd);
+      const written = writeDisabled(["munin"], projectCwd);
       assert.equal(written, projectSettings, "write lands where the read resolves — never shadowed");
-      assert.deepEqual(readDisabled(projectCwd), ["config"]);
+      assert.deepEqual(readDisabled(projectCwd), ["munin"]);
       // Global file untouched by the project-scoped write.
       assert.deepEqual(JSON.parse(readFileSync(settingsPath(), "utf8")).ceulen.disabled, ["usage"]);
     });
@@ -129,15 +132,15 @@ describe("config module", () => {
     const { moduleEnableRow, nextDisabled } = await import("../index.js");
     const { MODULES } = await import("../../../lib/registry.js");
     const working = new Set(MODULES.map((m) => m.name));
-    const enable = moduleEnableRow("usage", "Usage footer.", working);
-    assert.equal(enable.key, "ceulen.disabled.usage");
+    const enable = moduleEnableRow("ponytail", "Lazy mode.", working);
+    assert.equal(enable.key, "ceulen.disabled.ponytail");
     assert.equal(enable.defaultValue, true);
 
-    // Toggle "usage" off via its row setter.
+    // Toggle "ponytail" off via its row setter.
     assert.equal(enable.value, true);
     enable.set(false);
-    assert.equal(working.has("usage"), false);
-    assert.deepEqual(nextDisabled(working), ["usage"]);
+    assert.equal(working.has("ponytail"), false);
+    assert.deepEqual(nextDisabled(working), ["ponytail"]);
 
     enable.set(true);
     assert.deepEqual(nextDisabled(working), []);
@@ -148,12 +151,12 @@ describe("config module", () => {
     const { MODULES } = await import("../../../lib/registry.js");
     const working = new Set(MODULES.map((m) => m.name));
     const groups = [
-      { key: "a", label: "Router", tab: "Providers", rows: [{ key: "router.baseUrl" }] },
-      { key: "b", label: "Models", tab: "Providers", rows: [{ key: "router.enableReasoning" }] },
+      { key: "a", label: "Ponytail", tab: "Tasks", rows: [{ key: "ponytail.defaultMode" }] },
+      { key: "b", label: "Models", tab: "Tasks", rows: [{ key: "ponytail.quietStartup" }] },
     ] as never;
-    const out = withEnableRow(groups, "router", "Routes requests.", working);
-    assert.deepEqual(out[0]!.rows.map((r) => r.key), ["ceulen.disabled.router", "router.baseUrl"]);
-    assert.deepEqual(out[1]!.rows.map((r) => r.key), ["router.enableReasoning"], "second section untouched");
+    const out = withEnableRow(groups, "ponytail", "Lazy mode.", working);
+    assert.deepEqual(out[0]!.rows.map((r) => r.key), ["ceulen.disabled.ponytail", "ponytail.defaultMode"]);
+    assert.deepEqual(out[1]!.rows.map((r) => r.key), ["ponytail.quietStartup"], "second section untouched");
   });
 
   it("saveContributions: only edited-key owners are invoked, and a thrower doesn't block siblings", async () => {
@@ -245,7 +248,19 @@ describe("config module", () => {
     const pi = {
       registerCommand: (_name: string, opts: { handler: typeof handler }) => { handler = opts.handler; },
     } as never;
-    const factories = new Map<string, () => never>();
+    const factories = new Map<string, () => never>([
+      // Router is core, so its Providers section comes from its OWN
+      // contribution (there is no synthesized Enable-only section).
+      [
+        "router",
+        () => ({
+          groups: () => [
+            { key: "router", label: "Router", tab: "Providers", rows: [{ key: "router.baseUrl", label: "Base URL", kind: "string", value: "" }] },
+          ],
+          save: async () => {},
+        }) as never,
+      ],
+    ]);
     const { default: configModule } = await import("../index.js");
     configModule(pi, { configContribs: factories } as never);
     assert.ok(handler, "handler registered");
@@ -358,11 +373,11 @@ describe("ponytail config contribution", () => {
 
   it("buildPonytailGroups has prefixed keys, enum values + row metadata", async () => {
     const { buildPonytailGroups } = await import("../../ponytail/index.js");
-    const cfg = { defaultMode: "full", quietStartup: false, hideStatus: false };
+    const cfg = { defaultMode: "full", quietStartup: false };
     const groups = buildPonytailGroups(cfg);
     assert.equal(groups[0]!.tab, "Tasks", "ponytail is a task/mode setting in OMP's taxonomy");
     const rows = groups.flatMap((g) => g.rows);
-    assert.deepEqual(rows.map((r) => r.key), ["ponytail.defaultMode", "ponytail.quietStartup", "ponytail.hideStatus"]);
+    assert.deepEqual(rows.map((r) => r.key), ["ponytail.defaultMode", "ponytail.quietStartup"]);
     // Closed value set + declared default: the panel cycles these, no free text.
     assert.deepEqual(rows[0]!.values, ["off", "lite", "full", "ultra"]);
     assert.equal(rows[0]!.defaultValue, "full");
@@ -381,11 +396,11 @@ describe("ponytail config contribution", () => {
       const ctx = { ui: { notify: () => {} } } as never;
       const cfg = ponytailConfig();
       for (const r of cfg.groups().flatMap((g) => g.rows)) {
-        if (r.key === "ponytail.hideStatus") r.set(true);
+        if (r.key === "ponytail.quietStartup") r.set(true);
       }
-      await cfg.save(new Set(["ponytail.hideStatus"]), ctx);
+      await cfg.save(new Set(["ponytail.quietStartup"]), ctx);
       const written = JSON.parse(readFileSync(join(ponytailHome, "ponytail", "config.json"), "utf8"));
-      assert.equal(written.hideStatus, true);
+      assert.equal(written.quietStartup, true);
       assert.equal(written.defaultMode, "lite"); // untouched fields preserved
     } finally {
       if (prevXdg === undefined) delete process.env.XDG_CONFIG_HOME;

@@ -1,15 +1,15 @@
 // ponytail module — lazy-senior-dev mode for Pi.
 //
 // Ported from pi-ponytail extensions/index.js (ESM JS → TS). Registers the
-// /ponytail mode switcher + /ponytail-* skill aliases, the status-bar
-// indicator, per-turn system-prompt injection, and subagent instruction
-// inheritance. Exports the pure helpers for tests.
+// /ponytail mode switcher + /ponytail-* skill aliases, per-turn system-prompt
+// injection, and subagent instruction inheritance. Renders NO status-bar
+// segment (the mode is visible via /ponytail status). Exports the pure helpers
+// for tests.
 
 import type {
   BeforeAgentStartEventResult,
   CustomToolCallEvent,
   ExtensionAPI,
-  ExtensionContext,
   SessionEntry,
 } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
@@ -18,7 +18,6 @@ import {
   RUNTIME_MODES,
   VALID_MODES,
   getDefaultMode,
-  getHideStatus,
   getQuietStartup,
   isDeactivationCommand,
   normalizeMode,
@@ -88,7 +87,6 @@ export { writeDefaultMode };
 export interface PonytailSettings {
   defaultMode: string;
   quietStartup: boolean;
-  hideStatus: boolean;
 }
 
 /** Build the ponytail panel groups over a working copy (mutated by row
@@ -114,18 +112,12 @@ export function buildPonytailGroups(cfg: PonytailSettings): PanelGroup[] {
           description: "Skip the startup mode banner. PONYTAIL_QUIET_STARTUP env overrides the saved value.",
           defaultValue: false,
         }),
-        row("ponytail.hideStatus", "Hide status bar", "toggle", cfg.hideStatus, (v) => {
-          cfg.hideStatus = Boolean(v);
-        }, {
-          description: "Hide the status-bar mode segment. PONYTAIL_HIDE_STATUS env overrides the saved value.",
-          defaultValue: false,
-        }),
       ],
     },
   ];
 }
 
-const OWNED_KEYS = ["ponytail.defaultMode", "ponytail.quietStartup", "ponytail.hideStatus"];
+const OWNED_KEYS = ["ponytail.defaultMode", "ponytail.quietStartup"];
 
 /** Ponytail's ModuleConfig for the central /config panel. Row descriptions +
  *  warnings disclose env precedence and next-session timing; the save notify
@@ -134,7 +126,6 @@ export function ponytailConfig(): ModuleConfig {
   const before: PonytailSettings = {
     defaultMode: getDefaultMode(),
     quietStartup: getQuietStartup(),
-    hideStatus: getHideStatus(),
   };
   const working = structuredClone(before);
   return {
@@ -142,12 +133,8 @@ export function ponytailConfig(): ModuleConfig {
     save: async (edited, ctx) => {
       if (!OWNED_KEYS.some((k) => edited.has(k))) return;
 
-      // Bools first: they're independent of the mode's validity.
-      if (working.quietStartup !== before.quietStartup || working.hideStatus !== before.hideStatus) {
-        writeConfigBools({
-          quietStartup: working.quietStartup !== before.quietStartup ? working.quietStartup : undefined,
-          hideStatus: working.hideStatus !== before.hideStatus ? working.hideStatus : undefined,
-        });
+      if (working.quietStartup !== before.quietStartup) {
+        writeConfigBools({ quietStartup: working.quietStartup });
       }
 
       let modeNote = "";
@@ -167,7 +154,7 @@ export function ponytailConfig(): ModuleConfig {
 
       // Row descriptions already disclose env precedence; the notify adds the
       // caveat only when an env var actually shadowed this save.
-      const envBooleans = process.env.PONYTAIL_HIDE_STATUS || process.env.PONYTAIL_QUIET_STARTUP;
+      const envBooleans = process.env.PONYTAIL_QUIET_STARTUP;
       ctx.ui.notify(
         `Ponytail config saved.${modeNote}` +
           (envBooleans ? " PONYTAIL_* env vars override the saved booleans." : "") +
@@ -193,48 +180,14 @@ export default function ponytailExtension(pi: ExtensionAPI) {
 
   let currentMode: PonytailMode = DEFAULT_MODE;
   let configuredDefaultMode: PonytailMode = getDefaultMode();
-  let hideStatus = getHideStatus();
 
-  // -- Status bar --
-  function syncStatus(ctx: ExtensionContext | undefined | null) {
-    if (hideStatus) return;
-    if (!ctx?.ui?.setStatus) return;
-    // ponytail: try/catch guards against pi-web theme proxy throwing before initTheme (#336).
-    let theme: ExtensionContext["ui"]["theme"] | undefined;
-    try {
-      theme = ctx.ui.theme;
-      if (!theme?.fg) return;
-    } catch {
-      return;
-    }
-    if (currentMode === "off") {
-      try {
-        ctx.ui.setStatus("ponytail", "");
-      } catch {
-        return;
-      }
-      return;
-    }
-    {
-      const levelIcons: Record<string, string> = { lite: "🌿", full: "⚡", ultra: "🔥", review: "🔍" };
-      const icon = levelIcons[currentMode] || "";
-      const label = currentMode.toUpperCase();
-      try {
-        ctx.ui.setStatus("ponytail", " 🐴 " + theme.fg("muted", "ponytail: ") + theme.fg("text", icon + " " + label));
-      } catch {
-        return;
-      }
-    }
-  }
-
-  const setMode = (mode: string, ctx?: ExtensionContext | null) => {
+  const setMode = (mode: string) => {
     const normalized = normalizePersistedMode(mode);
     if (!normalized) return;
     // ponytail: 'review' is session-only — it updates the live session but must
     // not ride the persisted-entry channel (a reload can't resurrect it).
     if (normalized !== "review") pi.appendEntry("ponytail-mode", { mode: normalized });
     currentMode = normalized;
-    syncStatus(ctx);
   };
 
   pi.registerCommand("ponytail", {
@@ -254,7 +207,7 @@ export default function ponytailExtension(pi: ExtensionAPI) {
       }
 
       if (parsed.type === "set-mode") {
-        setMode(parsed.mode!, ctx);
+        setMode(parsed.mode!);
         return;
       }
 
@@ -280,16 +233,8 @@ export default function ponytailExtension(pi: ExtensionAPI) {
 
     const text = String(event?.text || "");
     if (currentMode !== "off" && isDeactivationCommand(text)) {
-      setMode("off", ctx);
+      setMode("off");
     }
-  });
-
-  pi.on("agent_start", async (_event, ctx) => {
-    syncStatus(ctx);
-  });
-
-  pi.on("agent_end", async (_event, ctx) => {
-    syncStatus(ctx);
   });
 
   pi.on("session_start", async (_event, ctx) => {
@@ -299,9 +244,7 @@ export default function ponytailExtension(pi: ExtensionAPI) {
       (typeof sessionManager?.getEntries === "function" ? sessionManager.getEntries() : []) ??
       [];
     configuredDefaultMode = getDefaultMode();
-    hideStatus = getHideStatus();
     currentMode = resolveSessionMode(entries, configuredDefaultMode);
-    syncStatus(ctx);
     if (!getQuietStartup()) {
       ctx?.ui?.notify?.(`Ponytail loaded: ${currentMode}`, "info");
     }

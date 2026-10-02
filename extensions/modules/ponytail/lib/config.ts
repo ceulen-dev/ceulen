@@ -117,10 +117,6 @@ export function getQuietStartup(): boolean {
   return readConfigBool("PONYTAIL_QUIET_STARTUP", "quietStartup");
 }
 
-export function getHideStatus(): boolean {
-  return readConfigBool("PONYTAIL_HIDE_STATUS", "hideStatus");
-}
-
 export function writeDefaultMode(mode: string): RuntimeMode | null {
   const normalized = normalizeMode(mode);
   if (!normalized) return null;
@@ -134,10 +130,9 @@ export function writeDefaultMode(mode: string): RuntimeMode | null {
 
 /** Merge boolean flags into the config file (read-modify-write, atomic value
  *  write; the module's memoized read cache is invalidated). */
-export function writeConfigBools(patch: { quietStartup?: boolean; hideStatus?: boolean }): void {
+export function writeConfigBools(patch: { quietStartup?: boolean }): void {
   const config = readConfig();
   if (patch.quietStartup !== undefined) config.quietStartup = patch.quietStartup;
-  if (patch.hideStatus !== undefined) config.hideStatus = patch.hideStatus;
   writeConfig(config);
 }
 

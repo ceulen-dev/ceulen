@@ -158,7 +158,7 @@ field's source without printing the key. Env contract is stable `MUNIN_*`
 
 ## Settings / kill-switch
 
-`ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). `/config` writes to whichever file currently carries the `ceulen` section (see the config-module section) — never a shadowed layer. The deprecated `"sub"` key is still treated as `"usage"`. **CORE modules** (`ModuleEntry.core: true`, today `composer`, `advisor`) are always loaded: `readDisabled`/`writeDisabled` filter them (a stale entry can't disable one), `nextDisabled` never lists them, and the config panel adds no Enable row. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
+`ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). `/config` writes to whichever file currently carries the `ceulen` section (see the config-module section) — never a shadowed layer. The deprecated `"sub"` key is still treated as `"usage"`. **CORE modules** (`ModuleEntry.core: true`, today `composer`, `advisor`, `router`, `classifier`, `usage`, `ux`, `config`) are always loaded: `readDisabled`/`writeDisabled` filter them (a stale entry can't disable one), `nextDisabled` never lists them, and the config panel adds no Enable row. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
 
 ## Yardmaster usage contract (usage module)
 
@@ -166,7 +166,7 @@ With `router.baseUrl` set to a yardmaster instance, the usage module polls `GET 
 
 ## Ponytail config (ponytail module)
 
-Ponytail resolves its default mode from `PONYTAIL_DEFAULT_MODE`, then `~/.config/ponytail/config.json` (`{"defaultMode": "full", "quietStartup": false, "hideStatus": false}`; XDG_CONFIG_HOME respected), then `full`. `PONYTAIL_HIDE_STATUS`, `PONYTAIL_QUIET_STARTUP`, `PONYTAIL_SUBAGENT_SCOPE=off` override the config booleans. Config surface is deliberately NOT namespaced to `ceulen.*` — the `ponytail.*`/`PONYTAIL_*` names are the module's stable contract.
+Ponytail resolves its default mode from `PONYTAIL_DEFAULT_MODE`, then `~/.config/ponytail/config.json` (`{"defaultMode": "full", "quietStartup": false}`; XDG_CONFIG_HOME respected), then `full`. `PONYTAIL_QUIET_STARTUP`, `PONYTAIL_SUBAGENT_SCOPE=off` override the config booleans. The module renders NO status-bar segment (the mode is visible via `/ponytail status`), so upstream's `PONYTAIL_HIDE_STATUS` env and the `hideStatus` config key are dropped. Config surface is deliberately NOT namespaced to `ceulen.*` — the `ponytail.*`/`PONYTAIL_*` names are the module's stable contract.
 
 ## UX config (ux module)
 
@@ -350,7 +350,7 @@ trusted (untrusted packages never load, so they must not show as active).
 Contributions today: **router** (`router.baseUrl`, `router.enableReasoning` —
 save re-registers the provider, force-refreshes the catalog, revalidates the
 active model; **Providers** tab, `Router` section) and **ponytail**
-(`ponytail.defaultMode`, `ponytail.quietStartup`, `ponytail.hideStatus` —
+(`ponytail.defaultMode`, `ponytail.quietStartup` —
 writes its own `~/.config/ponytail/config.json`; applies next session;
 **Tasks** tab, `Ponytail` section) and **munin** (`munin.project`,
 `munin.baseUrl`, `munin.apiKey` (masked, gitignore warning) — writes the
@@ -361,10 +361,11 @@ read per tool call, no reload); **Memory** tab, `Munin` section) and
 GLOBAL `advisor` section (legacy `pi-advisor` migrated on first save), applied
 live through the module bridge; **Model** tab, `Advisor` section) and
 **classifier** (`classifier.model`, `classifier.permission.*`; **Model** tab,
-`Classifier (Jev)` section). Modules
-without a contribution factory get
-a synthesized Enable-only section (usage → **Appearance** · `Usage footer`;
-config → **Plugins** · `Ceulen config`). The per-module kill-switch rows are
+`Classifier (Jev)` section). A NON-CORE module
+without a contribution factory gets
+a synthesized Enable-only section (serena → **Tools** · `Serena`, fff →
+**Tools** · `FFF search`, rtk → **Shell** · `RTK`). The per-module kill-switch
+rows are
 NOT a standalone tab: `withEnableRow()` prepends the module's Enable row (key
 `ceulen.disabled.<name>`, warning "Takes effect after /reload") to its own
 section — a feature is turned on where it is configured. **composer**
