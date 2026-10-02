@@ -1,6 +1,25 @@
 # Changelog
 
-## 0.6.0
+## Unreleased
+
+- **security hardening** across the bundle:
+  - **serena**: the Python worker's env no longer merges an *untrusted*
+    checkout's cwd `.env` (it could set `NODE_OPTIONS`/`PYTHONPATH` and reach
+    the language servers the worker spawns — RCE class). Cwd dot-files load
+    only for trusted projects now, same rule as the bundle's `.env`
+    ingestion; global agent-dir dot-files always load.
+  - **classifier**: the bash verdict hook is reframed honestly as
+    audit/annotation only. pi 1.0.0 core has no per-call approval prompt
+    for `tool_call` to skip, so the previous "auto-approve/enforce" framing
+    described behavior that never existed — nothing was ever approved or
+    denied. Behavior is unchanged (verdict + audit +, in enforce mode, a
+    transcript annotation); `classifier.log` is now written `0600`.
+  - **usage**: router settings resolve through `PI_CODING_AGENT_DIR`
+    (was hardcoded `~/.pi/agent/settings.json`, so usage fetches could hit
+    the wrong endpoint under an alternate agent dir).
+  - **munin**: the vendored SDK's `capabilities` fetch now arms the same
+    timeout as `invoke()` (a dead server could hang every
+    `ensureCapability` tool call forever).
 
 - **munin** (new module, ported from `@bacnh85/pi-munin` 0.5.12): Munin
   long-term memory — eight `munin_*` tools (search/get/store/list/recent/
@@ -16,8 +35,6 @@
   with a gitignore warning), read only when the project is trusted; precedence
   per-call params > `MUNIN_*` env > project file > global file > default.
   Applies immediately — config resolves per tool call, no reload.
-
-## Unreleased
 - **advisor** (new module, ported from `@bacnh85/pi-advisor` 0.3.8): a
   second-model reviewer — after each settled turn an isolated reviewer reads the
   transcript and may emit ONE severity-routed note (`nit` / `concern` /

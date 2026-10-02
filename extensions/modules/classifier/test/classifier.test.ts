@@ -344,7 +344,7 @@ describe("permission hook", () => {
     } finally { fx2.cleanup(); }
   });
 
-  it("enforce + confident → allow (undefined), audit written; registry answers parsed", async () => {
+  it("enforce + confident → pass-through (undefined) with audit + notify; registry answers parsed", async () => {
     const fx = await hookFixture(stubRegistry({
       classify: async (_m, context) => {
         const qs = Object.keys((context as { questions: Record<string, unknown> }).questions);
@@ -359,7 +359,7 @@ describe("permission hook", () => {
     } finally { fx.cleanup(); }
   });
 
-  it("observe mode logs but never allows; low score falls through, never denies", async () => {
+  it("observe mode logs only; low score falls through — neither mode ever blocks", async () => {
     const fx = await hookFixture(stubRegistry(), { permission: { enabled: true, mode: "observe", threshold: 0.9 } });
     try {
       assert.equal(await fx.call("bun test"), undefined);

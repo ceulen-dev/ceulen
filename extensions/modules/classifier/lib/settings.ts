@@ -36,9 +36,9 @@ function settingsPath(): string {
   return join(agentDir(), "settings.json");
 }
 
-/** Read the `classifier` settings. Global only — these rows only ever REDUCE
- *  prompts; a repo file must not flip enforcement. Defaults match pi-classifier
- *  (enabled/enforce/0.9 since the 0.2.0 live audit). Exported for tests. */
+/** Read the `classifier` settings. Global only — a repo file must not flip
+ *  verdict behavior. Defaults match pi-classifier (enabled/enforce/0.9 since
+ *  the 0.2.0 live audit). Exported for tests. */
 export function getClassifierSettings(): ClassifierSettings {
   let raw: Record<string, unknown> = {};
   try {

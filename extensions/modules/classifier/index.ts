@@ -9,10 +9,14 @@
  * the shared ROUTER credential, never rejects).
  *
  * 1. `classify` tool: the agent sends {state, questions}, gets typed answers.
- * 2. Permission auto-approve hook: bash commands Jev is confident are
- *    reversible AND serve the task run without prompting. Static RISKY list
- *    first; never auto-denies; every failure falls back to the normal prompt.
- *    Default ON in "enforce" mode; set "mode": "observe" to only log.
+ * 2. Bash verdict hook: classifies each bash command (reversible + serves
+ *    the task) and AUDITS the verdict to ~/.pi/agent/classifier.log. Static
+ *    RISKY list first; never blocks; every failure falls through safely.
+ *    NOTE: pi 1.0.0 core has NO built-in per-call approval prompt
+ *    (docs/security.md) and `tool_call` can only block, never approve — so
+ *    this hook is an observer/auditor, not a permission gate. "enforce" vs
+ *    "observe" only changes whether confident verdicts get a visible
+ *    annotation in the transcript; neither mode changes execution.
  *
  * Config: `classifier` section of ~/.pi/agent/settings.json (global only —
  * see lib/settings.ts). /config owns the rows (Model tab → Classifier).
@@ -83,13 +87,15 @@ export function createVerdictCache(cap = 100) {
   };
 }
 
-/** Audit line per decision. Best-effort: never throws into the tool path. */
+/** Audit line per decision. Best-effort: never throws into the tool path.
+ *  0600 — the log records full bash commands and task text, same
+ *  permission discipline as pi's settings/auth files. */
 function audit(entry: Record<string, unknown>): Promise<void> {
   try {
     const dir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
     // ponytail: async write so the tool_call hot path never blocks. Never rejects.
     return mkdir(dir, { recursive: true })
-      .then(() => appendFile(join(dir, "classifier.log"), JSON.stringify({ ts: Date.now(), pid: process.pid, ...entry }) + "\n"))
+      .then(() => appendFile(join(dir, "classifier.log"), JSON.stringify({ ts: Date.now(), pid: process.pid, ...entry }) + "\n", { mode: 0o600 }))
       .catch(() => {});
   } catch {
     return Promise.resolve(); // logging must never break the command
@@ -272,18 +278,18 @@ export default function (pi: ExtensionAPI) {
 
     const decision = cached !== undefined ? cached : await decide();
 
-    // Observe: log the would-be decision, always fall through. (decide() already audited.)
-    if (s.permission.mode !== "enforce") return undefined;
-
-    // Enforce: confident yes → silent allow (undefined). Everything else —
-    // low score, Jev error, missing key — leaves the normal prompt. NEVER deny.
-    if (decision?.approve) {
+    // Both modes only annotate; neither changes execution (pi 1.0.0 has no
+    // approval prompt for tool_call to skip — see module docstring). Enforce
+    // surfaces confident verdicts in the transcript so a human reviewing the
+    // session sees the classifier vouched for the command; observe stays
+    // log-only. NEVER blocks, NEVER denies.
+    if (s.permission.mode === "enforce" && decision?.approve) {
       try {
-        ctx.ui.notify(`classifier auto-approved: ${command.slice(0, 80)}`, "info");
+        ctx.ui.notify(`classifier verdict: safe (${command.slice(0, 80)})`, "info");
       } catch {
         /* non-tui */
       }
     }
-    return undefined; // fall through to Pi's normal flow in every branch
+    return undefined;
   });
 }

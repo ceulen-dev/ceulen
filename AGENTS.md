@@ -46,8 +46,9 @@ provider and merges `GET <router.baseUrl>/v1/systemone/models` (404-fail-open)
 into the catalog as `type: "classifier"` entries; models-store.json persists the
 MIXED list and the offline restore branches on `type === "classifier"` (chat
 entries keep the vision/reasoning remap). The classifier module itself has no
-endpoint and no key code: the `classify` tool and the bash permission
-auto-approve hook resolve models via `modelRegistry.getAvailableOfType/findOfType`
+endpoint and no key code: the `classify` tool and the bash verdict
+(audit-only — pi 1.0.0 has no per-call approval prompt, so the hook annotates
+and logs, never gates) resolve models via `modelRegistry.getAvailableOfType/findOfType`
 and ask through `modelRegistry.classify()` (never rejects). Settings stay in the
 GLOBAL `classifier` section (`model`, `permission.{enabled,mode,threshold}` —
 same keys/values as pi-classifier, migration-free; `planGate` is left untouched

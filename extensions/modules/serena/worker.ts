@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { loadDotenvValues } from "./lib/env";
+import { isProjectTrusted } from "../../lib/registry.js";
 
 export type SerenaWorkerResponse = {
   id: string | null;
@@ -710,7 +711,11 @@ export class SerenaWorkerClient {
         // rest of the monorepo. process.env always wins; first dot file wins.
         // SERENA_USAGE_REPORTING defaults to "false" inside the Python bridge
         // (os.environ.setdefault), so dot-file opt-in works without a TS-side override.
-        env: { ...process.env, ...loadDotenvValues(process.cwd()) },
+        // SECURITY: cwd .env files are untrusted repo content (they can set
+        // NODE_OPTIONS/PYTHONPATH and reach the language servers this worker
+        // spawns) — they are only merged when the project is trusted (same rule
+        // as the bundle's lib/env.ts); the global agent-dir dot files always load.
+        env: { ...process.env, ...loadDotenvValues(process.cwd(), isProjectTrusted(process.cwd())) },
         stdio: "pipe",
       });
       this.process = proc;

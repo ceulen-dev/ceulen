@@ -2,7 +2,9 @@
 // types.d.ts) — 152 lines, zero deps, so the bundle keeps its no-runtime-deps rule.
 // Local changes vs upstream: capabilities cache is keyed by `${baseUrl}|${apiKey}`
 // (upstream cached one global `globalThis.__munin_caps`, which went stale when a
-// user switched munin servers per project). Upgrade = re-vendor this one file.
+// user switched munin servers per project), and fetchCapabilities arms a timeout
+// like invoke() (upstream could hang forever on a dead server).
+// Upgrade = re-vendor this one file.
 
 export type MuninAction = "store" | "retrieve" | "search" | "list" | "recent" | "share" | "versions" | "rollback" | "encrypt" | "decrypt" | "diff" | "delete" | "acknowledge_setup";
 
@@ -72,13 +74,14 @@ export class MuninTransportError extends Error {
   }
 }
 
-export async function fetchCapabilities(baseUrl: string, apiKey: string | undefined, fetchImpl: typeof fetch = fetch): Promise<MuninCapabilities> {
+export async function fetchCapabilities(baseUrl: string, apiKey: string | undefined, fetchImpl: typeof fetch = fetch, timeoutMs = DEFAULT_TIMEOUT_MS): Promise<MuninCapabilities> {
   const response = await fetchImpl(`${baseUrl}/api/mcp/capabilities`, {
     method: "GET",
     headers: {
       "Content-Type": "application/json",
       ...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
     },
+    signal: AbortSignal.timeout(timeoutMs),
   }).catch((error) => {
     throw new MuninTransportError(`Failed to call capabilities endpoint: ${String(error)}`);
   });
@@ -119,7 +122,7 @@ export class MuninClient {
     if (!forceRefresh && globalThis.__munin_caps?.key === cacheKey) {
       return globalThis.__munin_caps.caps;
     }
-    const caps = await fetchCapabilities(this.baseUrl, this.apiKey, this.fetchImpl);
+    const caps = await fetchCapabilities(this.baseUrl, this.apiKey, this.fetchImpl, this.timeoutMs);
     globalThis.__munin_caps = { key: cacheKey, caps };
     return caps;
   }

@@ -2,17 +2,9 @@
 
 **The Pi coding agent, fully dressed.**
 
-Pi's minimal core + one bundle extension carrying the complete toolkit, wired behind a single `/ceulen` command. Named for Ludolph van Ceulen, who computed π to 35 digits — they're carved on his tombstone.
+One extension bundle that turns [Pi](https://github.com/earendil-works/pi) into a fully equipped coding agent: a router provider, a second-model reviewer, long-term memory, usage display, themes, and a central settings panel — one install, one command surface, every module individually switchable.
 
-## What it is
-
-A [Pi](https://github.com/earendil-works/pi) distro in the form of one extension bundle:
-
-- **One install** — the suite ships as a unit
-- **One surface** — modules register into Pi's native UX: tools, commands, events
-- **Selective adoption** — every module has an individual kill-switch; disable what you don't use
-- **No core patches** — Pi's public extension API only, so upstream upgrades stay drop-in
-- **Zero runtime dependencies** — everything is vendored
+Named for Ludolph van Ceulen, who computed π to 35 digits — they're carved on his tombstone.
 
 ## Install
 
@@ -20,173 +12,98 @@ A [Pi](https://github.com/earendil-works/pi) distro in the form of one extension
 pi install npm:ceulen
 ```
 
-Add `-l` to install into the current project instead of your user scope. Update with `pi update --extensions`. Then start Pi in your project directory — ceulen's modules load automatically.
+Add `-l` to install into the current project instead of your user scope. Update with `pi update --extensions`. Then start Pi in your project — the modules load automatically.
+
+## Quick start
+
+```sh
+/config                  # one panel for pi core + every ceulen module
+/ceulen                  # which modules are active
+```
+
+Most modules work out of the box. Two need credentials:
+
+- **router** — set `router.baseUrl` (via `/config` → Providers, or `ROUTER_BASE_URL` env), then `/login router`.
+- **munin** — set project + API key via `/config` → Memory (saved to `<repo>/.pi/settings.json`).
 
 ## Modules
 
 ### router — any OpenAI-compatible router as a Pi provider
 
-Registers the generic `router` provider (models via `GET /v1/models`, chat via `/v1/chat/completions`) against 9router, OmniRoute, yardmaster, or any OpenAI-compatible router.
+Use 9router, OmniRoute, yardmaster, or any OpenAI-compatible endpoint as a normal Pi provider: models appear in `/model`, chat goes through `/v1/chat/completions`.
 
-- Config: `router.baseUrl` in `~/.pi/agent/settings.json` (or `ROUTER_BASE_URL` env)
-- Auth: `/login router` in Pi (or `ROUTER_API_KEY` env)
-- Commands: `/router-status`, `/router-model` — settings via `/config` (Providers tab)
+- Config: `/config` → Providers (base URL + thinking levels; a save re-registers and refreshes live)
+- Auth: `/login router` or `ROUTER_API_KEY` env
+- Commands: `/router-status`, `/router-model`
 
-**System One decision models (Jev)**: if the router serves `GET /v1/systemone/models` (yardmaster does), the catalog also lists those ids as `type: "classifier"` models — visible to `modelRegistry.getModelsOfType("classifier", "router")`, never in the chat `/model` picker. Plain OmniRoute routers 404 there and keep a chat-only catalog.
+If the router serves System One decision models (yardmaster's `GET /v1/systemone/models`), they're listed as classifier models for the `classify` tool — never mixed into the chat picker.
 
-### classifier — System One decision models (Jev)
+### classifier — decision models (Jev) for typed answers
 
-Ported from `@bacnh85/pi-classifier`, now riding the model registry: the `classify` tool and the bash permission auto-approve hook resolve decision models from the router provider's catalog and ask through `modelRegistry.classify()` — same credential as chat, no separate baseUrl/API key. Static RISKY list first, verdict cache, observe/enforce with a threshold, never denies, audit lines in `classifier.log`.
+The `classify` tool asks a System One decision model typed questions (yes-probability, multiple choice with confidence, scored position) and gets calibrated answers instead of prose — useful for routing, verification, and gating decisions inside scripts and codemode.
 
-- Tool: `classify` (per-tool toggleable in `/config`)
-- Config: `classifier.model` (empty = first available), `classifier.permission.*` — global settings; rows in `/config` (Model tab)
-- Needs the router module configured; without it the tool errors with remediation text. `planGate` lives with pi-plan (future port).
+It also audits bash commands (reversible? serves the task?) to `~/.pi/agent/classifier.log`. This is **observation only** — it never blocks or approves anything.
 
-### advisor — second-model reviewer
+- Config: `/config` → Model → Classifier (Jev)
+- Needs the router module configured
 
-Ported from `@bacnh85/pi-advisor`: after every settled turn with real work, an isolated reviewer model reads the transcript and may emit **one** severity-routed note — `nit` (consider), `concern` (address this or say why not), `blocker` (fix before continuing) — steered into the session as a follow-up turn, or deferred to the next turn (LLM-visible) while the post-steer calm-down window is open. An emission guard drops content-free phrases (Unicode-folded, omp-parity filler list), dedupes repeated notes (severity escalation still passes) and rate-limits to one note per cycle; the reviewer prompt bans the classic noise classes (restating errors the agent already sees, user-intent/ceremony advice, scope policing, unsolicited back-compat, second-guessing, partial-work critique) and requires cited evidence; the reviewer never uses the primary model, skips trivial turns (fewer than `minToolCalls` new tool calls), pauses after 3 consecutive failures, stays out of headless runs, and re-primes cursor + guard on compaction/session switch. `/advisor status` shows cumulative token/cost usage; the consult tool reports the usage of its own call.
+### advisor — a second pair of eyes
 
-- Tool: `advisor` — consult the configured chain on demand (per-tool toggleable in `/config`)
-- Chain: ordered fallback (`provider/id`, optional `:level` per entry) — a rate-limited or dead candidate hands the review to the next
-- Config: `/config` → **Model** → Advisor — Review settled turns · Primary model (catalogue picker) · Thinking · Fallback chain · min tool calls · immune turns · Consult tool (register the on-demand `advisor` tool). Saved to the global `advisor` setting, applied live, no `/reload`; a trusted project's `.pi/settings.json` `advisor` section overrides it. Always loaded (core module); the off-switch is an empty primary model
-- Commands: `/advisor [model[, model…]|models|on|off|watch-off|status]` — `on`/`off`/`watch-off` are session-scoped overrides
+After each turn with real work, a separate reviewer model reads the transcript and may raise **one** note — `nit` (consider), `concern` (address or justify), `blocker` (fix first) — or stay silent. A dedupe/rate-limit guard keeps it quiet; the reviewer never uses your primary model.
 
-### usage — subscription-usage footer
+- Tool: `advisor` — consult the reviewer on demand
+- Config: `/config` → Model → Advisor (reviewer model, fallback chain, watch knobs — applies live)
+- Commands: `/advisor [model[, model…]|models|on|off|status]`
+- Turn it off: clear the Primary model row
 
-A status footer showing subscription/provider usage (5-hour, weekly, monthly windows, credits). Commands: `/usage` (usage detail), `/context` (context-window detail).
+### usage — subscription usage in the footer
 
-**Yardmaster**: if `router.baseUrl` points at a yardmaster instance, the footer polls `GET <baseUrl>/usage?provider=<prefix>` (falling back to the aggregate `GET /usage`, then OmniRoute's `om-usage` endpoint) and renders remaining % per window plus credit balance:
+A status footer with provider usage: 5-hour / weekly / monthly windows, credits, and a generation-rate indicator. `/usage` for detail, `/context` for a context-window breakdown. Supports openai-codex, opencode-go, z.ai, Command Code, and router/yardmaster (needs a key with usage permission).
 
-```
-Router · command-code 5h:82% W:64% M:31% M:$12.40
-```
+### composer — a proper input editor
 
-Needs a yardmaster API key with the **usage** permission — the same key you `/login router` with works if it has that permission.
+Pick the input editor's look from `/config` → Appearance → Composer Shape: Status Band (default), Rounded Box, Claude Code, Pi, Borderless, and more — with live preview while you browse. Status-bearing shapes show model, directory, git branch + working-tree state, generation rate, and context usage in one strip. Always on.
 
-### composer — Composer Shape for the input editor
+### munin — long-term memory
 
-Re-chrome Pi's input editor from `/config` (Appearance → Composer Shape) with
-OMP's full composer vocabulary — **Status Band** (default) · **Rounded Box** ·
-**Claude Code** · **Pi** · **Borderless** · **Top Rule Dock** · **Compact
-Field** · **Accent Rail** — each with OMP's own label and one-line
-description in the selection menu. Browsing the Shape row previews the shape
-right in the panel (rendered through the same chrome builders the live editor
-uses — no drift); Enter applies it to the running editor immediately — text,
-autocomplete and all app keybindings intact (the custom editor extends Pi's
-`CustomEditor`) — and persists `composer.shape` to the global settings.json.
-Status-bearing shapes (Band, Box, Claude, Top Rule Dock) show OMP's stock
-status split, every segment carrying its icon (OMP's glyph set) — left group:
-`π` brand · `(provider) model (thinking level)` · `📁` `~/`-relative directory · `⑂` git branch with
-working-tree counts (`*3` unstaged / `+1` staged / `?2` untracked, warning
-when dirty) · `⚡` Generation Rate (last response); right group: the context
-window (`0.0%/1.0M (auto)`, color-stepped at 70%/90%). On the band the fill
-covers the status chip only (the context figure sits on the bare surface), so
-the band reads as a status strip rather than a title bar. On those
-shapes the module also **replaces Pi's built-in footer** so the same info is
-not printed twice: the band additionally carries the session token stats
-(`↑40k ↓44 R64 CH0.2%`) and provider quota windows (`(router) R:59%/2H3M`,
-minute-precision countdowns; usage module feeds it via a shared store), so
-the narrowed footer keeps only the other extensions' status lines (rtk,
-serena, ux, accordion, …). Shapes without an embedded band (Pi, Borderless,
-Compact Field, Accent Rail) keep Pi's native footer untouched. The working
-spinner stays visible in every shape. **Core module**: always loaded, no
-kill-switch — a half-configured composer is worse than none.
+`munin_search` / `munin_get` / `munin_store` / `munin_list` / `munin_recent` / `munin_share` / `munin_delete` / `munin_capabilities`, plus a memory protocol that teaches the agent when to search and what's worth storing. `/munin-status` shows where each config field comes from (never the key itself).
 
-- Config: `composer.shape` in `~/.pi/agent/settings.json` — via `/config` (Appearance tab)
+- Config: `/config` → Memory — **project-level** (`<repo>/.pi/settings.json`; add it to `.gitignore`). Read only when the project is trusted; `MUNIN_*` env vars override.
 
 ### ponytail — lazy-senior-dev mode
 
-Lazy mode for the agent itself: `/ponytail off|lite|full|ultra|review` switches the over-engineering discipline level (persisted per session); `stop ponytail` / `normal mode` deactivates. The active level is injected into the system prompt each turn, shown in the status bar, and inherited by subagents. Ships the six `ponytail*` skills (`/ponytail-review|audit|gain|debt|help`).
+`/ponytail off|lite|full|ultra` switches an over-engineering discipline: simplest solution that works, stdlib first, no speculative abstraction. Also ships `/ponytail-review`, `/ponytail-audit`, `/ponytail-debt`, `/ponytail-gain` skills. Deactivate with `stop ponytail`.
 
-- Config: `~/.config/ponytail/config.json` or `PONYTAIL_*` envs
-- Command: `/ponytail [mode|status]` — default mode via `/config` (Tasks tab)
+### ux — anti-slop UI discipline
 
-### ux — anti-slop UI/UX design discipline
+`/ux off|lite|strict` injects a UI design method (tokens only, full interaction states, no AI-slop tells) for any UI work; `strict` blocks handoff until the deterministic `ux_audit` tool passes (APCA contrast, token, and state gates — no model needed). Ships the `ux-*` skills. Deactivate with `stop ux`.
 
-Design discipline for UI work: `/ux off|lite|strict` switches the level (persisted per session; `stop ux` / `normal mode` deactivates). The active level injects the ux-design method into the system prompt each turn — tokens only, named elevation, full interaction states, no AI-slop tells — and `strict` additionally blocks handoff until the `ux_audit` tool passes (deterministic APCA-contrast/token/state/slop gates, no model needed). Ships the four `ux-*` skills (`ux-design`, `ux-presets`, `ux-routing`, `ux-capture`). Renders **no status-bar segment**.
+### serena / fff / rtk — code navigation & search (bundled tools)
 
-- Config: `~/.config/pi-ux/config.json` or `PI_UX_*` envs
-- Command: `/ux [mode|status]`, tool: `ux_audit` (per-tool toggle in `/config`) — default mode via `/config` (Appearance → UX discipline)
+- **serena** — semantic code tools (find symbol, references, rename, diagnostics) via a persistent language-server worker
+- **fff** — fast fuzzy file/content search (`ffgrep`, `fffind`) feeding the built-in grep/find experience and `@`-mention completions
+- **rtk** — transparently rewrites shell commands to save tokens (`/rtk status`, `RTK_DISABLED=1` to bypass)
 
-### munin — Munin long-term memory
+### config — the settings panel
 
-Native memory tools for Pi: `munin_search`, `munin_get`, `munin_store`,
-`munin_list`, `munin_recent`, `munin_delete`, `munin_capabilities`,
-`munin_share`, plus `/munin-status` and the Munin Memory Protocol injected into
-the system prompt while Munin is configured (skills: `munin`). Ported from
-`@bacnh85/pi-munin` — the SDK is vendored, no extra dependency.
+`/config` opens one fullscreen panel covering **pi core settings and every ceulen module**, organized in tabs (Appearance · Model · Interaction · Memory · Context · Shell · Tasks · Providers · Plugins).
 
-- Config: **project-level** — `munin.project` / `munin.baseUrl` / `munin.apiKey`
-  in `<repo>/.pi/settings.json`, via `/config` (Memory tab). `MUNIN_*` env vars
-  (incl. trusted `.env.local`) override; per-call params override everything.
-  Read only when the project is trusted; the API-key row is masked — add
-  `.pi/settings.json` to `.gitignore`.
-- Command: `/munin-status` — shows each field's source (env / project / global),
-  never the key.
-
-### config — central settings panel
-
-`/config` opens one fullscreen panel for **pi core settings and every ceulen
-module** — the frame fills the terminal (boxed corners, tab row, pinned
-key-hint footer), so the chat is replaced while you configure and comes back
-untouched on close. Tabs follow OMP's settings taxonomy: **Appearance · Model ·
-Interaction · Memory · Context · Shell · Tasks · Providers · Plugins** (empty
-categories don't render). A tab with several settings groups shows them as a
-left sidebar of sections with the underlined section headings repeated beside
-the detail rows, OMP style; the sidebar geometry stays identical across tabs.
-
-- **Appearance** — pi theme, display/editor/fullscreen/terminal-image settings, plus the usage-footer, composer and ux-discipline module switches
-- **Model** — default model/provider, thinking, network transport/timeouts, retry, cache warming, plus the classifier (Jev) and advisor (reviewer model, fallback chain, watch knobs — applies immediately)
-- **Interaction** — steering/follow-up modes, double-escape + tree filter, startup notices, trust & telemetry
-- **Memory** — munin (project, base URL, API key — saved to the **project's** `.pi/settings.json`; `MUNIN_*` env vars override; applies immediately, no reload)
-- **Context / Shell** — auto-compact, shell path/prefix, npm command
-- **Tasks** — ponytail (default mode `off/lite/full/ultra`, quiet startup, status-bar visibility; applies next session)
-- **Providers** — router (base URL + thinking levels; saves re-register the provider and refresh the catalog live)
-- **Plugins** — every installed Pi package (`packages` in settings.json) with an on/off
-  toggle; disabling writes the package in Pi's all-empty-resource-list form. Packages
-  with granular `pi config` filters or project filter deltas show as read-only
-  ("custom filters"). Toggles apply after `/reload`.
-
-Each module's on/off switch lives at the top of its own section (Router → Providers,
-munin → Memory, ponytail → Tasks, usage → Appearance, the config panel itself → Plugins) as an
-**Enabled** row writing the `ceulen.disabled` list — a feature is turned on where
-it is configured. Pi-core rows are backed by Pi's `SettingsManager` and save to the
-global `settings.json`; they apply after `/reload` (or a new session).
-
-Keyboard: `←→`/`Tab`/`Shift+Tab` switch tabs (wrapping), `↑↓` move, `PageUp`/
-`PageDown` jump sections, `Enter` toggles a switch or opens the selection menu,
-type any text to fuzzy-search across every tab (`←→` jumps between matching
-categories), `Esc` saves and closes (a second `Esc` clears the search first).
-Multi-choice rows (theme, thinking level, transport, model, …) open an
-OMP-style **selection menu** in place: `↑↓` browse, type to filter, `Enter`
-selects, `Esc` backs out. **Theme changes preview live** as you browse (the
-whole terminal restyles; `Esc` restores the previous theme) and the model
-picker lists `provider/id` from the model catalogue. Values differing
-from their default render in warning color; rows that env vars can override
-say so in the help area.
-
-Pi's builtin `/settings` cannot be overridden by extensions (a colliding
-command is renamed `/settings:1`); `/config` adds the ceulen modules around
-pi's own settings. Non-TUI shells get a text summary (`/config show`).
+- Theme and composer changes preview live while you browse; tool toggles apply immediately
+- Module on/off switches and pi-core rows take effect after `/reload`
+- Type any text to fuzzy-search every tab; `Esc` saves and closes
+- Non-TUI contexts get a text summary: `/config show`
 
 ## Themes
 
-The package ships **104 themes** selectable in Pi's `/theme` selector or via `/config` (Appearance → Theme — previews live as you browse). Two sources:
+104 themes ship with the package — select them in Pi's `/theme` picker or `/config` (Appearance → Theme; previews live). Includes the Ayu/Catppuccin ports and the 100-theme oh-my-pi collection.
 
-- **Ayu + Catppuccin** (4): `pi-dark`, `pi-mirage`, `pi-light`, `pi-catppuccin-mocha` — ported from [@bacnh85/pi-themes](https://github.com/bacnh85/pi-extensions/tree/main/pi-themes) (colors from [ayu-colors](https://github.com/ayu-theme/ayu-colors) and [Catppuccin](https://github.com/catppuccin/catppuccin), MIT).
-- **omp collection** (100): `dark-*` / `light-*` families plus stone-and-gem one-offs (`alabaster`, `obsidian`, …) — ported from [oh-my-pi](https://github.com/can1357/oh-my-pi) (MIT, © Mario Zechner, Can Bölük, Stencil Labs).
-
-Theme JSONs are static package resources loaded by Pi itself (no module, no kill-switch); validation runs via `node scripts/validate-themes.mjs` (part of `npm test`).
-
-## Kill-switches
-
-In `~/.pi/agent/settings.json` (or a trusted project's `.pi/settings.json`):
+## Turning modules off
 
 ```json
 { "ceulen": { "disabled": ["usage"] } }
 ```
 
-Disabled modules don't register anything; `/ceulen` lists what's active and disabled. `/config` toggles the same list — it writes to whichever file currently carries the `ceulen` section (project file when that's the effective one, disclosed in the panel).
+In `~/.pi/agent/settings.json` or a trusted project's `.pi/settings.json`. `/ceulen` lists what's active; `/config` toggles the same list. Individual tools can be toggled too (Tools tab). Disabled modules register nothing.
 
 ## License
 

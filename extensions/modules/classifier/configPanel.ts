@@ -44,17 +44,17 @@ export function buildClassifierGroups(cfg: ClassifierSettings): PanelGroup[] {
           menu: modelMenu,
           defaultValue: "",
         }),
-        row("classifier.permission.enabled", "Auto-approve", "toggle", cfg.permission.enabled, (v) => {
+        row("classifier.permission.enabled", "Bash verdicts", "toggle", cfg.permission.enabled, (v) => {
           cfg.permission.enabled = Boolean(v);
         }, {
-          description: "Jev-gated bash auto-approve (reversible + serves the task). Fails safe to the normal prompt.",
+          description: "Classify bash commands (reversible + serves the task) and audit verdicts to classifier.log. Observes only — never gates execution.",
           defaultValue: true,
         }),
         row("classifier.permission.mode", "Mode", "string", cfg.permission.mode, (v) => {
           cfg.permission.mode = v === "observe" ? "observe" : "enforce";
         }, {
           values: ["enforce", "observe"],
-          description: "enforce auto-approves confident verdicts; observe only logs would-be decisions.",
+          description: "enforce also shows confident safe-verdicts in the transcript; observe logs only. Neither mode blocks or approves anything.",
           defaultValue: "enforce",
         }),
         row("classifier.permission.threshold", "Threshold (0-1)", "string", String(cfg.permission.threshold), (v) => {
@@ -96,7 +96,7 @@ export function classifierConfig(): ModuleConfig {
       });
       const after = getClassifierSettings();
       ctx.ui.notify(
-        `Classifier saved. Model: ${after.model || "(auto)"} · auto-approve ${after.permission.enabled ? after.permission.mode : "disabled"} at ${after.permission.threshold}.`,
+        `Classifier saved. Model: ${after.model || "(auto)"} · bash verdicts ${after.permission.enabled ? after.permission.mode : "disabled"} at ${after.permission.threshold} (audit-only, never gates execution).`,
         "info",
       );
     },
