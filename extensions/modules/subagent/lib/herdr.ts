@@ -81,6 +81,8 @@ export interface HerdrHandle {
   readOnly?: boolean;
   /** Resolved "provider/id" passed to the child. */
   model: string;
+  /** Resolved thinking level passed to the child ( surfaced on results). */
+  thinking?: string;
   timeoutMs: number;
   /** False when the tab pre-existed (label match) and was only adopted —
    *  adopted tabs are never eligible for close-tab. */
@@ -640,6 +642,7 @@ export function buildHerdrResult(
   // The usage line renders `model` verbatim — piggyback the pane identity so
   // results are traceable to their herdr pane without render changes.
   const model = `${handle.model} · herdr pane:${handle.name}`;
+  const thinking = handle.thinking;
   let stopReason: string;
   let status: SubAgentResult["status"];
   let errorMessage: string | undefined;
@@ -687,6 +690,7 @@ export function buildHerdrResult(
     stderr: errorMessage ?? "",
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
     model,
+    thinking,
     stopReason,
     errorMessage,
     status,
@@ -745,6 +749,7 @@ async function prepareHerdrTaskUncached(opts: PrepareHerdrTaskOptions): Promise<
     task: opts.task,
     readOnly: opts.readOnly,
     model: opts.model ?? "",
+    thinking: opts.thinking,
     timeoutMs: opts.timeoutMs,
     tabCreatedHere: true,
   };

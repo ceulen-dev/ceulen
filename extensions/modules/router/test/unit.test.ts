@@ -398,6 +398,21 @@ describe("client", () => {
     }
   });
 
+  it("combo/ backends map onto the CC enum (off honored, none/minimal never sent)", async () => {
+    const { mapModel } = await import("../lib/client.js");
+    const tlm = (id: string) => mapModel({ id }, true).thinkingLevelMap ?? {};
+    // The deepseek family map would send off→"none" — the yardmaster combo
+    // backend 400s on it (live-probed 2026-10-03). cc-enum must win.
+    const m = tlm("combo/deepseek-v4.1-flash");
+    assert.equal(m.off, "off");
+    assert.equal(m.low, "low");
+    assert.equal(m.medium, "medium");
+    assert.equal(m.max, "max");
+    assert.equal(m.minimal, null); // never sent
+    // Family detection stays intact for plain deepseek ids.
+    assert.equal(tlm("deepseek-v4.1-flash").off, "none");
+  });
+
   it("claude 3-5/3-7 use budget thinking; 4-6/4.6/5/sonnet-5 use adaptive", async () => {
     const { mapModel } = await import("../lib/client.js");
     const xhigh = (id: string) => (mapModel({ id }, true).thinkingLevelMap ?? {}).xhigh;

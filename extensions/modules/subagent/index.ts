@@ -356,7 +356,7 @@ export default function (pi: ExtensionAPI) {
   pi.registerMessageRenderer?.("ceulen-subagent-complete", (message, _opts, theme) => {
     const d = (message.details ?? {}) as {
       agent?: string; status?: string; summary?: string; full_output?: string;
-      elapsed_ms?: number; model?: string; usage?: { turns?: number; cost?: number };
+      elapsed_ms?: number; model?: string; thinking?: string; usage?: { turns?: number; cost?: number };
     };
     const fg = theme.fg.bind(theme);
     const isErr = d.status && d.status !== "completed";
@@ -381,6 +381,7 @@ export default function (pi: ExtensionAPI) {
       usageParts.push(`${secs}s`);
     }
     if (d.model) usageParts.push(d.model);
+    if (d.thinking) usageParts.push(`think:${d.thinking}`);
     if (usageParts.length > 0) {
       container.addChild(new Text(fg("dim", usageParts.join(" · ")), 0, 0));
     }

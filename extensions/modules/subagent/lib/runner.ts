@@ -124,6 +124,8 @@ export interface SubAgentResult {
   stderr: string;
   usage: UsageStats;
   model?: string;
+  /** Thinking level the child actually ran with (after routing/pins). */
+  thinking?: string;
   stopReason?: string;
   errorMessage?: string;
   /** Unified diff of changes made in an isolated worktree (sandbox: "worktree"). */
@@ -195,6 +197,7 @@ export async function runSubAgent(options: {
     agent: agentName, task, exitCode: 0, messages: [], stderr: "",
     usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, cost: 0, contextTokens: 0, turns: 0 },
     model: `${model.provider}/${model.id}`, status: undefined,
+    thinking: thinkingLevel,
   };
   const resourceLoader: ResourceLoader = loadExtensions
     ? await getExtensionLoader(cwd, projectTrusted)

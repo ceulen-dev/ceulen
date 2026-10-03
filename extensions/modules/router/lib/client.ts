@@ -124,6 +124,11 @@ function detectThinkingFormat(modelId: string): string {
   // Pattern overrides (first match wins, matching 9router's PATTERN_THINKING)
   if (id.includes("gpt-5.6-sol")) return "openai-max";   // accepts max
   if (id.includes("codex")) return "codex-pattern";        // cannot disable thinking
+  // The yardmaster combo backend validates the CC enum (off|low|medium|high|
+  // xhigh|max, live-probed 2026-10-03): "none"/"minimal" 400. Family detection
+  // below would file combo/deepseek-* under the deepseek-native map (off→
+  // "none") and break every off-level call — route combo/ to the enum map first.
+  if (/^combo\//.test(id)) return "cc-enum";
 
   // Model-family detection (matching 9router's FORMAT_LEVELS keys)
   if (id.includes("deepseek")) return "deepseek";
@@ -271,6 +276,10 @@ const FORMAT_TO_LEVEL_MAP: Record<string, Record<string, string | null>> = {
   // (GLM's single thinking-on tier), max→"max"; xhigh/minimal unsupported (hidden).
   "zai":      { off:"none", minimal:null, low:"high", medium:"high", high:"high", xhigh:null, max:"max" },
   "minimax":  { off:"none", minimal:null, low:"low", medium:"medium", high:"high", xhigh:"xhigh", max:"xhigh" },
+  // Yardmaster CC-enum backends (combo/, live-probed): valid effort values are
+  // exactly off|low|medium|high|xhigh|max — "none"/"minimal" 400. "off" is
+  // honored (omitting it leaves the upstream defaulting to thinking ON).
+  "cc-enum":  { off:"off", minimal:null, low:"low", medium:"medium", high:"high", xhigh:"xhigh", max:"max" },
 };
 
 function getThinkingLevelMap(modelId: string): Record<string, string | null> {

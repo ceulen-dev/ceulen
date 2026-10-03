@@ -293,6 +293,7 @@ function deliverCompletion(task: BackgroundTask, result: SubAgentResult, deps: B
         full_output: output,
         elapsed_ms: elapsedMs,
         model: result.model,
+        thinking: result.thinking,
         usage: result.usage,
         background: true,
       },
