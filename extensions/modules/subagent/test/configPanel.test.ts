@@ -72,6 +72,37 @@ test("save: pristine defaults never leak into settings.json; edited role persist
   }
 });
 
+test("save: routing.dispatch + advisorWaitSecs persist, clamp, and read back", async () => {
+  const dir = withTempAgentDir();
+  try {
+    const { subagentConfig } = await load();
+    const file = join(dir, "settings.json");
+
+    // Pristine open: defaults visible on the rows (classifier dispatch, 120s wait).
+    let cfg = subagentConfig();
+    assert.equal(row(cfg.groups(), "subagent.routing.dispatch").value, "classify");
+    assert.equal(row(cfg.groups(), "subagent.advisorWaitSecs").value, 120);
+
+    row(cfg.groups(), "subagent.routing.dispatch").set("off");
+    row(cfg.groups(), "subagent.advisorWaitSecs").set(1000);
+    await cfg.save(new Set(["subagent.routing.dispatch", "subagent.advisorWaitSecs"]), ctx);
+    let written = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(written.subagent.routing.dispatch, "off");
+    assert.equal(written.subagent.advisorWaitSecs, 900, "clamped to the 900s ceiling");
+
+    cfg = subagentConfig();
+    assert.equal(row(cfg.groups(), "subagent.routing.dispatch").value, "off");
+    assert.equal(row(cfg.groups(), "subagent.advisorWaitSecs").value, 900);
+
+    // Invalid dispatch values never enter the working copy.
+    row(cfg.groups(), "subagent.routing.dispatch").set("bogus");
+    assert.equal(row(cfg.groups(), "subagent.routing.dispatch").value, "off");
+  } finally {
+    delete process.env.PI_CODING_AGENT_DIR;
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("save: no-op when nothing changed", async () => {
   const dir = withTempAgentDir();
   try {

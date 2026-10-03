@@ -2,8 +2,8 @@
  * subagent's /config contribution — Tasks tab, Subagents section.
  *
  * Rows: the three built-in role chains (comma-separated, catalogue
- * completions — advisor-fallbacks pattern), routing (mode/classifier model/
- * threshold), and the two timeout rows (idle window + opt-in hard cap, 0=off).
+ * completions — advisor-fallbacks pattern), routing (mode/dispatch/classifier
+ * model/threshold), and the timeout + advisor-wait rows (0 = off semantics).
  *
  * Reads go through lib/settings.ts (effective: global ⊕ trusted project);
  * saves write the GLOBAL settings.json `subagent` section. Roles/agent rows
@@ -18,7 +18,7 @@ import { row, type PanelCompletionItem, type PanelGroup, type PanelMenuOption } 
 import type { ModuleConfig } from "../../lib/registry.js";
 import { DEFAULT_ROLES, type RoleMap } from "./lib/roles.ts";
 import { readSubagentSettingsGlobal, settingsPath, writeSubagentSection } from "./lib/settings.ts";
-import type { RoutingMode } from "./lib/routing.ts";
+import type { RoutingMode, RoutingSettings } from "./lib/routing.ts";
 
 /** Installed by the module at load — live registry + agent-name stash. */
 export interface SubagentBridge {
@@ -60,6 +60,8 @@ export function buildSubagentGroups(cfg: {
   routingThreshold: number;
   idleTimeoutMins: number;
   hardTimeoutMins: number;
+  advisorWaitSecs: number;
+  routingDispatch: string;
 }): PanelGroup[] {
   const roleRow = (role: string, label: string, description: string) => {
     const current = cfg.roles[role];
@@ -95,6 +97,16 @@ export function buildSubagentGroups(cfg: {
           description: "Per-task model-tier + thinking routing via the classifier module's decision models. Pinned agents (agentModels/agentThinking) are never overridden.",
           defaultValue: "classify",
         }),
+        row("subagent.routing.dispatch", "Dispatch", "string", cfg.routingDispatch, (v) => {
+          if (v === "classify" || v === "off") cfg.routingDispatch = v;
+        }, {
+          menu: (): PanelMenuOption[] => [
+            { value: "classify", label: "classifier decides", description: "Jev picks pane vs background per single dispatch (explicit runner/background wins; fails open to a pane)." },
+            { value: "off", label: "always a visible pane", description: "Foreground dispatch stays in herdr; pass background:true explicitly for detached runs." },
+          ],
+          description: "herdr only: when a single dispatch names neither runner nor background, let the classifier choose between a visible pane and a detached background task.",
+          defaultValue: "classify",
+        }),
         row("subagent.routing.model", "Classifier model", "string", cfg.routingModel, (v) => {
           cfg.routingModel = String(v ?? "").trim();
         }, {
@@ -126,6 +138,13 @@ export function buildSubagentGroups(cfg: {
           description: "Absolute lifetime cap per child. 0 = OFF (default) — a child producing output is never killed; only total silence is.",
           defaultValue: 0,
         }),
+        row("subagent.advisorWaitSecs", "Advisor wait (sec)", "number", cfg.advisorWaitSecs, (v) => {
+          const n = Number(v);
+          if (Number.isFinite(n)) cfg.advisorWaitSecs = Math.min(900, Math.max(0, Math.round(n)));
+        }, {
+          description: "herdr panes only: wait for the child's own advisor review to finish before collecting its report, so steered corrections are included. 0 = collect at first settle.",
+          defaultValue: 120,
+        }),
       ],
     },
   ];
@@ -133,8 +152,10 @@ export function buildSubagentGroups(cfg: {
 
 const OWNED_KEYS = [
   "subagent.routing.mode", "subagent.routing.model", "subagent.routing.threshold",
+  "subagent.routing.dispatch",
   "subagent.roles.fast", "subagent.roles.coder", "subagent.roles.smart",
   "subagent.idleTimeoutMins", "subagent.hardTimeoutMins",
+  "subagent.advisorWaitSecs",
 ];
 
 /** subagent's ModuleConfig for the central /config panel. */
@@ -145,8 +166,10 @@ export function subagentConfig(): ModuleConfig {
     routingMode: before.routing.mode,
     routingModel: before.routing.model,
     routingThreshold: before.routing.threshold,
+    routingDispatch: before.routing.dispatch,
     idleTimeoutMins: before.idleTimeoutMins,
     hardTimeoutMins: before.hardTimeoutMins,
+    advisorWaitSecs: before.advisorWaitSecs,
   };
   const original = JSON.stringify(working);
 
@@ -172,10 +195,11 @@ export function subagentConfig(): ModuleConfig {
       let file: string;
       try {
         file = writeSubagentSection({
-          routing: { mode: working.routingMode, model: working.routingModel, threshold: working.routingThreshold },
+          routing: { mode: working.routingMode, model: working.routingModel, threshold: working.routingThreshold, dispatch: working.routingDispatch as RoutingSettings["dispatch"] },
           ...(Object.keys(rolesPatch).length > 0 ? { roles: rolesPatch } : {}),
           idleTimeoutMins: working.idleTimeoutMins,
           hardTimeoutMins: working.hardTimeoutMins,
+          advisorWaitSecs: working.advisorWaitSecs,
         });
       } catch (e) {
         ctx.ui.notify(`Subagent save failed: ${e instanceof Error ? e.message : e}`, "error");
@@ -184,7 +208,9 @@ export function subagentConfig(): ModuleConfig {
       const notes = [
         `Subagents saved to ${file}`,
         `routing=${working.routingMode}${working.routingModel ? ` (${working.routingModel})` : ""}`,
+        `dispatch=${working.routingDispatch}`,
         `hard cap=${working.hardTimeoutMins === 0 ? "off" : `${working.hardTimeoutMins}m`}`,
+        `advisor wait=${working.advisorWaitSecs === 0 ? "off" : `${working.advisorWaitSecs}s`}`,
         "Applied to this session.",
       ];
       ctx.ui.notify(notes.join(" · "), "info");

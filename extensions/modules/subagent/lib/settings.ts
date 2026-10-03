@@ -19,6 +19,9 @@ export interface SubagentSettings {
   idleTimeoutMins: number;
   /** Absolute lifetime cap in minutes; 0 = OFF (ceulen default). */
   hardTimeoutMins: number;
+  /** herdr only: seconds to wait for the child's own advisor review to finish
+   *  before collecting (0 = collect at first settle). */
+  advisorWaitSecs: number;
 }
 
 function agentDir(): string {
@@ -50,12 +53,14 @@ function mergeLayer(out: SubagentSettings, json: Record<string, unknown> | null)
   const s = section(json, "subagent");
   const routing = section(s, "routing");
   if (routing.mode === "off" || routing.mode === "classify") out.routing.mode = routing.mode;
+  if (routing.dispatch === "off" || routing.dispatch === "classify") out.routing.dispatch = routing.dispatch;
   if (typeof routing.model === "string") out.routing.model = routing.model.trim();
   if (typeof routing.threshold === "number" && Number.isFinite(routing.threshold)) {
     out.routing.threshold = Math.min(0.99, Math.max(0.1, routing.threshold));
   }
   out.idleTimeoutMins = num(s.idleTimeoutMins, out.idleTimeoutMins, 0, 60);
   out.hardTimeoutMins = num(s.hardTimeoutMins, out.hardTimeoutMins, 0, 60);
+  out.advisorWaitSecs = num(s.advisorWaitSecs, out.advisorWaitSecs, 0, 900);
 }
 
 /**
@@ -68,6 +73,7 @@ export function readSubagentSettings(ctx?: ExtensionContext): SubagentSettings {
     routing: { ...DEFAULT_ROUTING },
     idleTimeoutMins: 0, // 0 = fall back to the env default (security.ts)
     hardTimeoutMins: 0, // 0 = cap OFF
+    advisorWaitSecs: 120, // wait out the child's advisor review (herdr runner)
   };
   mergeLayer(out, readJson(path.join(agentDir(), "settings.json")));
   try {
@@ -85,6 +91,7 @@ export function readSubagentSettingsGlobal(): SubagentSettings {
     routing: { ...DEFAULT_ROUTING },
     idleTimeoutMins: 0,
     hardTimeoutMins: 0,
+    advisorWaitSecs: 120,
   };
   mergeLayer(out, readJson(path.join(agentDir(), "settings.json")));
   return out;
@@ -107,6 +114,7 @@ export function writeSubagentSection(patch: {
   roles?: Record<string, string | string[]>;
   idleTimeoutMins?: number;
   hardTimeoutMins?: number;
+  advisorWaitSecs?: number;
 }): string {
   const file = settingsPath();
   let settings: Record<string, unknown> = {};
@@ -121,12 +129,14 @@ export function writeSubagentSection(patch: {
   if (patch.routing) {
     const routing = (sub.routing ?? {}) as Record<string, unknown>;
     routing.mode = patch.routing.mode;
+    routing.dispatch = patch.routing.dispatch;
     routing.model = patch.routing.model;
     routing.threshold = patch.routing.threshold;
     sub.routing = routing;
   }
   if (patch.idleTimeoutMins !== undefined) sub.idleTimeoutMins = patch.idleTimeoutMins;
   if (patch.hardTimeoutMins !== undefined) sub.hardTimeoutMins = patch.hardTimeoutMins;
+  if (patch.advisorWaitSecs !== undefined) sub.advisorWaitSecs = patch.advisorWaitSecs;
   if (patch.roles) {
     // Role chains: pi-subagent's normalizeChain semantics — comma string or
     // array, empty entries dropped; empty chain deletes the role (falls back

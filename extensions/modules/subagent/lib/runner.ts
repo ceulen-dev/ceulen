@@ -126,6 +126,9 @@ export interface SubAgentResult {
   model?: string;
   /** Thinking level the child actually ran with (after routing/pins). */
   thinking?: string;
+  /** Steered advisor revisions folded into this result (herdr runner waited
+   *  for the child's own advisor before collecting — see lib/herdr.ts). */
+  advisorRounds?: number;
   stopReason?: string;
   errorMessage?: string;
   /** Unified diff of changes made in an isolated worktree (sandbox: "worktree"). */

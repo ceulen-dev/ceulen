@@ -1,8 +1,10 @@
 // Classifier-assisted task routing for the subagent module.
 //
-// One Jev round-trip per task answers TWO questions at once:
-//   tier   — which role's model pool should serve this task (fast/coder/smart)
-//   effort — how much thinking the task needs (score → :level suffix)
+// One Jev round-trip per task answers up to THREE questions at once:
+//   tier     — which role's model pool should serve this task (fast/coder/smart)
+//   effort   — how much thinking the task needs (score → :level suffix)
+//   dispatch — inside herdr: a visible pane or a detached background task
+//              (asked only when the caller left runner/background unspecified)
 //
 // Precedence (pins beat dynamic; dynamic beats defaults):
 //   1. chain-entry `:level` suffix (user-authored, most specific)
@@ -21,9 +23,13 @@ import type { AgentConfig } from "./agents.ts";
 import { resolveAgentModelChain, type RolesConfig } from "./roles.ts";
 
 export type RoutingMode = "off" | "classify";
+export type DispatchMode = "off" | "classify";
 
 export interface RoutingSettings {
   mode: RoutingMode;
+  /** herdr only: let the classify round-trip choose pane vs background for a
+   *  single dispatch whose caller named neither runner nor background. */
+  dispatch: DispatchMode;
   /** Optional classifier model override (provider/id or id); empty = first available. */
   model: string;
   /** Minimum certainty to act on an answer: tier = winning label's
@@ -33,6 +39,7 @@ export interface RoutingSettings {
 
 export const DEFAULT_ROUTING: RoutingSettings = {
   mode: "classify",
+  dispatch: "classify",
   model: "",
   threshold: 0.6,
 };
@@ -56,9 +63,17 @@ const TIER_CRITERIA: Record<Tier, string> = {
   smart: "ambiguous design, cross-cutting refactor, consequential review or planning — depth matters more than speed",
 };
 
+const DISPATCH_CRITERIA: Record<DispatchKind, string> = {
+  pane: "the parent should watch it run or needs the result in the same turn — uncertain or interactive work, or anything that may block on a question only answerable in a visible pane",
+  background: "long, self-contained work whose result the parent can consume later — the parent keeps working while the task runs detached",
+};
+export type DispatchKind = "pane" | "background";
+
 export interface RoutingVerdict {
   tier?: Tier;
   effort?: string;
+  /** Dispatch decision (herdr only, and only when the caller asked for it). */
+  dispatch?: DispatchKind;
   /** True when a verdict was produced within threshold (diagnostics only). */
   applied: boolean;
   reason?: string;
@@ -112,6 +127,7 @@ export async function classifyTask(
   task: string,
   solutionSpace: string | undefined,
   roles: RolesConfig,
+  opts: { askDispatch?: boolean } = {},
 ): Promise<RoutingVerdict | undefined> {
   if (settings.mode !== "classify") return undefined;
   const pins = pinsFor(agent, roles);
@@ -125,6 +141,7 @@ export async function classifyTask(
   const chain = resolveAgentModelChain(agent, roles);
   const wantEffort = !pins.thinking;
   const wantTier = chain.unresolved.length === 0; // tier only refines a resolvable role setup
+  const wantDispatch = opts.askDispatch === true;
 
   try {
     const result = await ctx.modelRegistry.classify(
@@ -136,13 +153,27 @@ export async function classifyTask(
           ...(solutionSpace ? { solutionSpace } : {}),
         },
         questions: {
-          tier: { type: "choice", instructions: "Which model tier should serve this task?", criteria: TIER_CRITERIA },
+          // wantTier: an unresolvable chain (typo'd @alias) must fail loud on
+          // its own error — a tier override would silently swap in the role
+          // pools and hide the typo until routing is off.
+          ...(wantTier
+            ? { tier: { type: "choice", instructions: "Which model tier should serve this task?", criteria: TIER_CRITERIA } }
+            : {}),
           ...(wantEffort
             ? {
                 effort: {
                   type: "score",
                   instructions: "How much reasoning does this task need?",
                   criteria: EFFORT_LADDER.map((c) => `${c.level}: ${c.description}`),
+                },
+              }
+            : {}),
+          ...(wantDispatch
+            ? {
+                dispatch: {
+                  type: "choice",
+                  instructions: "Where should this task run? Prefer pane unless the task is clearly long-running and independent.",
+                  criteria: DISPATCH_CRITERIA,
                 },
               }
             : {}),
@@ -156,7 +187,7 @@ export async function classifyTask(
 
     const tierAnswer = result.answers.tier as { choice?: string; probabilities?: Record<string, number> } | undefined;
     let tier: Tier | undefined;
-    if (tierAnswer?.choice && (TIERS as readonly string[]).includes(tierAnswer.choice)) {
+    if (wantTier && tierAnswer?.choice && (TIERS as readonly string[]).includes(tierAnswer.choice)) {
       const probs = tierAnswer.probabilities ?? {};
       const top = Math.max(...Object.values(probs), 0);
       tier = top >= settings.threshold ? (tierAnswer.choice as Tier) : undefined;
@@ -172,9 +203,19 @@ export async function classifyTask(
       }
     }
 
+    let dispatch: DispatchKind | undefined;
+    if (wantDispatch) {
+      const dispatchAnswer = result.answers.dispatch as { choice?: string; probabilities?: Record<string, number> } | undefined;
+      if (dispatchAnswer?.choice === "pane" || dispatchAnswer?.choice === "background") {
+        const probs = dispatchAnswer.probabilities ?? {};
+        const top = Math.max(...Object.values(probs), 0);
+        if (top >= settings.threshold) dispatch = dispatchAnswer.choice;
+      }
+    }
+
     if (process.env.CEULEN_ROUTING_DEBUG) process.stderr.write(`[routing] answers=${JSON.stringify(result.answers).slice(0, 300)}\n`);
-    if (!tier && !effort) return { applied: false, reason: "below threshold" };
-    return { tier, effort, applied: true };
+    if (!tier && !effort && !dispatch) return { applied: false, reason: "below threshold" };
+    return { tier, effort, dispatch, applied: true };
   } catch (e) {
     if (process.env.CEULEN_ROUTING_DEBUG) process.stderr.write(`[routing] error: ${e instanceof Error ? e.message : String(e)}\n`);
     return { applied: false, reason: "classifier error" };

@@ -30,6 +30,11 @@ export interface HistoryEntry {
   cwd?: string;
   background?: boolean;
   model?: string;
+  /** Resolved thinking level for this run (`off`…`max`), when the runner reports one. */
+  thinking?: string;
+  /** Steered advisor revisions folded into the result (herdr runner waited for
+   *  the child's own advisor before collecting). */
+  advisorRounds?: number;
 }
 
 // ---------------------------------------------------------------------------

@@ -23,7 +23,9 @@
  */
 
 import * as fs from "node:fs/promises";
+import { readFileSync } from "node:fs";
 import * as path from "node:path";
+import { ADVISOR_MARKER_ENV, parseAdvisorMarker, type AdvisorMarker } from "../../../lib/advisor-marker.js";
 import type { Message } from "./types.ts";
 import { defaultExec, type SubAgentResult } from "./runner.ts";
 import { READ_ONLY_TOOLS } from "./security.ts";
@@ -75,6 +77,10 @@ export interface HerdrHandle {
   tabId: string;
   paneId: string;
   resultFile: string;
+  /** Advisor review-cycle sidecar (ADVISOR_MARKER_ENV): the child's advisor
+   *  publishes {phase, steered, at} there so the parent can wait for the
+   *  verdict instead of collecting a draft it is about to correct. */
+  advisorMarker: string;
   task: string;
   /** Read-only sandbox: the child has no write tool, so the delivery
    *  contract is inline reply instead of the report file. */
@@ -356,7 +362,8 @@ export function wrapTaskPrompt(task: string, resultFile: string, readOnly = fals
   return (
     `${task}\n\n---\n` +
     `Delivery: when your task is complete, write your full final report as Markdown to \`${resultFile}\` ` +
-    `(create parent directories if needed), then reply with a one-line summary only.`
+    `(create parent directories if needed), then reply with a one-line summary only. ` +
+    `If follow-up feedback arrives after delivery (e.g. an advisor review), apply it and update the report file to the corrected version.`
   );
 }
 
@@ -369,6 +376,8 @@ export async function ensureTab(opts: {
   agentType: string;
   cwd: string;
   exec: HerdrExec;
+  /** Extra KEY=VALUE pairs for the spawned shell/agent (e.g. the advisor marker path). */
+  env?: string[];
 }): Promise<{ tabId: string; rootPaneId?: string; created: boolean }> {
   const workspace = process.env.HERDR_WORKSPACE_ID!;
   const listed = await herdrJson(opts.exec, ["tab", "list", "--workspace", workspace]);
@@ -384,6 +393,7 @@ export async function ensureTab(opts: {
     "--label", opts.agentType,
     // Children must not recurse into herdr dispatch.
     "--env", `${HERDR_OFF_ENV}=off`,
+    ...(opts.env ?? []).flatMap((e) => ["--env", e]),
     "--no-focus",
   ]);
   if (!created.ok) throw new Error(`herdr tab create failed: ${created.error}`);
@@ -425,6 +435,8 @@ export async function ensurePane(opts: {
    *  with the validated cwd — a free pane in an adopted tab belongs to
    *  whatever cwd its shell sits in, or to the user. */
   reuseFreePane: boolean;
+  /** Extra KEY=VALUE pairs for the spawned shell/agent (e.g. the advisor marker path). */
+  env?: string[];
 }): Promise<string> {
   const { free, all } = await tabPaneState(opts.tabId, opts.exec);
   if (opts.reuseFreePane && free.length > 0) return free[0]!;
@@ -436,6 +448,7 @@ export async function ensurePane(opts: {
     "--direction", direction,
     "--cwd", opts.cwd,
     "--env", `${HERDR_OFF_ENV}=off`,
+    ...(opts.env ?? []).flatMap((e) => ["--env", e]),
     "--no-focus",
   ]);
   if (!split.ok) throw new Error(`herdr pane split failed: ${split.error}`);
@@ -720,6 +733,12 @@ function resultFilePath(cwd: string, name: string, stamp: string): string {
   return path.join(cwd, ".pi", "herdr", `${name}-${stamp}.md`);
 }
 
+/** Advisor sidecar for one dispatch. Keyed by stamp alone so the tab/pane env
+ *  set at spawn time stays valid even when a name collision forces a rename. */
+function advisorMarkerPath(cwd: string, stamp: string): string {
+  return path.join(cwd, ".pi", "herdr", `${stamp}.advisor.json`);
+}
+
 /** Session + report files share one stamp so they correlate per dispatch. */
 function dispatchStamp(): string {
   return Date.now().toString(36);
@@ -746,6 +765,7 @@ async function prepareHerdrTaskUncached(opts: PrepareHerdrTaskOptions): Promise<
     tabId: "",
     paneId: "",
     resultFile: resultFilePath(opts.cwd, name, stamp),
+    advisorMarker: advisorMarkerPath(opts.cwd, stamp),
     task: opts.task,
     readOnly: opts.readOnly,
     model: opts.model ?? "",
@@ -771,10 +791,10 @@ async function prepareHerdrTaskUncached(opts: PrepareHerdrTaskOptions): Promise<
       readOnly: opts.readOnly,
       sessionStamp: stamp,
     });
-    const { tabId, created } = await ensureTab({ agentType: opts.agentType, cwd: opts.cwd, exec });
+    const { tabId, created } = await ensureTab({ agentType: opts.agentType, cwd: opts.cwd, exec, env: [`${ADVISOR_MARKER_ENV}=${handle.advisorMarker}`] });
     handle.tabId = tabId;
     handle.tabCreatedHere = created;
-    const paneId = await ensurePane({ tabId, cwd: opts.cwd, exec, reuseFreePane: created });
+    const paneId = await ensurePane({ tabId, cwd: opts.cwd, exec, reuseFreePane: created, env: [`${ADVISOR_MARKER_ENV}=${handle.advisorMarker}`] });
     handle.paneId = paneId;
     try {
       await startAgent({ name, paneId, piArgs, exec });
@@ -833,6 +853,90 @@ export interface ExecuteHerdrTaskOptions {
    *  mapped to status "aborted" instead of whatever state the child settled
    *  into — a cancelled agent must never read as success. */
   signal?: AbortSignal;
+  /** Wait-for-advisor window (ms) after the child settles: the child's own
+   *  advisor reviews the turn and may steer corrections into it, so collecting
+   *  at first settle can return a draft the child is about to fix. 0 = collect
+   *  immediately (no window, no grace poll). */
+  advisorWaitMs?: number;
+  /** Live phase feedback while the window is open ("advisor-review" |
+   *  "advisor-revise") — the widget renders it where the pane state goes. */
+  onAdvisorPhase?: (phase: string) => void;
+}
+
+const ADVISOR_POLL_MS = 250;
+/** How long a fresh settle may take to produce a first marker before we treat
+ *  the child's advisor as absent (skip paths publish nothing by design). */
+const ADVISOR_MARKER_GRACE_MS = 1500;
+/** Steered revisions to fold in before collecting anyway. */
+const MAX_ADVISOR_ROUNDS = 2;
+
+function readAdvisorMarkerFile(file: string): AdvisorMarker | undefined {
+  try {
+    return parseAdvisorMarker(readFileSync(file, "utf8"));
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Wait for the child's OWN advisor to finish reviewing the settled turn.
+ *
+ * The child's advisor publishes a marker pair around every review cycle it
+ * starts (advisor/lib/watcher.ts); a skipped or absent advisor publishes
+ * nothing, which the grace poll reads as "no verdict is coming" — collect now.
+ * `reviewing` waits for `done`; a steered cycle wakes the child with a
+ * follow-up turn, so the caller waits for that turn to settle and the loop
+ * looks for the next cycle (the revision is reviewed too). Bounded by
+ * advisorWaitMs and MAX_ADVISOR_ROUNDS — a stuck advisor never hangs a
+ * dispatch.
+ *
+ * Returns the number of steered revisions folded in.
+ */
+async function awaitAdvisorCycle(opts: {
+  name: string;
+  markerFile: string;
+  advisorWaitMs: number;
+  signal?: AbortSignal;
+  onPhase?: (phase: string) => void;
+  exec: HerdrExec;
+}): Promise<number> {
+  if (opts.advisorWaitMs <= 0) return 0;
+  const deadline = Date.now() + opts.advisorWaitMs;
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const stopped = () => Boolean(opts.signal?.aborted) || Date.now() >= deadline;
+  let since = 0; // newest marker `at` already handled (file is per-dispatch)
+  let rounds = 0;
+  for (;;) {
+    // 1. Did a review cycle cover the settle we just observed?
+    let marker: AdvisorMarker | undefined;
+    const graceUntil = Math.min(Date.now() + ADVISOR_MARKER_GRACE_MS, deadline);
+    while (!stopped() && Date.now() < graceUntil) {
+      const candidate = readAdvisorMarkerFile(opts.markerFile);
+      if (candidate && candidate.at > since) { marker = candidate; break; }
+      await sleep(ADVISOR_POLL_MS);
+    }
+    if (!marker) return rounds; // no advisor in this child — collect the draft
+    since = marker.at;
+    // 2. Wait out the review itself.
+    while (marker.phase === "reviewing" && !stopped()) {
+      opts.onPhase?.("advisor-review");
+      await sleep(ADVISOR_POLL_MS);
+      const next = readAdvisorMarkerFile(opts.markerFile);
+      if (next && next.at > since) { marker = next; since = next.at; }
+    }
+    if (!marker.steered) return rounds; // verdict in: nothing to fold in
+    // 3. The steered turn follows — wait for it to start, then to settle.
+    if (rounds >= MAX_ADVISOR_ROUNDS || stopped()) return rounds;
+    rounds++;
+    opts.onPhase?.("advisor-revise");
+    let sawWorking = false;
+    while (!stopped()) {
+      const state = await getAgentState(opts.name, opts.exec);
+      if (state === "working" || state === "blocked") sawWorking = true;
+      else if (sawWorking && (state === "idle" || state === "done")) break;
+      await sleep(1000);
+    }
+  }
 }
 
 /** Prompt the prepared agent, wait for settle, collect the report. */
@@ -872,12 +976,21 @@ export async function executeHerdrTask(
       });
     let output = "";
     let outputSource: "file" | "pane" | "none" = "none";
+    let advisorRounds = 0;
     const aborted = Boolean(opts.signal?.aborted);
     const timedOut = !aborted && Boolean(prompt.error && /timeout/.test(prompt.error));
     if (timedOut) {
       // Wall-clock cap: interrupt the child so it stops burning tokens.
       await cancelAgent(handle.name, exec);
     } else if (!aborted) {
+      advisorRounds = await awaitAdvisorCycle({
+        name: handle.name,
+        markerFile: handle.advisorMarker,
+        advisorWaitMs: opts.advisorWaitMs ?? 0,
+        signal: opts.signal,
+        onPhase: opts.onAdvisorPhase,
+        exec,
+      });
       const collected = await collectResult({ handle, exec });
       output = collected.output;
       outputSource = collected.source;
@@ -890,6 +1003,7 @@ export async function executeHerdrTask(
       outputSource,
       durationMs: Date.now() - startedAt,
     });
+    if (advisorRounds > 0) result.advisorRounds = advisorRounds;
     if (aborted) {
       // Match the SDK runner's abort semantics (esc/ctrl+c already sent by the
       // abort wiring — the child settling to idle must not read as success).

@@ -274,3 +274,77 @@ test("DEFAULT_ROUTING ships classify-on with the documented threshold", () => {
   assert.equal(DEFAULT_ROUTING.threshold, 0.6);
   void (0 as unknown as RoutingSettings | null);
 });
+
+// ── Dispatch question (herdr pane vs detached background) ───────────────────
+
+function dispatchCtx(answers: Record<string, unknown>, onQuestions?: (q: Record<string, unknown>) => void) {
+  return {
+    modelRegistry: {
+      getAvailableOfType: async () => [{ provider: "router", id: "jev" }],
+      classify: async (_model: unknown, payload: { questions: Record<string, unknown> }) => {
+        onQuestions?.(payload.questions);
+        return { stopReason: "stop", answers };
+      },
+    },
+  } as never;
+}
+
+const TIER_AND_EFFORT = {
+  tier: { type: "choice", choice: "fast", probabilities: { fast: 0.95 } },
+  effort: { type: "score", score: 0, confidence: 0.9 },
+};
+
+test("classifyTask: the dispatch question is asked only when requested", async () => {
+  let asked: Record<string, unknown> = {};
+  const ctx = dispatchCtx(
+    { ...TIER_AND_EFFORT, dispatch: { choice: "background", probabilities: { background: 0.9, pane: 0.1 } } },
+    (q) => { asked = q; },
+  );
+  const without = await classifyTask(ctx, { ...DEFAULT_ROUTING, mode: "classify" }, WORKER, "do a thing", undefined, ROLES);
+  assert.equal("dispatch" in asked, false, "no dispatch question when not requested");
+  assert.equal(without?.dispatch, undefined);
+
+  const withDispatch = await classifyTask(ctx, { ...DEFAULT_ROUTING, mode: "classify" }, WORKER, "do a thing", undefined, ROLES, { askDispatch: true });
+  assert.equal("dispatch" in asked, true, "dispatch question asked on request");
+  assert.equal(withDispatch?.dispatch, "background");
+  assert.equal(withDispatch?.applied, true);
+});
+
+test("classifyTask: below-threshold dispatch stays pane while tier still applies", async () => {
+  const ctx = dispatchCtx({
+    tier: { type: "choice", choice: "fast", probabilities: { fast: 0.9 } },
+    effort: { type: "score", score: 0, confidence: 0.9 },
+    dispatch: { choice: "background", probabilities: { background: 0.4, pane: 0.35 } },
+  });
+  const verdict = await classifyTask(ctx, { ...DEFAULT_ROUTING, mode: "classify" }, WORKER, "tweak", undefined, ROLES, { askDispatch: true });
+  assert.equal(verdict?.dispatch, undefined, "uncertain dispatch answers keep the pane default");
+  assert.equal(verdict?.tier, "fast");
+  assert.equal(verdict?.applied, true);
+});
+
+test("classifyTask: a confident dispatch answer alone counts as applied", async () => {
+  const ctx = dispatchCtx({
+    tier: { type: "choice", choice: "fast", probabilities: { fast: 0.2 } },
+    effort: { type: "score", score: 3, confidence: 0.1 },
+    dispatch: { choice: "background", probabilities: { background: 0.95, pane: 0.05 } },
+  });
+  const verdict = await classifyTask(ctx, { ...DEFAULT_ROUTING, mode: "classify" }, WORKER, "long audit", undefined, ROLES, { askDispatch: true });
+  assert.equal(verdict?.tier, undefined);
+  assert.equal(verdict?.effort, undefined);
+  assert.equal(verdict?.dispatch, "background");
+  assert.equal(verdict?.applied, true, "dispatch alone can carry the verdict");
+});
+
+test("classifyTask: an unresolvable chain suppresses the tier question (typo fails loud, not papered over)", async () => {
+  let asked: Record<string, unknown> = {};
+  const ctx = dispatchCtx(
+    { effort: { type: "score", score: 3, confidence: 0.9 }, tier: { choice: "smart", probabilities: { smart: 0.99 } } },
+    (q) => { asked = q; },
+  );
+  const broken = { name: "worker", description: "x", model: "@smartt" } as AgentConfig;
+  const verdict = await classifyTask(ctx, { ...DEFAULT_ROUTING, mode: "classify" }, broken, "do a thing", undefined, ROLES);
+  assert.equal("tier" in asked, false, "tier question suppressed for an unresolved chain");
+  assert.equal("effort" in asked, true, "effort still routes");
+  assert.equal(verdict?.tier, undefined);
+  assert.equal(verdict?.effort, EFFORT_LADDER[3].level);
+});

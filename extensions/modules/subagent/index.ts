@@ -66,8 +66,8 @@ import {
 } from "./lib/render.ts";
 import { type SubagentThread, threadStore } from "./lib/threads.ts";
 import { resolveModel, runWithModelFallback, type ResolvedModel } from "./lib/model.ts";
-import { DEFAULT_ROLES, describeAgentModels, effectiveAgentThinking, expandModelCandidates, readSubagentRoles, readSubagentRolesGlobal, resolveAgentModelChain, THINKING_LEVELS, type RolesConfig, type SubagentThinkingLevel } from "./lib/roles.ts";
-import { classifyTask } from "./lib/routing.ts";
+import { DEFAULT_ROLES, describeAgentModels, effectiveAgentThinking, expandModelCandidates, readSubagentRoles, readSubagentRolesGlobal, resolveAgentModelChain, THINKING_LEVELS, type ExpandedCandidates, type RolesConfig, type SubagentThinkingLevel } from "./lib/roles.ts";
+import { classifyTask, type RoutingVerdict } from "./lib/routing.ts";
 import { readSubagentSettings } from "./lib/settings.ts";
 import { setSubagentBridge } from "./configPanel.ts";
 import { ThreadViewer, type ThreadViewerCallbacks } from "./lib/thread-viewer.ts";
@@ -426,7 +426,9 @@ export default function (pi: ExtensionAPI) {
           const statusIcon = e.status === "completed" ? "✓" : e.status === "interrupted" ? "⚠" : "✗";
           const bg = e.background ? " [bg]" : "";
           const summary = e.summary ? ` — ${e.summary.slice(0, 60)}` : "";
-          return `  ${statusIcon} ${e.agent}${bg} · ${time}${summary}`;
+          const routed = e.model ? ` · ${e.model}${e.thinking ? ` (${e.thinking})` : ""}` : "";
+          const advisor = e.advisorRounds ? ` · advisor:${e.advisorRounds} revision${e.advisorRounds > 1 ? "s" : ""}` : "";
+          return `  ${statusIcon} ${e.agent}${bg} · ${time}${routed}${advisor}${summary}`;
         });
         pi.sendMessage({
           customType: "ceulen-subagent",
@@ -609,6 +611,7 @@ export default function (pi: ExtensionAPI) {
       "For background single tasks use background:true — you will be notified on completion; DO NOT poll or sleep.",
       'Task control by taskId: operation "status" (snapshot + liveness age), "wait" (block until settled or waitTimeoutMs, then snapshot), "cancel" (abort). A task producing output is NEVER hard-killed; only total silence (idle timeout) aborts it. "STALLED" in a snapshot means no child activity — cancel it or keep waiting.',
       "Set solutionSpace when a task's openness isn't obvious from its text — it feeds tier/thinking routing.",
+      "Inside herdr, a single dispatch that names neither runner nor background may be sent to background by the task classifier (long/self-contained work) — pass runner or background explicitly to force one.",
       "Worktree-sandboxed agents return their diff as a patch block in the result; pass merge: \"3way\" to auto-apply it to the parent checkout (git apply --3way; conflicts reported, never silently resolved).",
       `Runner: "sdk" runs agents in-process (lean, default outside herdr); "herdr" delegates to visible interactive pi panes in a herdr session (one tab per agent type, one pane per instance) — default when pi runs inside herdr. herdr children share the working tree and skip worktree isolation; background:true always uses the sdk runner.`,
       "Use /subagent list to list all available agents, /subagent <name> for agent details, /subagent @role for role detail.",
@@ -936,6 +939,8 @@ export default function (pi: ExtensionAPI) {
             summary: structured.summary,
             background,
             model: result.model,
+            thinking: result.thinking,
+            advisorRounds: result.advisorRounds,
           });
         } catch { /* history file not writable — non-fatal */ }
       }
@@ -986,6 +991,37 @@ export default function (pi: ExtensionAPI) {
         };
       }
 
+      // Classifier routing (mode: classify): one Jev round-trip asks tier +
+      // effort. Precedence — pins beat dynamic, dynamic beats defaults:
+      // agentModels pin skips the call; agentThinking pin skips effort only;
+      // the verdict otherwise amends the frontmatter-derived defaults. Shared
+      // by the SDK (runOne) and herdr (prepareHerdrOne) runners so the chosen
+      // model/thinking never depends on how the child is dispatched.
+      async function routedChain(
+        agent: AgentConfig,
+        task: string,
+        solutionSpace?: string,
+        precomputed?: RoutingVerdict,
+      ): Promise<{ chain: ExpandedCandidates; defaultThinking: SubagentThinkingLevel | undefined }> {
+        let tierOverride: string[] | undefined;
+        let classifierThinking: SubagentThinkingLevel | undefined;
+        // A precomputed verdict already carries tier/effort (single-mode
+        // dispatch decision) — never ask Jev twice for the same dispatch.
+        const verdict = precomputed ?? await classifyTask(ctx, subSettings.routing, agent, task, solutionSpace ?? params.solutionSpace, rolesCfg);
+        if (verdict?.applied && verdict.tier) {
+          const tierChain = rolesCfg.roles[verdict.tier];
+          if (tierChain !== undefined) tierOverride = Array.isArray(tierChain) ? tierChain : [tierChain];
+        }
+        if (verdict?.applied && verdict.effort) {
+          const level = (THINKING_LEVELS as readonly string[]).includes(verdict.effort) ? verdict.effort as SubagentThinkingLevel : undefined;
+          if (level) classifierThinking = level;
+        }
+        const chain = tierOverride
+          ? expandModelCandidates(tierOverride, rolesCfg.roles)
+          : resolveAgentModelChain(agent, rolesCfg);
+        return { chain, defaultThinking: classifierThinking ?? effectiveAgentThinking(agent, rolesCfg) };
+      }
+
       // Helper (herdr runner): validate + create topology + start the child pi,
       // without prompting — so parallel dispatch can materialise every pane
       // up front before any work starts.
@@ -994,10 +1030,12 @@ export default function (pi: ExtensionAPI) {
         task: string,
         cwd: string | undefined,
         timeoutMs: number | undefined,
+        solutionSpace?: string,
+        verdict?: RoutingVerdict,
       ): Promise<{ handle: HerdrHandle; timeoutMs: number; startedAt: number } | { error: string }> {
         const agent = agents.find((a) => a.name === agentName);
         if (!agent) return { error: `Unknown agent: "${agentName}".` };
-        const agentChain = resolveAgentModelChain(agent, rolesCfg);
+        const { chain: agentChain, defaultThinking } = await routedChain(agent, task, solutionSpace, verdict);
         const resolved = await resolveModelWithColdStartRetry(ctx, agentChain.candidates);
         if (!resolved.model) {
           return { error: `No model resolved for agent "${agentName}" (tried: ${resolved.attempted.join(", ") || "none"}).` };
@@ -1021,7 +1059,7 @@ export default function (pi: ExtensionAPI) {
             task,
             cwd: safe.path,
             model: `${resolved.model.provider}/${resolved.model.id}`,
-            thinking: agentChain.thinkingByCandidate.get(resolved.matchedCandidate ?? "") ?? effectiveAgentThinking(agent, rolesCfg),
+            thinking: agentChain.thinkingByCandidate.get(resolved.matchedCandidate ?? "") ?? defaultThinking,
             tools: agent.tools,
             readOnly: agent.sandbox === "read-only",
             timeoutMs: hardTimeoutMs,
@@ -1043,8 +1081,10 @@ export default function (pi: ExtensionAPI) {
         onUpdate?: AgentToolUpdateCallback<SubagentDetails>,
         heartbeatDetails?: () => SubagentDetails,
         onHeartbeat?: () => void,
+        solutionSpace?: string,
+        verdict?: RoutingVerdict,
       ): Promise<SubAgentResult> {
-        const prepared = await prepareHerdrOne(agentName, task, cwd, timeoutMs);
+        const prepared = await prepareHerdrOne(agentName, task, cwd, timeoutMs, solutionSpace, verdict);
         if ("error" in prepared) return makeErrorResult(agentName, task, prepared.error);
         const { handle, startedAt } = prepared;
         // Keep-alive parity with the SDK path: a long pane run must emit
@@ -1065,6 +1105,13 @@ export default function (pi: ExtensionAPI) {
           return await executeHerdrTask(handle, {
             onState: onActivity
               ? (state) => onActivity(herdrProgress(handle.agentType, task, state, startedAt, prepared.timeoutMs))
+              : undefined,
+            // The child's own advisor reviews the settled turn and may steer a
+            // correction into it — wait for that verdict before collecting, so
+            // the parent never consumes a draft the child is about to fix.
+            advisorWaitMs: subSettings.advisorWaitSecs * 1000,
+            onAdvisorPhase: onActivity
+              ? (phase) => onActivity(herdrProgress(handle.agentType, task, phase, startedAt, prepared.timeoutMs))
               : undefined,
             signal: parentSignal,
           });
@@ -1100,25 +1147,7 @@ export default function (pi: ExtensionAPI) {
           return makeErrorResult(agentName, task, `Unknown agent: "${agentName}". Available: ${available}.`);
         }
 
-        // Classifier routing (mode: classify): one Jev round-trip asks tier +
-        // effort. Precedence — pins beat dynamic, dynamic beats defaults:
-        // agentModels pin skips the call; agentThinking pin skips effort only;
-        // the verdict otherwise amends the frontmatter-derived defaults.
-        let tierOverride: string[] | undefined;
-        let classifierThinking: SubagentThinkingLevel | undefined;
-        const verdict = await classifyTask(ctx, subSettings.routing, agent, task, solutionSpace ?? params.solutionSpace, rolesCfg);
-        if (verdict?.applied && verdict.tier) {
-          const tierChain = rolesCfg.roles[verdict.tier];
-          if (tierChain !== undefined) tierOverride = Array.isArray(tierChain) ? tierChain : [tierChain];
-        }
-        if (verdict?.applied && verdict.effort) {
-          const level = (THINKING_LEVELS as readonly string[]).includes(verdict.effort) ? verdict.effort as SubagentThinkingLevel : undefined;
-          if (level) classifierThinking = level;
-        }
-
-        const agentChain = tierOverride
-          ? expandModelCandidates(tierOverride, rolesCfg.roles)
-          : resolveAgentModelChain(agent, rolesCfg);
+        const { chain: agentChain, defaultThinking } = await routedChain(agent, task, solutionSpace);
         const resolved = await resolveModelWithColdStartRetry(ctx, agentChain.candidates);
         if (!resolved.model) {
           const tried = resolved.attempted.join(", ") || "none";
@@ -1171,7 +1200,7 @@ export default function (pi: ExtensionAPI) {
             parentModel: ctx.model,
             modelRegistry: ctx.modelRegistry,
             thinkingByCandidate: agentChain.thinkingByCandidate,
-            defaultThinking: classifierThinking ?? effectiveAgentThinking(agent, rolesCfg),
+            defaultThinking,
             runAttempt: (model, thinkingLevel) =>
               runSubAgent({
                 cwd: safeCwd,
@@ -1250,6 +1279,7 @@ export default function (pi: ExtensionAPI) {
                 onUpdate,
                 () => makeDetails("chain")(results),
                 () => threadStore.refreshHeartbeat(thread.id),
+                params.solutionSpace,
               )
             : await runOne(
                 step.agent, taskWithContext, step.cwd,
@@ -1393,7 +1423,7 @@ export default function (pi: ExtensionAPI) {
           const herdrPrepared = herdrActive
             ? await Promise.all(params.tasks.map(async (t) => {
                 const startedAt = Date.now();
-                const prepared = await prepareHerdrOne(t.agent, t.task, t.cwd, t.timeout ?? params.timeout);
+                const prepared = await prepareHerdrOne(t.agent, t.task, t.cwd, t.timeout ?? params.timeout, t.solutionSpace);
                 if ("error" in prepared) return { ok: false as const, error: prepared.error, startedAt };
                 return { ok: true as const, handle: prepared.handle, timeoutMs: prepared.timeoutMs, startedAt: prepared.startedAt };
               }))
@@ -1542,8 +1572,21 @@ export default function (pi: ExtensionAPI) {
 
       // --- Single mode ---
       if (params.agent && params.task) {
+        // Classifier-chosen dispatch (single mode, inside herdr): with neither
+        // runner nor background named, Jev may answer "background" so long,
+        // self-contained work detaches instead of occupying a pane and blocking
+        // this turn. Explicit params always win; fail-open keeps the pane.
+        let autoBackground = false;
+        let dispatchVerdict: RoutingVerdict | undefined;
+        if (herdrActive && params.runner === undefined && subSettings.routing.dispatch === "classify") {
+          const routedAgent = agents.find((a) => a.name === params.agent);
+          if (routedAgent) {
+            dispatchVerdict = await classifyTask(ctx, subSettings.routing, routedAgent, params.task, params.solutionSpace, rolesCfg, { askDispatch: true });
+            autoBackground = dispatchVerdict?.applied === true && dispatchVerdict.dispatch === "background";
+          }
+        }
         // Background: run detached, return receipt immediately, notify on completion.
-        if (params.background) {
+        if (params.background || autoBackground) {
           const { taskId, receipt } = startBackgroundTask({
             agent: params.agent,
             task: params.task,
@@ -1558,7 +1601,10 @@ export default function (pi: ExtensionAPI) {
           // A foreground rerun of a pinned-sdk / disabled / unprobed call would
           // also run in-process — only advise when it would really delegate.
           const hint = backgroundHerdrHint(await wouldHerdrDelegate(params.runner, (ctx as any).settings?.subagent, herdrCli.exec));
-          const receiptText = hint ? `${receipt}\n${hint}` : receipt;
+          const autoNote = autoBackground
+            ? "Dispatch: the task classifier chose background (long/self-contained) — pass runner or background explicitly to override."
+            : "";
+          const receiptText = [receipt, hint, autoNote].filter(Boolean).join("\n");
           return {
             content: [{ type: "text", text: receiptText }],
             details: { ...makeDetails("single")([]), backgroundTaskId: taskId },
@@ -1582,6 +1628,8 @@ export default function (pi: ExtensionAPI) {
               onUpdate,
               () => makeDetails("single")([]),
               () => threadStore.refreshHeartbeat(thread.id),
+              params.solutionSpace,
+              dispatchVerdict,
             )
           : await runOne(
               params.agent, params.task, params.cwd,

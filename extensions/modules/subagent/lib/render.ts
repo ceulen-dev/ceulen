@@ -55,7 +55,7 @@ function formatMs(ms: number): string {
 export function formatUsageStats(
   usage: { input: number; output: number; cacheRead: number; cacheWrite: number; cost: number; contextTokens?: number; turns?: number },
   model?: string,
-  opts?: { toolCount?: number; durationMs?: number; thinking?: string },
+  opts?: { toolCount?: number; durationMs?: number; thinking?: string; advisorRounds?: number },
 ): string {
   const parts: string[] = [];
   if (opts?.toolCount) parts.push(`${opts.toolCount} toolcall${opts.toolCount > 1 ? "s" : ""}`);
@@ -70,6 +70,7 @@ export function formatUsageStats(
     parts.push(`ctx:${formatTokens(usage.contextTokens)}`);
   }
   if (opts?.thinking) parts.push(`think:${opts.thinking}`);
+  if (opts?.advisorRounds) parts.push(`advisor:${opts.advisorRounds} revision${opts.advisorRounds > 1 ? "s" : ""}`);
   if (model) parts.push(model);
   return parts.join(" ");
 }
@@ -256,7 +257,7 @@ export function renderSingleResult(
         container.addChild(new Markdown(finalOutput.trim(), 0, 0, mdTheme));
       }
     }
-    const usageStr = formatUsageStats(result.usage, result.model, { thinking: result.thinking });
+    const usageStr = formatUsageStats(result.usage, result.model, { thinking: result.thinking, advisorRounds: result.advisorRounds });
     if (usageStr) {
       container.addChild(new Spacer(1));
       container.addChild(new Text(theme.fg("dim", usageStr), 0, 0));
@@ -305,7 +306,7 @@ export function renderSingleResult(
     // (When errorMessage IS set, the Error: line above already conveys it.)
     text += `\n${theme.fg("muted", "(no output)")}`;
   }
-  const usageStr = formatUsageStats(result.usage, result.model, { toolCount, durationMs: result.durationMs, thinking: result.thinking });
+  const usageStr = formatUsageStats(result.usage, result.model, { toolCount, durationMs: result.durationMs, thinking: result.thinking, advisorRounds: result.advisorRounds });
   if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
   if (result.patch) text += `\n${theme.fg("success", "🌿 worktree")} (${result.patch.split("\n").length} diff lines)`;
   // Hint: getResultOutput always returns at least "(no output)", so finalOutput

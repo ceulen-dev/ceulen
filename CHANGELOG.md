@@ -2,6 +2,57 @@
 
 ## Unreleased
 
+- **subagent**: two runner-level upgrades for herdr-mode delegation.
+  - **Classifier-chosen dispatch**: the classify round-trip can now answer a
+    third question — pane or detached background — for a single dispatch
+    inside herdr whose caller named neither `runner` nor `background`
+    (`subagent.routing.dispatch`, default `classify`, new /config row).
+    Explicit params always win, the verdict is reused for tier/effort (one
+    Jev call per dispatch), and a background verdict says so on the receipt.
+    Verified live: a long, self-contained audit → background; a trivial
+    one-liner → visible pane.
+  - **Dead `wantTier` gate fixed** (surfaced by a live routing probe): the
+    tier question is now actually suppressed for an unresolvable chain
+    (typo'd `@alias`), matching its comment — previously the question was
+    asked unconditionally and a confident tier verdict could silently swap
+    in the role pools, hiding the typo. Tier answers are also only read when
+    the question was asked (defensive parse, mirroring effort/dispatch).
+  - **Advisor-aware collection**: a herdr child runs full pi, so its own
+    advisor reviews the settled turn and can steer corrections after the
+    parent had already collected the report (observed live: draft collected,
+    advisor note 16s later, child revised — the parent never saw the fix).
+    The child's advisor now publishes its review cycle
+    (`reviewing` → `done` + `steered`) to a sidecar named by
+    `CEULEN_ADVISOR_MARKER` (passed to the pane via `herdr --env`), and the
+    parent waits for the verdict before collecting: a short grace poll when no
+    review starts, the steered revision's settle when one does, ≤2 rounds,
+    bounded by `subagent.advisorWaitSecs` (default 120s, 0 = off; new /config
+    row). Write-capable children are told to update the report file when
+    follow-up feedback arrives. Results, history, and the usage line record
+    folded revisions (`advisor:N revision(s)`); the widget shows
+    `herdr: advisor-review` / `advisor-revise` while waiting. SDK children get
+    no advisor (the watch is TUI-gated) — nothing to wait for there.
+
+- **subagent**: classifier routing now applies to herdr dispatches too — the
+  herdr runner (`prepareHerdrOne`, used by foreground single/parallel
+  dispatch) resolved the model chain straight from frontmatter/pins and never
+  asked the classifier, so in a live herdr session every agent silently ran
+  its frontmatter default (a trivial reviewer went to `@smart`/`high` instead
+  of the routed `fast`/`off`). Both runners now share one `routedChain()`
+  helper, so tier, effort, pins, and `solutionSpace` behave identically
+  in-process and in panes. Verified live in herdr: reviewer trivial →
+  `combo/deepseek-v4.1-flash` · `off`, planner trivial →
+  `combo/deepseek-v4.1-flash` · `off`, worker deep-design →
+  `cmd/deepseek/deepseek-v4-pro` · `xhigh`. Alongside:
+  - history entries (`.pi/subagent-history.json`, `/subagent history`) now
+    record the resolved `thinking` level next to `model`, so routing decisions
+    stay auditable after the run;
+  - the bundled `worker` agent gains `timeout: 10` (same as planner/reviewer).
+    Herdr's prompt wait falls back to the 3-min inactivity constant when the
+    agent declares no timeout, and that window is a TOTAL cap there (the pane
+    is cancelled), unlike the SDK path where it resets on activity — a routed
+    `xhigh` worker could otherwise die at 3 min.
+
 - **subagent**: OMP-parity live-UI surface for running agents, covering SDK,
   background, and herdr threads alike (all store-driven; pure renderers
   unit-tested in `test/widget.test.ts`):

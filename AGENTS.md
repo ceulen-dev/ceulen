@@ -188,8 +188,37 @@ cap-3 preview). Raw SDK event labels (`message_end`…) never render — only
   per task feeds the state. Precedence — pins beat dynamic, dynamic beats
   defaults: chain-entry `:level` > `agentModels` pin (disables both; no
   classify call) > `agentThinking` pin (disables effort only) > classifier >
-  frontmatter defaults. Fail-open: classifier off/error/below-threshold →
-  static role chain.
+  frontmatter defaults. An unresolvable chain (typo'd `@alias`) suppresses the
+  tier question — the dispatch fails loud on the typo instead of a tier
+  verdict silently swapping in the role pools. Fail-open: classifier off/error/below-threshold →
+  static role chain. Both runners share ONE `routedChain()` (index.ts): the
+  herdr path (`prepareHerdrOne`) used to resolve the chain straight from
+  frontmatter, so routing only ever applied to in-process/SDK dispatches —
+  don't reintroduce a second resolution path. Completed runs record the
+  resolved `model` + `thinking` in `.pi/subagent-history.json` and
+  `/subagent history`. The same round-trip can answer a third question:
+  `subagent.routing.dispatch` (default `classify`) lets it pick pane vs
+  detached background for a single dispatch inside herdr whose caller named
+  neither `runner` nor `background` — explicit params always win, the verdict
+  is reused for tier/effort (one Jev call per dispatch), and a background
+  verdict prepends a note to the receipt.
+- **Advisor-aware collection** (herdr panes only): a child pane runs full pi,
+  so its OWN advisor reviews each settled turn and can steer corrections
+  *after* the parent would otherwise collect (observed live: report collected
+  at the draft, advisor note 16s later, child revised — the parent never saw
+  it). The child's advisor publishes a review-cycle marker (`phase`
+  `reviewing`/`done` + `steered`, shared contract in
+  `extensions/lib/advisor-marker.ts`, path handed to the pane via
+  `herdr --env CEULEN_ADVISOR_MARKER`); `executeHerdrTask` waits for `done`
+  before collecting — a grace poll when no review starts (skip paths publish
+  nothing), the steered revision's settle when one does, ≤2 rounds, all
+  bounded by `subagent.advisorWaitSecs` (default 120, 0 = off). Write-capable
+  children are told by the delivery contract to update the report file when
+  follow-up feedback arrives. `SubAgentResult.advisorRounds` + history + the
+  usage line (`advisor:N revision(s)`) record folded revisions; the widget
+  shows `herdr: advisor-review` / `advisor-revise` while waiting. SDK children
+  get no advisor at all (the watch is TUI-gated), so there is nothing to wait
+  for there.
 - **Liveness timeouts** (upstream's always-on 20-min hard cap is GONE):
   `subagent.hardTimeoutMins` defaults 0 = OFF — a child producing events is
   never hard-killed; the idle window (`subagent.idleTimeoutMins`, default 3,

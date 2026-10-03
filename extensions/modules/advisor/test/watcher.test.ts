@@ -1,6 +1,10 @@
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it } from "node:test";
 import { buildEvidence, createRuntime, reviewTurn, SYSTEM, type WatcherHost, type IsolatedCall } from "../lib/watcher.js";
+import { ADVISOR_MARKER_ENV } from "../../../lib/advisor-marker.js";
 import type { AdvisorConfig } from "../lib/config.js";
 
 const NO_USAGE = { input: 0, output: 0, cacheRead: 0, totalTokens: 0, cost: 0 };
@@ -399,5 +403,76 @@ describe("buildEvidence bounded transcript", () => {
     assert.ok(texts.includes("kept-after-skip"), "loop continues past a skipped entry");
     assert.ok(!texts.some((t: string) => t.includes("b".repeat(6_000))), "the over-budget entry is the omitted one");
     assert.equal(out.messages[0].content[0].text, "start", "first entry always kept");
+  });
+});
+
+// The sidecar protocol that lets a supervising parent (subagent's herdr
+// runner) wait for the review verdict instead of collecting a draft the
+// advisor is about to correct. Only delegated children carry the env var.
+describe("advisor marker sidecar", () => {
+  let dir: string;
+  let file: string;
+  beforeEach(() => {
+    reply = "";
+    failWith = undefined;
+    calls = 0;
+    host = makeHost();
+    dir = mkdtempSync(join(tmpdir(), "advisor-marker-"));
+    file = join(dir, "stamp.advisor.json");
+    process.env[ADVISOR_MARKER_ENV] = file;
+  });
+  afterEach(() => {
+    delete process.env[ADVISOR_MARKER_ENV];
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it("publishes reviewing mid-call, then done+steered when the note wakes the child", async () => {
+    reply = '{"severity":"concern","note":"the report cites an unverified claim"}';
+    const seen: string[] = [];
+    const probe: IsolatedCall = async (_ctx, models) => {
+      seen.push(JSON.parse(readFileSync(file, "utf8")).phase);
+      return { text: reply, model: models[0] ?? "", usage: NO_USAGE };
+    };
+    const { rt, e } = setup(5);
+    await reviewTurn(rt, ctx(e), asHost(host), probe);
+    assert.deepEqual(seen, ["reviewing"], "mid-call phase is reviewing");
+    const marker = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(marker.phase, "done");
+    assert.equal(marker.steered, true);
+    assert.ok(typeof marker.at === "number", "timestamp present for freshness checks");
+    assert.equal(host.userMessages.length, 1, "the concern steered a follow-up turn");
+  });
+
+  it("publishes done without steering when the review finds nothing", async () => {
+    reply = "";
+    const { rt, e } = setup(5);
+    await reviewTurn(rt, ctx(e), asHost(host), fake);
+    const marker = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(marker.phase, "done");
+    assert.equal(marker.steered, false);
+  });
+
+  it("a nit deferred by the cooldown is not a steer (the child is not woken)", async () => {
+    reply = '{"severity":"concern","note":"first concern about imports"}';
+    const { rt, e } = setup(5);
+    await reviewTurn(rt, ctx(e), asHost(host), fake);
+    reply = '{"severity":"nit","note":"second, distinct naming nit"}';
+    await reviewTurn(rt, ctx([...e, ...entries(4, 2)]), asHost(host), fake);
+    const marker = JSON.parse(readFileSync(file, "utf8"));
+    assert.equal(marker.steered, false, "deferred nit is staged for the next turn, not steered");
+  });
+
+  it("skip paths publish no marker (the parent's grace poll reads that as 'collect now')", async () => {
+    const { rt, e } = setup(2); // below minToolCalls 3
+    await reviewTurn(rt, ctx(e), asHost(host), fake);
+    assert.equal(existsSync(file), false);
+  });
+
+  it("writes nothing when the env var is unset (the parent's own session)", async () => {
+    delete process.env[ADVISOR_MARKER_ENV];
+    reply = '{"severity":"concern","note":"x"}';
+    const { rt, e } = setup(5);
+    await reviewTurn(rt, ctx(e), asHost(host), fake);
+    assert.equal(existsSync(file), false);
   });
 });

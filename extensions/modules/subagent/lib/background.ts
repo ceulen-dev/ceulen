@@ -345,6 +345,8 @@ function recordHistory(
       summary: structured.summary,
       background: true,
       model: result?.model,
+      thinking: result?.thinking,
+      advisorRounds: result?.advisorRounds,
     });
   } catch {
     // History file not writable — non-fatal.
