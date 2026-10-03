@@ -20,8 +20,10 @@
  *
  * Config: `classifier` section of ~/.pi/agent/settings.json (global only —
  * see lib/settings.ts). /config owns the rows (Model tab → Classifier).
- * pi-classifier's planGate is NOT ported (pi-plan removed; returns with the
- * pi-plan port — source preserved in pi-extensions git history).
+ * pi-classifier's planGate is NOT ported and NOT consumed by the plan module:
+ * pi 1.0.0's `tool_call` hook can only block, never approve, so a gate could
+ * only have trimmed plan-mode confirm prompts (source preserved in
+ * pi-extensions git history).
  */
 
 import { appendFile, mkdir } from "node:fs/promises";

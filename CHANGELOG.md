@@ -2,6 +2,38 @@
 
 ## Unreleased
 
+- **plan**: new module — read-only plan mode ported from `@bacnh85/pi-plan`
+  0.16.6, reduced to the permission + review gate. `/plan` (also `--plan`,
+  `ctrl+alt+p`) toggles planning; `write_plan` records a reviewable Markdown
+  plan (default `.pi/plans/<timestamp>-<slug>.md`) and `ask_user_question`
+  resolves consequential ambiguities with 2–4 options, a ★-recommended
+  default, and an "Other" free-form path. `/plan-approve current|new` executes
+  the approved plan here or in a fresh session; `/plan-auto` arms autonomous
+  approval (a written plan executes with no keypress).
+  - **Save-plans policy** (`plan.savePlans`, /config → Tasks → Plan mode):
+    `all` writes every draft, `approved` keeps drafts in memory and writes the
+    file at approval, `none` never persists (the conversation is the copy;
+    fresh-session execution is refused because it needs a file). Plans
+    directory (`plan.plansDir`, default `.pi/plans`, `{yyyymm}` supported),
+    plan-only model/thinking (restored on exit), and the auto-approve toggle
+    are rows too.
+  - **Tool gating**: mutators (`edit`/`write`/`apply_patch`/
+    `str_replace_editor`/Serena-Munin mutations) hard-block; bash writers
+    hard-block, read-only bash (incl. pipelines of reads, `cd &&` chains,
+    `VAR=` prefixes, read-only git) auto-runs; unknown executables and non-read
+    tools take an Allow-once / Allow-for-this-session / Deny prompt (headless
+    blocks). A `subagent` dispatch auto-allows only when every named agent
+    resolves `sandbox: read-only`.
+  - **Dropped from upstream** (ceulen covers them elsewhere): the
+    implement→verify→review flow, `/rewind`, `/goal`, `/specs`, `/handoff`,
+    `/btw`, `/doctor`, the fallback chain, and the Jev plan gate. Vendored
+    shell classifier with one hardening deviation: `xargs --null rm` no longer
+    strips to an empty payload (upstream read it as "read").
+  - Config: `plan` section (GLOBAL settings.json + trusted project overlay),
+    read per event so /config saves apply live; Tasks tab → Plan mode.
+  - Remove the standalone `@bacnh85/pi-plan` when enabling this module — the
+    conflict guard refuses the duplicate commands/tools.
+
 - **subagent**: two runner-level upgrades for herdr-mode delegation.
   - **Classifier-chosen dispatch**: the classify round-trip can now answer a
     third question — pane or detached background — for a single dispatch

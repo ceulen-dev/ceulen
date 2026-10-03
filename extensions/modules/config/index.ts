@@ -252,6 +252,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
     composer: { section: "Composer", icon: "🎨" },
     ux: { section: "UX discipline", icon: "📐" },
     ponytail: { section: "Ponytail", icon: "🦥" },
+    plan: { section: "Plan mode", icon: "🗺️" },
     serena: { section: "Serena" },
     repair: { section: "Repair", icon: "🔧" },
     fff: { section: "FFF search" },

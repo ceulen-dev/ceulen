@@ -24,6 +24,8 @@ import composerModule, { composerConfig } from "../modules/composer/index.ts";
 import ponytailModule, { ponytailConfig } from "../modules/ponytail/index.ts";
 import subagentModule from "../modules/subagent/index.ts";
 import { subagentConfig } from "../modules/subagent/configPanel.js";
+import planModule from "../modules/plan/index.ts";
+import { planConfig } from "../modules/plan/configPanel.js";
 import steeringModule from "../modules/steering/index.ts";
 import { steeringConfig } from "../modules/steering/configPanel.js";
 import repairModule from "../modules/repair/index.ts";
@@ -112,6 +114,10 @@ export const MODULES: ModuleEntry[] = [
   // `subagent` tool's instructions param — hooks resolve at call time, so
   // order is not load-bearing; this is grouping readability.
   { name: "subagent", category: "Tasks", describe: "In-process subagents: scout/tester/worker/planner/reviewer agents, role-based model pools, classifier tier+thinking routing, background tasks with liveness, herdr delegation.", load: subagentModule, config: subagentConfig, tools: ["subagent", "herdr"] },
+  // Plan after subagent: its tool gating reads subagent agent frontmatter
+  // (sandbox: read-only) and its before_agent_start must compose BEFORE
+  // steering (the last prompt rewriter — see its entry below).
+  { name: "plan", category: "Tasks", describe: "Read-only plan mode: /plan toggle, tool gating, write_plan + ask_user_question, plan model/thinking, approval handoff.", load: planModule, config: planConfig, tools: ["write_plan", "ask_user_question"] },
   // Steering LAST before the config module (load order is load-bearing even
   // though its /config rows live on the Model tab, which PI_TAB_ORDER sorts
   // independently): its before_agent_start handler must run AFTER ponytail's

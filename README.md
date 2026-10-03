@@ -78,6 +78,10 @@ Pick the input editor's look from `/config` → Appearance → Composer Shape: S
 
 `/ux off|lite|strict` injects a UI design method (tokens only, full interaction states, no AI-slop tells) for any UI work; `strict` blocks handoff until the deterministic `ux_audit` tool passes (APCA contrast, token, and state gates — no model needed). Ships the `ux-*` skills. Deactivate with `stop ux`.
 
+### plan — read-only plan mode
+
+`/plan` (or `--plan`, `ctrl+alt+p`) switches a read-only planning mode: research tools and read-only bash run untouched, file mutators hard-block, unknown commands ask first. The agent produces a reviewable plan via `write_plan` and can resolve ambiguities with `ask_user_question`; `/plan-approve current|new` executes it in this session or a fresh one. Plans land in `.pi/plans/` by default — **Save plans** in `/config` → Tasks → Plan mode decides which ones hit disk (`all` drafts, `approved` only finalized ones, `none` conversation-only). Plan-only model/thinking and `/plan-auto` autonomous approval are config rows too.
+
 ### serena / fff / rtk — code navigation & search (bundled tools)
 
 - **serena** — semantic code tools (find symbol, references, rename, diagnostics) via a persistent language-server worker

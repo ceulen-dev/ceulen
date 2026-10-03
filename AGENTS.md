@@ -52,7 +52,8 @@ and logs, never gates) resolve models via `modelRegistry.getAvailableOfType/find
 and ask through `modelRegistry.classify()` (never rejects). Settings stay in the
 GLOBAL `classifier` section (`model`, `permission.{enabled,mode,threshold}` —
 same keys/values as pi-classifier, migration-free; `planGate` is left untouched
-for the future pi-plan port). Replaces the standalone package — if both are
+and NOT consumed by the plan module — pi 1.0.0's `tool_call` can only block,
+never approve, so the gate would only have trimmed prompts). Replaces the standalone package — if both are
 installed, first tool registration wins.
 
 ### Advisor module (advisor)
@@ -255,6 +256,60 @@ Layering: defaults → global settings.json → trusted project file. Per-tool
 kill-switch: wrapped tools honor `ceulen.disabledTools` at registration
 (`defaultActive: false`), so /config's live tool toggles work over the
 wrapped built-ins too.
+
+### Plan module (plan)
+
+Ported from `@bacnh85/pi-plan` 0.16.6 (see `extensions/modules/plan/`), reduced
+to the **permission + review gate**: `/plan` toggle (+ `--plan` flag,
+ctrl+alt+p), tool gating, `write_plan`, `ask_user_question`, plan
+model/thinking, approval handoff, and the save-plans policy. Registration
+surface: `/plan`, `/plan-approve current|new`, `/plan-model`, `/plan-thinking`,
+`/plan-auto`, the two tools, the `ceulen-plan` state entry + status key.
+
+DELIBERATE DROPS from upstream (enumerated, not accidental): the
+implement→verify→review flow (`/flow`, [verification: pass] loop, workspace
+leases, worktree `flowIsolation` — ceulen's subagent `sandbox:"worktree"` +
+`merge:"3way"` and the advisor reviewer already cover it), `/rewind` +
+checkpoints, `/goal`, `/specs`, `/handoff`, `/btw`, `/doctor`,
+`/plan-fallback` (the advisor module's fallback chain covers overloads), and
+the Jev plan gate — the classifier module's `tool_call` note holds:
+pi 1.0.0's `tool_call` can only block, never approve, so the gate could only
+have trimmed confirm prompts; wire it in only if prompt fatigue shows up.
+
+**Plan files**: `<repo>/.pi/plans/<timestamp>-<slug>.md` by default
+(`plan.plansDir`, `{yyyymm}` expands to the UTC month). `plan.savePlans`
+decides WHICH plans hit disk: `all` (every `write_plan`, default), `approved`
+(drafts stay in the module's state, the file is written at approval), `none`
+(never — the conversation is the only copy, and fresh-session execution is
+refused because it needs a plan file). Refinements of the same draft reuse its
+file, containment-checked against the resolved plans dir; an approved plan is
+cleared on the next plan-mode entry.
+
+**Tool gating** (`tool_call`): `BLOCKED_TOOLS` hard-error, bash writers
+hard-block, bash reads + `READ_ONLY_TOOLS` auto-allow, everything else takes a
+confirm tier (`Allow once` / `Allow for this session` / `Deny`, keyed by tool
+name or `bash:<first token>`, full command for interpreter first tokens —
+cleared on every mode toggle). Headless confirm-tier calls block. A `subagent`
+call auto-allows only when EVERY named agent resolves `sandbox: read-only`
+(via `discoverAgents`, the subagent module's loader). The bash classifier is
+vendored from upstream (`lib/shell-gate.ts`) with ONE deviation: a valueless
+xargs long option (`xargs --null rm`) no longer eats the payload — upstream
+read it as "read" and auto-allowed a writer.
+
+**Settings** (`plan` section, GLOBAL agent-dir settings.json, trusted project
+overlay; read per event so /config saves are live): `/config` → Tasks → Plan
+mode rows `plan.savePlans` (closed set), `plan.plansDir`, `plan.planModel`
+(catalogue menu), `plan.planThinking` (closed set), `plan.autoApprove`. The
+plan model/thinking apply only while planning and the pre-plan values are
+restored on exit; `/plan-model` and `/plan-thinking` remain as command
+surfaces. `plan.autoApprove` (or bare `/plan-auto`) approves a written plan
+and executes it in the current session on settle, no keypress.
+
+LOAD ORDER: the registry places plan AFTER subagent (its gating reads subagent
+agent frontmatter) and BEFORE steering (steering must stay the last
+`before_agent_start` rewriter). Standalone `@bacnh85/pi-plan` must be removed
+when ceulen's plan module is enabled — the conflict guard refuses the
+duplicate commands/tools.
 
 ### Steering module (steering)
 
@@ -546,7 +601,10 @@ first three apply next turn, the bash pair binds at load = next session,
 disclosed by row warning + save notify; **Tools** tab, `Repair` section) and
 **zai** (`zai.{baseUrl,speed,signing,minIntervalMs}` — writes the GLOBAL
 `zai` section; baseUrl save live-re-registers the provider, the rest read
-per request; **Providers** tab, `Z.AI (Anthropic)` section). A NON-CORE module
+per request; **Providers** tab, `Z.AI (Anthropic)` section) and
+**plan** (`plan.{savePlans,plansDir,planModel,planThinking,autoApprove}` —
+writes the GLOBAL `plan` section, read per event so saves apply live;
+**Tasks** tab, `Plan mode` section). A NON-CORE module
 without a contribution factory gets
 a synthesized Enable-only section (serena → **Tools** · `Serena`, fff →
 **Tools** · `FFF search`, rtk → **Shell** · `RTK`). The per-module kill-switch
