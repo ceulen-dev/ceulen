@@ -18,8 +18,8 @@ extensions/
   modules/<name>/        one directory per module (self-contained: index.ts, lib/, commands/, test/)
 skills/                  skill directories shipped with the package (each module contributes its OWN
                          skill dirs via resources_discover — ponytail the six `ponytail*`, ux the four
-                         `ux-*`, munin `munin` — never the skills/ root, so each kill-switch gates its
-                         own skills)
+                         `ux-*`, munin `munin`, web `web` — never the skills/ root, so each kill-switch
+                         gates its own skills)
 themes/                 theme JSONs shipped with the package (declared via the package.json
                          `pi.themes` manifest — loaded by pi itself, no module, no kill-switch;
                          scripts/validate-themes.mjs runs in `npm test`)
@@ -29,8 +29,10 @@ themes/                 theme JSONs shipped with the package (declared via the p
 
 - A module default-exports a factory `(pi: ExtensionAPI, deps?: ModuleLoadDeps) => void` (deps is rarely used — the config module reads the contribution map); it registers commands/tools/handlers and returns. Public extension API only.
 - No external runtime dependencies — vendor shared code under `extensions/lib/` (with a `// ponytail: vendored from <pkg> <version>` header) rather than adding `dependencies`.
-  One sanctioned exception: `@ff-labs/fff-node` (fff module) is a native FFI
-  engine that cannot be vendored — pi's managed install installs real
+  Two sanctioned exceptions, both un-vendorable: `@ff-labs/fff-node` (fff
+  module, a native FFI engine) and the web module's `jsdom` + `gemini-reverse`
+  (+ `axios`, which `gemini-reverse` hard-depends on) — see the Web module
+  section for what is vendored instead. pi's managed install installs real
   `dependencies` for npm packages.
 - Tool registrations that should be per-tool toggleable list their canonical names on the module's `tools?: string[]` registry entry; names in `ceulen.disabledTools` (helpers in `extensions/lib/tools.ts`) register via `defaultActive: false`, and the config module's tool rows re-activate/deactivate them live with `setActiveTools` (no `/reload`).
 - Tests: `node:test` + tsx, in `extensions/modules/<name>/test/`. The bundle root `package.json` `test` script globs them. Test dirs are excluded from `tsc --noEmit` when they use loose harness stubs (usage, ponytail); they run under tsx.
@@ -368,6 +370,62 @@ re-registers the provider, router precedent). `/zai` = status, never prints
 the key. ZCode signing only matters on the `zcode.z.ai/api/v1/ultra-zai`
 route — `api.z.ai` ignores the `X-Client-*` headers.
 
+### Web module (web)
+
+Ported from `@bacnh85/pi-web` 0.17.8 (see `extensions/modules/web/`): the 11
+unified web tools — `web_search` (SearXNG → Brave → Firecrawl adaptive),
+`web_extract` (static JSDOM → Firecrawl → Crawl4AI → agy), `web_map`,
+`web_crawl` (Firecrawl light / Crawl4AI full), `web_screenshot` + `web_pdf`
+(Crawl4AI daemon, local headless Chrome for localhost/LAN/file URLs),
+`web_interact` (CDP headless Chrome: trusted click/type/press, evaluate,
+dialog answers, device-metrics emulation + overflow probe), `web_research`
+(Gemini web ask / Deep Research), `web_image` (Gemini web → ChatGPT web →
+Z.ai GLM-Image → custom endpoint, inline image blocks), `web_chat`
+(ChatGPT web / OpenAI-compatible gateway), `web_status`. Plus the
+conditional `WEB_ROUTING_GUIDANCE` injection (`before_agent_start`, only when
+a `web_*` tool is active — append-only, the fff precedent) and the `web`
+skill via its own `resources_discover` dir (kill-switch gated). No slash
+command — `web_status` covers status.
+
+**Dependencies** — this module is ceulen's SECOND sanctioned dependency
+exception (after `@ff-labs/fff-node`): `jsdom` and `gemini-reverse` cannot be
+vendored (jsdom's transitive tree; a maintained reverse-engineering client),
+and `axios` rides along because `gemini-reverse` hard-depends on it (its
+proxy support backs `GEMINI_WEB_PROXY` in the cookie-rotation POST).
+Everything else is VENDORED under `extensions/modules/web/vendor/`
+(`// ponytail: vendored from ...` headers): `@mozilla/readability`,
+`turndown`, `turndown-plugin-gfm` — all pure-JS. The vendored turndown carries
+ONE local delta: its `createHTMLParser` falls back to `jsdom`'s `DOMParser`
+instead of the un-vendored `@mixmark-io/domino`. `vendor/package.json`
+(`{"type":"commonjs"}`) keeps the CJS vendor files CJS under the bundle's
+`type: module`. All heavy imports stay lazy (`createRequire` in
+`lib/content.ts`, dynamic `import()` for gemini-reverse), so the entry import
+graph is unchanged.
+
+**Config is `/config`-editable** (Tools tab, `Web` section 🌍): 16 provider
+rows over the GLOBAL agent-dir `settings.json` `web` section, read PER TOOL
+CALL (a save applies without `/reload`), with a trusted project
+`.pi/settings.json` `web` section shadowing per field. Precedence: per-call
+params > `process.env` (ceulen's bundle `env.ts` already ingests agent-dir +
+trusted-cwd `.env*` into it — pi-web's own dotenv file-walking was DELETED,
+see `lib/config.ts`) > trusted project > global > built-in default. Secrets
+are masked rows; the save notify discloses env overrides and project shadows.
+The env names are the stable contract (unchanged from pi-web): `SEARXNG_BASE_URL`,
+`BRAVE_API_KEY`, `FIRECRAWL_API_URL`/`_API_KEY`/`_TIMEOUT_MS`,
+`CRAWL4AI_API_URL`/`_API_TOKEN`/`_API_TIMEOUT_MS`, `GEMINI_WEB_SECURE_1PSID`,
+`GEMINI_WEB_PROXY`, `ZAI_API_KEY`, `WEB_IMAGE_API_BASE_URL`/`_API_KEY`/`_DAILY_CAP`,
+`WEB_CHAT_API_BASE_URL`/`_API_KEY`. Env-only (no row): `GEMINI_WEB_SECURE_1PSIDTS`,
+`GEMINI_WEB_COOKIE_STORE`, `GEMINI_WEB_KEEPALIVE`, `GEMINI_WEB_ROTATE_INTERVAL_MS`,
+`CHATGPT_WEB_*`, `WEB_IMAGE_API_LABEL`, `WEB_IMAGE_MIN_INTERVAL_MS`, `CHROME_PATH`.
+The two timeout rows are a CLOSED SET (15s/30s/1m/2m/5m) because pi-web's
+loaders reject a value < 1000 ms by throwing — a free-text row could brick
+every Firecrawl/Crawl4AI-backed tool.
+
+Per-tool kill-switch: all 11 tools register `defaultActive` from
+`ceulen.disabledTools` (registry `tools` list) — /config re-activates them
+live. Standalone `@bacnh85/pi-web` must be removed when this module is enabled
+(the conflict guard refuses the duplicate `web_*` names).
+
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 
 - The bundle entry wraps each module's `pi` in `guarded()` (extensions/index.ts, one shared ownership map for the whole load loop): a name claimed by a DIFFERENT module throws at load; same-module re-claims pass (router re-registers its provider at runtime — that's the supported update path). Contract tests: `extensions/modules/router/test/guard.test.ts`.
@@ -604,7 +662,12 @@ disclosed by row warning + save notify; **Tools** tab, `Repair` section) and
 per request; **Providers** tab, `Z.AI (Anthropic)` section) and
 **plan** (`plan.{savePlans,plansDir,planModel,planThinking,autoApprove}` —
 writes the GLOBAL `plan` section, read per event so saves apply live;
-**Tasks** tab, `Plan mode` section). A NON-CORE module
+**Tasks** tab, `Plan mode` section) and **web** (`web.{searxng.baseUrl,
+brave.apiKey, firecrawl.*, crawl4ai.*, gemini.cookie, gemini.proxy,
+image.zaiKey, image.customUrl, image.customKey, image.dailyCap, chat.baseUrl,
+chat.apiKey}` — writes the GLOBAL `web` section, read per tool call so saves
+apply live; the two timeout rows are a closed set; **Tools** tab, `Web`
+section 🌍). A NON-CORE module
 without a contribution factory gets
 a synthesized Enable-only section (serena → **Tools** · `Serena`, fff →
 **Tools** · `FFF search`, rtk → **Shell** · `RTK`). The per-module kill-switch

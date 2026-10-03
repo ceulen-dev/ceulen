@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- **web**: new module — the 11 unified web tools ported from `@bacnh85/pi-web`
+  0.17.8: `web_search` (SearXNG → Brave → Firecrawl adaptive), `web_extract`
+  (static JSDOM → Firecrawl → Crawl4AI → agy), `web_map`, `web_crawl`,
+  `web_screenshot` / `web_pdf` (Crawl4AI daemon, local headless Chrome for
+  localhost/LAN/file URLs), `web_interact` (trusted CDP click/type/evaluate
+  with device-metrics emulation), `web_research` (Gemini web ask / Deep
+  Research), `web_image` (Gemini web → ChatGPT web → Z.ai GLM-Image → custom),
+  `web_chat`, `web_status`. Ships the `web` skill and injects the
+  backend-routing guidance only while a `web_*` tool is active.
+  - Config: `/config` → Tools → Web — 16 rows over the GLOBAL `web` settings
+    section (SearXNG/Brave/Firecrawl/Crawl4AI endpoints, keys and timeouts,
+    Gemini web cookie/proxy, image + chat providers), read per tool call so a
+    save applies with no `/reload`; a trusted project `.pi/settings.json`
+    `web` section shadows per field, env vars win over both. Secrets are masked
+    rows. The two timeout rows are a closed set — pi-web's loaders reject
+    anything below 1000 ms by throwing.
+  - Per-tool kill-switch: all 11 tools appear as toggle rows (Tools tab).
+  - Dependencies: `jsdom` + `gemini-reverse` (+ `axios`, which gemini-reverse
+    hard-depends on) are the module's un-vendorable engines;
+    `@mozilla/readability`, `turndown`, and `turndown-plugin-gfm` are vendored
+    under `extensions/modules/web/vendor/`.
+  - Remove the standalone `@bacnh85/pi-web` when enabling this module — the
+    conflict guard refuses the duplicate `web_*` names.
+
 - **plan**: new module — read-only plan mode ported from `@bacnh85/pi-plan`
   0.16.6, reduced to the permission + review gate. `/plan` (also `--plan`,
   `ctrl+alt+p`) toggles planning; `write_plan` records a reviewable Markdown

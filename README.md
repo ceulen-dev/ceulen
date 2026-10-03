@@ -21,10 +21,11 @@ Add `-l` to install into the current project instead of your user scope. Update 
 /ceulen                  # which modules are active
 ```
 
-Most modules work out of the box. Two need credentials:
+Most modules work out of the box. Two need credentials; one is optionally configured:
 
 - **router** — set `router.baseUrl` (via `/config` → Providers, or `ROUTER_BASE_URL` env), then `/login router`.
 - **munin** — set project + API key via `/config` → Memory (saved to `<repo>/.pi/settings.json`).
+- **web** — optional: set search/extract backends via `/config` → Tools → Web (SearXNG/Brave/Firecrawl/Crawl4AI). Works with only one backend configured; `web_status` reports what is ready.
 
 ## Modules
 
@@ -81,6 +82,13 @@ Pick the input editor's look from `/config` → Appearance → Composer Shape: S
 ### plan — read-only plan mode
 
 `/plan` (or `--plan`, `ctrl+alt+p`) switches a read-only planning mode: research tools and read-only bash run untouched, file mutators hard-block, unknown commands ask first. The agent produces a reviewable plan via `write_plan` and can resolve ambiguities with `ask_user_question`; `/plan-approve current|new` executes it in this session or a fresh one. Plans land in `.pi/plans/` by default — **Save plans** in `/config` → Tasks → Plan mode decides which ones hit disk (`all` drafts, `approved` only finalized ones, `none` conversation-only). Plan-only model/thinking and `/plan-auto` autonomous approval are config rows too.
+
+### web — unified web tools
+
+`web_search` (adaptive SearXNG → Brave → Firecrawl), `web_extract`, `web_map`, `web_crawl`, `web_screenshot`, `web_pdf`, `web_interact` (real headless-Chrome click/type/evaluate for verifying UI behaviour), `web_research` (Gemini web + Deep Research), `web_image`, `web_chat`, `web_status`. Backend-routing guidance is injected only while a web tool is active.
+
+- Config: `/config` → Tools → **Web** — 16 provider rows (endpoints, keys, timeouts, Gemini cookie, image/chat providers). Written to the global `web` settings section and read per tool call, so saves apply without `/reload`; `BRAVE_API_KEY`, `SEARXNG_BASE_URL`, `FIRECRAWL_*`, `CRAWL4AI_*`, `GEMINI_WEB_*`, `ZAI_API_KEY`, `WEB_IMAGE_*`, `WEB_CHAT_*` env vars still win. Secrets are masked. Individual tools toggle from the same section.
+- Static extraction uses vendored readability/turndown (no extra install); `jsdom` and `gemini-reverse` are the module's only runtime dependencies.
 
 ### serena / fff / rtk — code navigation & search (bundled tools)
 

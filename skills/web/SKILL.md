@@ -1,0 +1,153 @@
+---
+name: web
+description: Web search, content extraction, site crawling, page capture, real-browser interaction (trusted click/type/evaluate in headless Chrome), Gemini web-tier research, image generation, and one-off ChatGPT-web/gateway chat via ceulen's web module. Use when the user needs current web search results, documentation lookup, factual research, AI-synthesized research with sources (Gemini Deep Research), image generation from text, one-off ChatGPT/gateway chat, source discovery, URL-to-markdown extraction, JSON extraction from websites, site URL discovery, site crawling, page screenshots/PDFs, or clicking buttons/typing/verifying UI behavior in a real browser. Use when the user mentions searching the web, finding docs, looking something up, researching deeply, generating/creating an image, asking another model, ChatGPT chat/images, scraping/extracting content from a URL, capturing a page, or interacting with a page (click a button, submit a form).
+---
+
+# Web — Unified Web Tools
+
+Use the **11 unified tools** from ceulen's web module for all web-related tasks. These tools automatically select the best backend from SearXNG, Brave Search, Firecrawl, Crawl4AI, and agy (when installed) — you don't need to know which backend to use. Search selection is adaptive: broad discovery prefers self-hosted SearXNG, while precision-sensitive queries and inline content prefer Brave.
+
+## Quick Reference
+
+| Tool | Purpose | Auto-selection |
+|---|---|---|
+| `web_search` | Search the web for sources, docs, facts | SearXNG → Brave → Firecrawl |
+| `web_extract` | Extract readable content from a URL | Static (JSDOM) → Dynamic (Firecrawl) → Full (Crawl4AI) → agy (model-backed) |
+| `web_map` | Discover URLs from a site | Firecrawl Map (only option) |
+| `web_crawl` | Crawl multiple pages from a site | Light (Firecrawl) or Full (Crawl4AI) |
+| `web_screenshot` | Capture page screenshot as PNG | Crawl4AI daemon (public URLs) or local headless Chrome (localhost/LAN/file URLs — auto-detected) |
+| `web_pdf` | Generate page PDF | Crawl4AI daemon (public URLs) or local headless Chrome (localhost/LAN/file URLs — auto-detected) |
+| `web_interact` | Drive a real browser: trusted click/type/press, JS evaluate, wait_for, screenshots | Local headless Chrome via CDP (any http/https/file URL the local machine reaches) |
+| `web_research` | AI-synthesized research with sources | Gemini web tier: ask = grounded answer (guest OK); research = full Deep Research via the pure-Node DR client (live cookie; stale sessions return an honest partial result) |
+| `web_image` | Generate images from a text prompt | Auto chain gemini (web tier, TLS-gated) → chatgpt (`CHATGPT_WEB_AUTH_KEY` / codex login) → Z.ai GLM-Image (`ZAI_API_KEY`; `size` param for aspect, e.g. `960x1728` portrait) → custom OpenAI-images endpoint |
+| `web_chat` | One-off chat completion | ChatGPT web tier is the DEFAULT when a credential is configured (`CHATGPT_WEB_AUTH_KEY` / codex login); gateway (`WEB_CHAT_API_BASE_URL`) is the fallback — non-streaming |
+| `web_status` | Check provider configuration and health | — |
+
+## Decision Tree
+
+```
+What do you need?
+│
+├── Verify a UI you built actually WORKS (click CTA, submit form, read state)
+│   → web_interact (steps run in order, stop at first failure; final PNG inline + scrollWidth probe)
+│
+├── Search results (URLs, snippets, docs lookup)
+│   → web_search
+│     ├─ default: adaptive auto-selects SearXNG or Brave, then Firecrawl
+│     ├─ precision/inline content: auto prefers Brave, or explicit backend=brave
+│     └─ SearXNG engine tuning: engines=google,github
+│
+├── Content from a known URL (markdown, structured data)
+│   → web_extract
+│     ├─ static page (blog, docs): mode=static (fastest, no API key)
+│     ├─ dynamic page (JS-rendered): mode=dynamic
+│     ├─ JS-heavy SPA: mode=full
+│     ├─ bot-protected / blocked to scrapers: mode=agy (Gemini/Claude via agy)
+│     └─ auto (default): tries static > dynamic > full > agy
+│
+├── Site URL discovery (find pages on a site)
+│   → web_map
+│     └─ sitemap=only for sitemap-only discovery
+│
+├── Crawl multiple pages from a site
+│   → web_crawl
+│     ├─ docs/docs section: mode=light (default, Firecrawl)
+│     └─ rendered data with media/links: mode=full (Crawl4AI)
+│
+├── Visual snapshot of a page
+│   → web_screenshot
+│
+├── Printable/archivable PDF of a page
+│   → web_pdf
+│
+├── AI-synthesized research with sources (synthesis, comparisons, reports)
+│   → web_research
+│     ├─ quick grounded answer: mode=ask (default; guest OK, Flash-only)
+│     └─ multi-minute Deep Research report: mode=research (live Gemini sessions run the full plan/confirm/report cycle; degraded/stale sessions return an honest partial result — plan + transcript + note — instead of the report)
+│     note: keep the source browser session closed (an open Gemini tab supersedes the pasted cookie); rotation is opt-in diagnostics only (GEMINI_WEB_KEEPALIVE=1)
+│
+├── Generate an image from a text prompt (NOT capturing an existing page)
+│   → web_image
+│     ├─ default: provider=auto (gemini → chatgpt (CHATGPT_WEB_AUTH_KEY / codex login) → Z.ai GLM-Image → custom endpoint; skips TLS-gated Gemini after refusals)
+│     ├─ portrait/aspect prompts: pass size (zai/custom), e.g. size=960x1728 — default is square
+│     └─ pin/model: provider=zai model=glm-image, or any custom OpenAI-images endpoint
+│
+├── One-off chat with another model (second opinion, classification)
+│   → web_chat (ChatGPT web is the default when its credential is configured; else WEB_CHAT_API_BASE_URL gateway; non-streaming; no tools)
+│
+└── Check what web tools are configured
+    → web_status
+```
+
+## `web_interact` — one call = one browser lifecycle
+
+Open `url`, run `steps` in order, get per-step results + a final inline PNG + a `scrollWidth`/`innerWidth` probe:
+
+- Steps: `{click: "selector"}` (trusted CDP mouse click — user activation works, so `execCommand('copy')` and login flows behave), `{type: {selector, text}}`, `{press: "Enter"}`, `{evaluate: "expr", label}` (value correctly unwrapped; `awaitPromise` on), `{wait_for: "selector" | ms}`, `{screenshot: true}`.
+- Steps stop at the first failure with the reason — a broken selector never silently no-ops later steps.
+- `viewport: {width: 390, height: 844}` = honest device-metrics emulation (the CLI `--window-size` path clamps at 500px); `scrollWidth > width` in the probe means overflowing CSS — fix the page, don't widen the viewport.
+- `reduced_motion: true` for pages with staggered load reveals (they screenshot as blank sections mid-animation otherwise); `grant: ["clipboard-read", "clipboard-write"]` for clipboard verification.
+- Native `confirm()`/`alert()` dialogs are auto-DISMISSED and reported on the step (`confirm("Delete?") → dismissed`) — destructive actions stay blocked unless you arm `{dialog: "accept"}` before the click. A step stuck past `timeout_ms` (default 60s) fails with the reason instead of hanging the call.
+- For exploratory flows, re-call with adjusted steps — no session state survives a call.
+
+## Honest captures (`web_screenshot` / `web_pdf`)
+
+- `width < 500` on the local engine automatically switches to CDP device emulation (a `--window-size=390` capture would render at 500px and crop, faking right-edge cuts) and reports a `Probe: scrollWidth X / innerWidth Y` line.
+- `reduced_motion: true` forces `--force-prefers-reduced-motion` — use it whenever a page has entrance animations.
+
+## Auto-selection Details
+
+### `web_search` adaptive backend order
+
+1. **SearXNG** (self-hosted, free) — first for broad/general discovery.
+   - Use `engines` parameter to tune: `engines: "google,github"` for technical queries.
+   - If auto-selection returns poor results, try `backend: "brave"` for a different search index.
+2. **Brave Search** (hosted, requires API key) — first for precision-sensitive queries and inline content.
+   - Auto mode prefers Brave for `include_content`, `site:` searches, quoted phrases, docs/API/source lookups, short proper-name queries, and domain-specific/ambiguous queries.
+   - Supports `include_content` for inline page content.
+   - Handles page-content fetch failures gracefully by keeping search results and adding per-result notes.
+3. **Firecrawl Search** — last resort.
+   - ⚠️ **Poor semantic accuracy** on domain-specific/ambiguous queries. E.g., "Riven" returns League of Legends champion build guide instead of the media-automation tool. Prefer SearXNG or Brave for precision.
+   - Acceptable for general technical queries.
+
+### `web_extract` mode order
+
+1. **static** (JSDOM+Readability) — no API key needed, works on simple static sites, blogs, and doc pages. Fastest option.
+2. **dynamic** (Firecrawl Scrape) — handles JS-rendered pages and dynamic content.
+   - ❌ Fails on bot-protected sites (Ansible docs, many CDN-backed doc sites). Falls through Crawl4AI in `auto` mode.
+   - ✅ Supported: prompt-based JSON extraction, schema-based structured extraction.
+3. **full** (Crawl4AI headless browser) — handles all content types. **Resource-intensive** (launches a full headless browser). Use only when static and dynamic modes fail, or when explicitly needed.
+4. **agy** (Gemini/Claude via agy CLI) — last-resort fallback. Uses agy's native `read_url` web tool with a model-driven browser, so it can fetch pages that block Firecrawl/Crawl4AI (bot protection, anti-AI scraping). Requires the `agy` CLI installed and authenticated. Also supports prompt/schema-based structured extraction.
+
+> **Requirement for agy mode**: install and authenticate the Antigravity CLI: `curl -fsSL https://antigravity.google/cli/install.sh | bash` then run `agy` once interactively. If agy is not installed, `auto` mode skips it silently; explicit `mode: "agy"` reports the install hint.
+
+## Fallback Strategy
+
+If one tool fails, try the next option in the chain:
+
+- **Search issues**: `web_search` auto-fallbacks and reports backend diagnostics. If all backends fail, configure at least one via env vars (check `web_status`).
+- **Extraction issues**: `web_extract` auto-fallbacks in `auto` mode. If all modes fail:
+  1. Try `mode: "agy"` explicitly — agy's model-backed browser often gets pages that block Firecrawl/Crawl4AI.
+  2. Try `web_screenshot` for a visual snapshot — may work when extraction is blocked.
+  3. The page may require interactive login, CAPTCHA, or be a non-HTML resource.
+- **Tool not found**: Ensure ceulen's web module is enabled — check `/ceulen` (kill-switch) and `/config` (per-tool toggles).
+
+## Cross-tool Decision Guide
+
+| If you need... | Use this | Instead of... |
+|---|---|---|
+| A few specific pages from a site | `web_map` + `web_extract` on each URL | `web_crawl` (heavier than needed) |
+| Content from a JS-heavy page that fails in `auto` mode | `web_extract` with `mode: "full"` | Retrying `auto` mode repeatedly |
+| Content from a bot-protected page that blocks Firecrawl/Crawl4AI | `web_extract` with `mode: "agy"` | Retrying `web_extract` with all modes |
+| A visual of a bot-protected page | `web_screenshot` | Retrying `web_extract` with all modes |
+| Content alongside search results | `web_search` with `include_content: true` (auto prefers Brave) or `backend: "brave"` | Search snippets alone |
+| Printable/archivable page | `web_pdf` | Taking a screenshot and converting |
+| All URLs on a docs site | `web_map` with `sitemap: "only"` | Crawling the entire site |
+
+## Important Notes
+
+- **Always cite source URLs** when using web content in answers.
+- `web_status` shows which backends are configured without printing secrets. For Firecrawl, `apiKeyFound: false` is normal for self-hosted instances without auth — check the `ready` field to see if Firecrawl is actually usable.
+- The `backend` and `mode` parameters give explicit control when auto-selection is not desired.
+- `mode: "agy"` requires the `agy` CLI (Antigravity) installed and authenticated. `web_status` reports `agy.installed` so you can check availability without guessing.
+- Backend-specific config (API keys, URLs) comes from environment variables, not tool parameters. Use `web_status` to verify configuration.

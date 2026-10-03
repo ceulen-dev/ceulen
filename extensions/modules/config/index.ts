@@ -256,6 +256,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
     serena: { section: "Serena" },
     repair: { section: "Repair", icon: "🔧" },
     fff: { section: "FFF search" },
+    web: { section: "Web", icon: "🌍" },
     rtk: { section: "RTK" },
     config: { section: "Ceulen config", icon: "🧩" },
   };

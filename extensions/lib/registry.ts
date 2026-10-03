@@ -36,6 +36,8 @@ import fffModule from "../modules/fff/index.ts";
 import rtkModule from "../modules/rtk/index.ts";
 import muninModule from "../modules/munin/index.ts";
 import { muninConfig } from "../modules/munin/configPanel.ts";
+import webModule from "../modules/web/index.ts";
+import { webConfig } from "../modules/web/configPanel.ts";
 import configModule from "../modules/config/index.ts";
 
 /** A module's contribution to the central `/config` panel. */
@@ -139,6 +141,12 @@ export const MODULES: ModuleEntry[] = [
   ] },
   { name: "fff", category: "Tools", describe: "FFF fuzzy file/content search (ffgrep, fffind) + @-mention completions.", load: fffModule, tools: [
     "ffgrep", "ffind", "fff_multi_grep", "resolve_file", "related_files",
+  ] },
+  // Web after fff: same class of append-only before_agent_start guidance
+  // (conditional on web_* tools being active) — no prompt-rewrite contract
+  // beyond fff's shipped precedent.
+  { name: "web", category: "Tools", describe: "Unified web tools: search (SearXNG/Brave/Firecrawl), extract & crawl (JSDOM/Firecrawl/Crawl4AI/agy), screenshot/PDF, CDP browser interaction, Gemini research, image generation, one-off chat.", load: webModule, config: webConfig, tools: [
+    "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status",
   ] },
   // ── Shell ──────────────────────────────────────────────────────────────
   { name: "rtk", category: "Shell", describe: "Route shell commands through RTK for token savings.", load: rtkModule },
