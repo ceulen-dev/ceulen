@@ -1,0 +1,182 @@
+// Classifier-assisted task routing for the subagent module.
+//
+// One Jev round-trip per task answers TWO questions at once:
+//   tier   — which role's model pool should serve this task (fast/coder/smart)
+//   effort — how much thinking the task needs (score → :level suffix)
+//
+// Precedence (pins beat dynamic; dynamic beats defaults):
+//   1. chain-entry `:level` suffix (user-authored, most specific)
+//   2. `agentModels` pin  → disables BOTH overrides (no classify call is made)
+//   3. `agentThinking` pin → disables the effort override only
+//   4. classifier (tier + effort): tier gates on the WINNING LABEL'S probability
+//      (max of `probabilities` — classifier-module precedent), effort on the
+//      score answer's `confidence`; both must be >= threshold
+//   5. agent frontmatter defaults (what the classifier amends; what applies
+//      when routing is off / the call fails / confidence is low)
+//
+// Fail-open everywhere: routing can never block a dispatch.
+
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type { AgentConfig } from "./agents.ts";
+import { resolveAgentModelChain, type RolesConfig } from "./roles.ts";
+
+export type RoutingMode = "off" | "classify";
+
+export interface RoutingSettings {
+  mode: RoutingMode;
+  /** Optional classifier model override (provider/id or id); empty = first available. */
+  model: string;
+  /** Minimum certainty to act on an answer: tier = winning label's
+   *  probability, effort = the score answer's `confidence` field. */
+  threshold: number;
+}
+
+export const DEFAULT_ROUTING: RoutingSettings = {
+  mode: "classify",
+  model: "",
+  threshold: 0.6,
+};
+
+/** Role the classifier may pick from — the ceulen role set. */
+const TIERS = ["fast", "coder", "smart"] as const;
+export type Tier = (typeof TIERS)[number];
+
+/** Score criteria ladder → thinking level (index = score). */
+export const EFFORT_LADDER: readonly { level: string; description: string }[] = [
+  { level: "off", description: "mechanical lookup or trivial edit, no reasoning needed" },
+  { level: "low", description: "simple, well-specified change; fix already identified" },
+  { level: "medium", description: "normal multi-step implementation or verification" },
+  { level: "high", description: "cross-file reasoning, subtle interactions, careful refactor" },
+  { level: "xhigh", description: "architecture, design tradeoffs, consequential planning" },
+];
+
+const TIER_CRITERIA: Record<Tier, string> = {
+  fast: "mechanical, read-heavy, bounded lookup, or a single-file change with a known fix — speed matters more than depth",
+  coder: "standard implementation, editing, or verification with a clear spec — solid general coding",
+  smart: "ambiguous design, cross-cutting refactor, consequential review or planning — depth matters more than speed",
+};
+
+export interface RoutingVerdict {
+  tier?: Tier;
+  effort?: string;
+  /** True when a verdict was produced within threshold (diagnostics only). */
+  applied: boolean;
+  reason?: string;
+}
+
+/**
+ * Resolve the classifier model: explicit override (matched like the classifier
+ * module — provider/id, or id suffix across providers) → first available
+ * router classifier. Returns undefined when none resolve (fail-open).
+ */
+/** The classifier model object resolved for routing (full catalog entry —
+ *  registry.classify validates its `type` field, so a {provider,id} stub
+ *  would be rejected as "not a classifier model"). */
+export async function resolveClassifierModel(
+  ctx: ExtensionContext,
+  override: string,
+): Promise<{ provider: string; id: string; type: string } | undefined> {
+  const registry = ctx.modelRegistry;
+  if (override) {
+    // Accept bare id ("combo/jev"), provider-qualified ("router/combo/jev" —
+    // the pre-0.7 /config menu saved provider/id), or a provider-scoped id
+    // that IS the id ("jev/jev-latest" under provider router). Try in order:
+    // exact id, provider-stripped id, suffix match.
+    const stripped = override.includes("/") ? override.slice(override.indexOf("/") + 1) : override;
+    const direct = registry.findOfType("classifier", "router", override)
+      ?? (stripped !== override ? registry.findOfType("classifier", "router", stripped) : undefined)
+      ?? registry.getModelsOfType("classifier").find((m) => m.id === override || m.id.endsWith("/" + override) || m.id === stripped || m.id.endsWith("/" + stripped));
+    if (direct) return direct as { provider: string; id: string; type: string };
+  }
+  const available = await registry.getAvailableOfType("classifier", "router");
+  const first = available[0];
+  return first ? (first as { provider: string; id: string; type: string }) : undefined;
+}
+
+/** Is this agent pinned by settings such that the classifier must not touch it? */
+export function pinsFor(agent: AgentConfig, roles: RolesConfig): { models: boolean; thinking: boolean } {
+  return {
+    models: roles.agentModels[agent.name] !== undefined,
+    thinking: roles.agentThinking[agent.name] !== undefined,
+  };
+}
+
+/**
+ * Ask Jev for {tier, effort} on one task. Returns undefined on any failure —
+ * callers fall back to the agent's frontmatter defaults. Never throws.
+ */
+export async function classifyTask(
+  ctx: ExtensionContext,
+  settings: RoutingSettings,
+  agent: AgentConfig,
+  task: string,
+  solutionSpace: string | undefined,
+  roles: RolesConfig,
+): Promise<RoutingVerdict | undefined> {
+  if (settings.mode !== "classify") return undefined;
+  const pins = pinsFor(agent, roles);
+  // A fully pinned agent (agentModels) is user-owned — no call at all.
+  if (pins.models) return { applied: false, reason: "pinned (agentModels)" };
+
+  const model = await resolveClassifierModel(ctx, settings.model);
+  if (process.env.CEULEN_ROUTING_DEBUG) process.stderr.write(`[routing] resolved=${model ? model.provider + "/" + model.id : "none"}\n`);
+  if (!model) return { applied: false, reason: "no classifier model" };
+
+  const chain = resolveAgentModelChain(agent, roles);
+  const wantEffort = !pins.thinking;
+  const wantTier = chain.unresolved.length === 0; // tier only refines a resolvable role setup
+
+  try {
+    const result = await ctx.modelRegistry.classify(
+      model as never,
+      {
+        state: {
+          agent: { name: agent.name, description: agent.description, defaultRole: agent.model ?? "(none)" },
+          task: task.slice(0, 4000),
+          ...(solutionSpace ? { solutionSpace } : {}),
+        },
+        questions: {
+          tier: { type: "choice", instructions: "Which model tier should serve this task?", criteria: TIER_CRITERIA },
+          ...(wantEffort
+            ? {
+                effort: {
+                  type: "score",
+                  instructions: "How much reasoning does this task need?",
+                  criteria: EFFORT_LADDER.map((c) => `${c.level}: ${c.description}`),
+                },
+              }
+            : {}),
+        },
+      } as never,
+    );
+    if (result.stopReason !== "stop") {
+      if (process.env.CEULEN_ROUTING_DEBUG) process.stderr.write(`[routing] stopReason=${result.stopReason} err=${result.errorMessage ?? "-"}\n`);
+      return { applied: false, reason: `classifier ${result.stopReason}` };
+    }
+
+    const tierAnswer = result.answers.tier as { choice?: string; probabilities?: Record<string, number> } | undefined;
+    let tier: Tier | undefined;
+    if (tierAnswer?.choice && (TIERS as readonly string[]).includes(tierAnswer.choice)) {
+      const probs = tierAnswer.probabilities ?? {};
+      const top = Math.max(...Object.values(probs), 0);
+      tier = top >= settings.threshold ? (tierAnswer.choice as Tier) : undefined;
+    }
+
+    let effort: string | undefined;
+    if (wantEffort) {
+      const effortAnswer = result.answers.effort as { score?: number; confidence?: number } | undefined;
+      if (effortAnswer && typeof effortAnswer.score === "number"
+        && (effortAnswer.confidence === undefined || effortAnswer.confidence >= settings.threshold)) {
+        const idx = Math.min(Math.max(Math.round(effortAnswer.score), 0), EFFORT_LADDER.length - 1);
+        effort = EFFORT_LADDER[idx].level;
+      }
+    }
+
+    if (process.env.CEULEN_ROUTING_DEBUG) process.stderr.write(`[routing] answers=${JSON.stringify(result.answers).slice(0, 300)}\n`);
+    if (!tier && !effort) return { applied: false, reason: "below threshold" };
+    return { tier, effort, applied: true };
+  } catch (e) {
+    if (process.env.CEULEN_ROUTING_DEBUG) process.stderr.write(`[routing] error: ${e instanceof Error ? e.message : String(e)}\n`);
+    return { applied: false, reason: "classifier error" };
+  }
+}

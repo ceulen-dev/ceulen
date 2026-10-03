@@ -305,8 +305,8 @@ describe("core module contract", () => {
   it("nextDisabled excludes core modules; withEnableRow adds no row for them", async () => {
     const { nextDisabled, withEnableRow } = await import("../../config/index.js");
     // working = enabled set; nextDisabled lists the NOT-enabled non-core modules.
-    assert.deepEqual(nextDisabled(new Set(["munin"])), ["ponytail", "serena", "fff", "rtk"]);
-    assert.deepEqual(nextDisabled(new Set(["router", "classifier", "ux", "munin", "usage", "ponytail", "serena", "fff", "rtk", "config"])), [], "all-on → nothing disabled");
+    assert.deepEqual(nextDisabled(new Set(["munin"])), ["ponytail", "subagent", "serena", "fff", "rtk"]);
+    assert.deepEqual(nextDisabled(new Set(["router", "classifier", "ux", "munin", "usage", "ponytail", "subagent", "serena", "fff", "rtk", "config"])), [], "all-on → nothing disabled");
     for (const core of ["composer", "advisor", "router", "classifier", "usage", "ux", "config"]) {
       assert.ok(!nextDisabled(new Set()).includes(core), `core (${core}) is never disableable`);
     }

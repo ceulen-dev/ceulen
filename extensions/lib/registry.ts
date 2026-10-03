@@ -20,6 +20,8 @@ import { advisorConfig } from "../modules/advisor/configPanel.js";
 import usageModule from "../modules/usage/index.ts";
 import composerModule, { composerConfig } from "../modules/composer/index.ts";
 import ponytailModule, { ponytailConfig } from "../modules/ponytail/index.ts";
+import subagentModule from "../modules/subagent/index.ts";
+import { subagentConfig } from "../modules/subagent/configPanel.js";
 import uxModule, { uxConfig } from "../modules/ux/index.ts";
 import serenaModule from "../modules/serena/index.ts";
 import fffModule from "../modules/fff/index.ts";
@@ -97,6 +99,10 @@ export const MODULES: ModuleEntry[] = [
   ] },
   // ── Tasks ──────────────────────────────────────────────────────────────
   { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
+  // Subagent after ponytail: ponytail's tool_call hook injects into the
+  // `subagent` tool's instructions param — hooks resolve at call time, so
+  // order is not load-bearing; this is grouping readability.
+  { name: "subagent", category: "Tasks", describe: "In-process subagents: scout/tester/worker/planner/reviewer agents, role-based model pools, classifier tier+thinking routing, background tasks with liveness, herdr delegation.", load: subagentModule, config: subagentConfig, tools: ["subagent", "herdr"] },
   // ── Tools ──────────────────────────────────────────────────────────────
   { name: "serena", category: "Tools", describe: "Serena semantic code tools via a persistent Python worker.", load: serenaModule, tools: [
     "serena_status", "serena_list_tools", "serena_get_symbols_overview", "serena_find_symbol",

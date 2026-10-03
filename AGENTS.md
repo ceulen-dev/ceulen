@@ -142,6 +142,65 @@ untrusted (pi ignores the file until trusted). `/munin-status` discloses each
 field's source without printing the key. Env contract is stable `MUNIN_*`
 (same policy as `ponytail.*`).
 
+### Subagent module (subagent)
+
+Ported from `@bacnh85/pi-subagent` 0.23.2 (see `extensions/modules/subagent/`):
+in-process SDK subagents — the `subagent` tool (single / parallel 8@4 / chain
+`{previous}` / background + `operation: status|cancel|wait`), the `herdr`
+tool (oversight of herdr-delegated panes), `/subagent` + `/agent` commands,
+a live progress widget (`ceulen-subagent`), and `.pi/subagent-history.json`.
+
+**Live-UI surface** (OMP parity; all store-driven, so it covers SDK and herdr
+threads alike — pure renderers unit-tested in `test/widget.test.ts`):
+the above-editor widget renders a `Subagents · N running · M ✓ · K ✗` header
+plus one line per running thread (spinner · agent · elapsed · tool/token
+counters · latest tool call; herdr panes show their `herdr: <state>` lifecycle
+label instead) with a `/agent to inspect` tail; the FOOTER carries the
+`ceulen-subagent` setStatus item (`👥 N running · …`) while any thread runs,
+cleared on idle/session change (the widget controller owns set + clear, and
+the composer footer passes the item through — it filters only `ceulen-usage`);
+`operation: status|wait` tool rows render the job tree (`⏳ waiting on N of M
+jobs`, waited task first, then ✓ settled rows with a `⎿` output snippet);
+chain/parallel call rows honor Ctrl+O expansion (full task list instead of the
+cap-3 preview). Raw SDK event labels (`message_end`…) never render — only
+`herdr:`-prefixed lifecycle labels do.
+
+- **Five bundled agents** (`agents/*.md`: scout, tester, worker, planner,
+  reviewer); user `~/.pi/agent/agents/*.md` and trusted project
+  `.pi/agents/*.md` override. Upstream's `general-purpose` is dropped (worker
+  already inherits all parent tools). Project agents require interactive
+  approval (headless fails closed; `allowUnconfirmedProjectAgents` opt-in).
+- **Role-based model pools**: `subagent.roles.{fast,coder,smart}` — ordered
+  fallback chains over the router catalogue, `*` = parent model; agents
+  reference `@role` in frontmatter; `subagent.agentModels` /
+  `subagent.agentThinking` pin individual agents (stable `subagent.*`
+  settings contract — standalone pi-subagent settings carry over; REMOVE the
+  standalone package or the conflict guard refuses the duplicate tool).
+  /config → Tasks → Subagents edits roles + routing + timeouts; saves write
+  the GLOBAL settings.json with roles diff-based (pristine defaults never
+  frozen; clear-to-empty deletes the key = default restored) and apply live
+  (settings are read per execute() call).
+- **Classifier routing** (`subagent.routing.mode`, default `classify`): one
+  Jev round-trip per task picks model tier (fast/coder/smart) + thinking
+  (score ladder off…xhigh); `subagent.routing.threshold` (0.6) gates tier on
+  the WINNING LABEL'S probability (max of `probabilities`, classifier-module
+  precedent) and effort on the score answer's `confidence`; `solutionSpace`
+  per task feeds the state. Precedence — pins beat dynamic, dynamic beats
+  defaults: chain-entry `:level` > `agentModels` pin (disables both; no
+  classify call) > `agentThinking` pin (disables effort only) > classifier >
+  frontmatter defaults. Fail-open: classifier off/error/below-threshold →
+  static role chain.
+- **Liveness timeouts** (upstream's always-on 20-min hard cap is GONE):
+  `subagent.hardTimeoutMins` defaults 0 = OFF — a child producing events is
+  never hard-killed; the idle window (`subagent.idleTimeoutMins`, default 3,
+  every SDK event resets it) is the hang detector. `operation:"wait"` blocks
+  up to 600s on a background task and reports liveness age (STALLED flag)
+  from the thread store.
+- herdr delegation (visible panes when pi runs inside herdr; `runner:"sdk"`
+  forces in-process) and the git-worktree sandbox + `merge:"3way"` are
+  vendored unchanged. Auto-review is NOT ported (advisor covers turn-end
+  review; a diff-reviewer belongs to a future model-tools port).
+
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 
 - The bundle entry wraps each module's `pi` in `guarded()` (extensions/index.ts, one shared ownership map for the whole load loop): a name claimed by a DIFFERENT module throws at load; same-module re-claims pass (router re-registers its provider at runtime — that's the supported update path). Contract tests: `extensions/modules/router/test/guard.test.ts`.
@@ -153,7 +212,7 @@ field's source without printing the key. Env contract is stable `MUNIN_*`
 
 - `npm install` — set up (dev deps only: tsx, typescript, @types/node, pi peer packages)
 - `npm run typecheck` — `tsc --noEmit` over `extensions/**` (usage tests excluded: loose harness stubs don't typecheck; they run under tsx)
-- `npm test` — router unit + guard suites, usage suites, ponytail suites, config suites (node --test via tsx)
+- `npm test` — router unit + guard suites, usage suites, ponytail suites, config suites, subagent suites (node --test via tsx)
 - `npm pack --dry-run` — verify the shipped file list (extensions/, skills/, README, LICENSE, CHANGELOG; no docs/)
 
 ## Settings / kill-switch
@@ -361,7 +420,12 @@ read per tool call, no reload); **Memory** tab, `Munin` section) and
 GLOBAL `advisor` section (legacy `pi-advisor` migrated on first save), applied
 live through the module bridge; **Model** tab, `Advisor` section) and
 **classifier** (`classifier.model`, `classifier.permission.*`; **Model** tab,
-`Classifier (Jev)` section). A NON-CORE module
+`Classifier (Jev)` section) and **subagent** (`subagent.routing.{mode,model,
+threshold}`, `subagent.roles.{fast,coder,smart}` (diff-based — pristine
+defaults never written; clear-to-empty deletes = default restored),
+`subagent.{idle,hard}TimeoutMins` — writes the GLOBAL `subagent` section,
+applied live (settings read per execute()); **Tasks** tab, `Subagents`
+section). A NON-CORE module
 without a contribution factory gets
 a synthesized Enable-only section (serena → **Tools** · `Serena`, fff →
 **Tools** · `FFF search`, rtk → **Shell** · `RTK`). The per-module kill-switch

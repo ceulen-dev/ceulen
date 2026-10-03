@@ -34,7 +34,7 @@ function toolGroups(): PanelGroup[] {
 describe("render smoke — ported modules' /config sections", () => {
   it("renders Enable + per-tool rows inside the boxed frame with zero overflow", () => {
     const groups = toolGroups();
-    assert.equal(groups.length, 6, "serena + fff + ux + munin + classifier + advisor (rtk has no tools)");
+    assert.equal(groups.length, 7, "serena + fff + ux + munin + classifier + advisor + subagent (rtk has no tools)");
     const m = new ConfigPanelModel(groups, theme, "Settings");
     m.getHeight = () => 40;
     for (const w of [110, 100, 80, 60]) {
@@ -60,6 +60,9 @@ describe("render smoke — ported modules' /config sections", () => {
     assert.ok(ux.rows.some((r) => r.key === "ceulen.disabledTools.ux_audit"));
     const advisor = groups.find((g) => g.label === "advisor")!;
     assert.ok(advisor.rows.some((r) => r.key === "ceulen.disabledTools.advisor"));
+    const subagent = groups.find((g) => g.label === "subagent")!;
+    assert.ok(subagent.rows.some((r) => r.key === "ceulen.disabledTools.subagent"));
+    assert.ok(subagent.rows.some((r) => r.key === "ceulen.disabledTools.herdr"));
     for (const g of groups) assert.equal(g.icon, undefined, "no icons for the ported modules");
   });
 });

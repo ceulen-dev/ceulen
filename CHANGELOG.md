@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+- **subagent**: OMP-parity live-UI surface for running agents, covering SDK,
+  background, and herdr threads alike (all store-driven; pure renderers
+  unit-tested in `test/widget.test.ts`):
+  - the live widget gains a `Subagents · N running · M ✓ · K ✗` header, a
+    `/agent to inspect` tail, per-thread token counters (`↑12k, ↓1.4k`), and
+    herdr panes now render their `herdr: <state>` lifecycle label where SDK
+    threads show their latest tool call (raw SDK event labels like
+    `message_end` never render); failed threads count as `✗`, never `✓`;
+  - a new footer status item `ceulen-subagent` (`👥 N running · …`) shows
+    while any thread runs and clears on idle/session change — the widget
+    controller owns set + clear, and both pi's native footer and the
+    composer footer pass it through;
+  - `operation: status|wait` tool rows render the OMP-style job tree
+    (`⏳ waiting on N of M jobs`, waited task first, settled rows with a
+    `⎿` first-line output snippet);
+  - chain/parallel call rows honor Ctrl+O expansion (full task list instead
+    of the cap-3 preview, with a `(Ctrl+O to expand)` hint when truncated).
+
 - **security hardening** across the bundle:
   - **serena**: the Python worker's env no longer merges an *untrusted*
     checkout's cwd `.env` (it could set `NODE_OPTIONS`/`PYTHONPATH` and reach
