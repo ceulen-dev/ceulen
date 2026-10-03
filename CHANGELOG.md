@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.0 — 2026-10-04
 
 - **web**: new module — the 11 unified web tools ported from `@bacnh85/pi-web`
   0.17.8: `web_search` (SearXNG → Brave → Firecrawl adaptive), `web_extract`
