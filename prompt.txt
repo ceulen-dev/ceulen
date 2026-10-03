@@ -1,7 +1,0 @@
-Run these five delegations SERIALLY (one subagent call at a time, wait for each result), forcing the in-process runner, then report one line per agent: name, model used (from the result metadata), ok/failed.
-
-1. subagent agent=scout runner="sdk" task="List the files in this directory and say what file.txt contains."
-2. subagent agent=tester runner="sdk" task="Run: cat file.txt — report the exact output."
-3. subagent agent=worker runner="sdk" task="Create a file named doubled.txt containing the text of file.txt repeated twice. Confirm the filename and its byte size."
-4. subagent agent=planner runner="sdk" task="Propose a 2-step plan to add a README.md to this directory. Keep it under 60 words."
-5. subagent agent=reviewer runner="sdk" task="Review doubled.txt for correctness (it should contain the text of file.txt twice). One sentence."
