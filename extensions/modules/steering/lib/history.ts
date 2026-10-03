@@ -1,0 +1,170 @@
+/**
+ * history.ts — shared reasoning strip + leaked-content cleaning (the
+ * reasoning-content.ts upstream file, named for what it does to the request
+ * history).
+ *
+ * Used by the steering module for all detected model families. Generic — works
+ * for DeepSeek V4, GLM, and any reasoning model that accumulates
+ * reasoning_content across turns or leaks tool calls as prose.
+ */
+// ponytail: vendored from @bacnh85/pi-model-tools 0.9.5
+// (extensions/lib/reasoning-content.ts). Local change: stripReasoningContent
+// takes the truncation budget as an argument (the upstream
+// PI_MODEL_TOOLS_REASONING_MAX_CHARS env knob is dropped — no settings row was
+// asked for; callers pass Infinity, i.e. replace-with-empty, which is the
+// shipped behavior).
+
+import { isRecord } from "./family.js";
+
+const REASONING_FIELDS = new Set(["reasoning_content", "reasoning", "thinking_content", "chain_of_thought", "cot"]);
+
+export function stripReasoningContent(payload: unknown, maxChars: number = Infinity): unknown {
+  if (!isRecord(payload)) return payload;
+  const messages = findMessagesArray(payload);
+  if (!messages || messages.length === 0) return payload;
+
+  let cloned: Record<string, unknown> | undefined;
+  let clonedMessages: Array<Record<string, unknown>> | undefined;
+  const threshold = Number.isFinite(maxChars) && maxChars > 0 ? maxChars : Infinity;
+
+  for (let i = 0; i < messages.length; i++) {
+    if (messages[i].role !== "assistant") continue;
+    for (const field of REASONING_FIELDS) {
+      if (!(field in messages[i])) continue;
+      if (!cloned) {
+        cloned = structuredClone(payload);
+        clonedMessages = findMessagesArray(cloned);
+        if (!clonedMessages) return payload;
+      }
+      const value = clonedMessages![i][field];
+      if (Number.isFinite(threshold) && typeof value === "string" && value.length > threshold) {
+        clonedMessages![i][field] = value.slice(0, threshold) + "\n\n[reasoning truncated]";
+      } else {
+        // Replace with empty string rather than deleting the key. DeepSeek's
+        // thinking-mode API requires the reasoning_content key to be PRESENT on
+        // assistant tool_calls messages (else 400: "reasoning_content … must be
+        // passed back") but accepts an empty string. Keeping the key (empty)
+        // satisfies the constraint while removing the non-deterministic
+        // reasoning bytes that break the prefix cache turn-over-turn — for BOTH
+        // DeepSeek (exact prefix cache) and GLM (Z.ai automatic content-similarity
+        // cache, https://docs.z.ai/guides/capabilities/cache, which is equally
+        // sensitive to a changing conversation-history prefix).
+        clonedMessages![i][field] = "";
+      }
+    }
+  }
+  return cloned ?? payload;
+}
+
+// ── Leaked content cleaning ──
+
+const LEAKED_THINKING_HEADER = /^(Reasoning|Thinking|Chain of Thought)\s*:[^\n]*\n?/i;
+const LEAKED_TOOL_CALL_RE = /`([a-z_]+)\(([^)]*)\)`\s*/g;
+// ponytail: SDK renders this when a thinking model's prior summary is missing — display-only, no behavioral effect.
+const PRIOR_REASONING_PLACEHOLDER_RE = /\(prior reasoning summary unavailable\)\s*/gi;
+
+export function cleanLeakedContent(content: unknown, activeTools: ReadonlySet<string>): unknown {
+  if (typeof content !== "string") return content;
+  let cleaned = content;
+  if (PRIOR_REASONING_PLACEHOLDER_RE.test(cleaned)) cleaned = cleaned.replace(PRIOR_REASONING_PLACEHOLDER_RE, "");
+  // reset lastIndex for global regex reuse
+  PRIOR_REASONING_PLACEHOLDER_RE.lastIndex = 0;
+  if (LEAKED_THINKING_HEADER.test(cleaned)) cleaned = cleaned.replace(LEAKED_THINKING_HEADER, "").trimStart();
+  cleaned = cleaned.replace(LEAKED_TOOL_CALL_RE, (match, toolName: string) => activeTools.has(toolName) ? "" : match);
+  return cleaned !== content ? cleaned : content;
+}
+
+export function cleanLeakedContentFromMessages(payload: unknown, activeTools: readonly string[]): unknown {
+  if (!isRecord(payload)) return payload;
+  const messages = findMessagesArray(payload);
+  if (!messages || messages.length === 0) return payload;
+  const toolNames = new Set(activeTools);
+  let cloned: Record<string, unknown> | undefined;
+  let clonedMessages: Array<Record<string, unknown>> | undefined;
+
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i];
+    if (msg.role !== "assistant") continue;
+    const cleanedContent = cleanMessageContent(msg.content, toolNames);
+    if (cleanedContent === msg.content) continue;
+    if (!cloned) { cloned = structuredClone(payload); clonedMessages = findMessagesArray(cloned)!; }
+    clonedMessages![i].content = cleanedContent;
+  }
+  return cloned ?? payload;
+}
+
+/**
+ * True when the payload's LAST message is the current turn's plain user prompt
+ * — no tool result or assistant output after or inside it. This holds only on
+ * the turn's first provider round (incl. retries); mid-turn rounds end with a
+ * tool result (role "tool", or an anthropic-style user message of tool_result
+ * blocks). First-tool guidance may only fire while it can still be obeyed.
+ */
+export function tailIsPlainUserPrompt(payload: unknown): boolean {
+  if (!isRecord(payload)) return false;
+  const messages = findMessagesArray(payload);
+  if (!messages || messages.length === 0) return false;
+  const last = messages[messages.length - 1] as { role?: unknown; content?: unknown };
+  if (last?.role !== "user") return false;
+  if (Array.isArray(last.content) && last.content.some((b) => (b as { type?: unknown })?.type === "tool_result")) return false;
+  return true;
+}
+
+/**
+ * Append per-turn guidance text to the LAST user message (the current prompt).
+ * Used instead of system-prompt injection: the system prompt is the
+ * byte-stable head of the prefix cache (DeepSeek exact-prefix OR GLM Z.ai
+ * automatic content-similarity cache), so any per-turn change there invalidates
+ * the cache for the whole request. The current user message is the tail of the
+ * request — appending to it costs zero cacheable tokens.
+ */
+export function appendGuidanceToLastUserMessage(payload: unknown, guidance: string): unknown {
+  if (!isRecord(payload)) return payload;
+  const messages = findMessagesArray(payload);
+  if (!messages || messages.length === 0) return payload;
+  let lastUserIdx = -1;
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i].role === "user") { lastUserIdx = i; break; }
+  }
+  if (lastUserIdx < 0) return payload;
+
+  const cloned = structuredClone(payload);
+  const clonedMessages = findMessagesArray(cloned);
+  if (!clonedMessages) return payload;
+  const msg = clonedMessages[lastUserIdx] as { content?: unknown };
+  if (typeof msg.content === "string") {
+    msg.content = `${msg.content}\n\n${guidance}`;
+    return cloned;
+  }
+  if (Array.isArray(msg.content)) {
+    const parts = msg.content as Array<Record<string, unknown>>;
+    const lastText = [...parts].reverse().find((p) => isRecord(p) && typeof p.text === "string");
+    if (lastText) lastText.text = `${lastText.text}\n\n${guidance}`;
+    else parts.push({ type: "text", text: guidance });
+    return cloned;
+  }
+  // Unrecognized content shape (undefined/object/null): return the original so the
+  // caller's `withGuidance === payload` check no-ops and pendingGuidance is cleared
+  // — guidance is intentionally dropped rather than crashing on unexpected shapes.
+  return payload;
+}
+
+function cleanMessageContent(content: unknown, activeTools: ReadonlySet<string>): unknown {
+  if (typeof content === "string") return cleanLeakedContent(content, activeTools);
+  if (!Array.isArray(content)) return content;
+  let changed = false;
+  const cleaned = content.map((part: unknown) => {
+    if (!isRecord(part) || typeof part.text !== "string") return part;
+    const cleanedText = cleanLeakedContent(part.text, activeTools);
+    if (cleanedText === part.text) return part;
+    changed = true;
+    return { ...part, text: cleanedText };
+  });
+  return changed ? cleaned : content;
+}
+
+function findMessagesArray(payload: Record<string, unknown>): Array<Record<string, unknown>> | undefined {
+  if (Array.isArray(payload.messages)) return payload.messages as Array<Record<string, unknown>>;
+  if (isRecord(payload.body) && Array.isArray(payload.body.messages)) return payload.body.messages as Array<Record<string, unknown>>;
+  return undefined;
+}

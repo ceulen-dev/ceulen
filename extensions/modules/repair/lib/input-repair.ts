@@ -1,0 +1,324 @@
+// ponytail: vendored from @bacnh85/pi-model-tools 0.9.5 — lib/tool-input-repair.ts
+// Local change: isRecord now comes from ./guards.js (upstream imported it from
+// lib/model-detection.ts, which is not ported — repair is model-agnostic by
+// design: upstream already ran every repair below for all families, so there
+// was no family branch to drop).
+/**
+ * tool-input-repair.ts — unified argument repair for all model families.
+ *
+ * Merges DeepSeek V4 + GLM repairs into one module. The GLM top-level
+ * JSON-string repair is a safe superset (any model can emit a string where
+ * an object is expected), so it runs for all families — no family branching.
+ */
+
+import { Compile } from "typebox/compile";
+import { isRecord } from "./guards.js";
+
+export type RepairKind = "path-markdown-autolink" | "optional-null" | "json-string" | "empty-object-array" | "bare-string-array" | "json-object-wrapped-array" | "top-level-json-string" | "truncated-json-closed" | "read-notice-stripped" | "trim-match-retry" | "param-alias";
+
+export type RepairResult = {
+  args: unknown;
+  repaired: boolean;
+  repairs: RepairKind[];
+};
+
+const PATH_FIELD_NAMES = new Set(["path", "filePath", "absolutePath", "relativePath", "relative_path"]);
+
+// Cross-harness param-name aliases: models trained on Claude Code
+// (`Write{file_path, content}`) or generic completions (`text`, `body`)
+// hallucinate property names Pi's built-ins don't use. Only applied to the
+// wrapped built-in tools, only top-level, only when the aliased target is a
+// REQUIRED schema property that is missing while the alias key is present.
+// A rename is only applied when the value's type matches the target property's
+// schema type — renaming a wrong-typed value would just relocate the
+// validation error onto a key the model never sent.
+const PARAM_ALIASES: Readonly<Record<string, string>> = {
+  file_path: "path",
+  filename: "path",
+  file_text: "content",
+  text: "content",
+  body: "content",
+  // Nested edit payloads (Cursor-trained snake_case inside edits[]): the top
+  // 5 measured causes of edit schema-validation failures (2026-09 sessions).
+  old_text: "oldText",
+  new_text: "newText",
+};
+
+const ALIASABLE_TOOLS = new Set(["read", "write", "edit", "grep", "find", "ls", "bash"]);
+
+const compiledCache = new WeakMap<object, ReturnType<typeof Compile>>();
+
+function getCompiled(schema: unknown): ReturnType<typeof Compile> {
+  if (typeof schema !== "object" || schema === null) return Compile(schema as never);
+  let compiled = compiledCache.get(schema as object);
+  if (!compiled) { compiled = Compile(schema as never); compiledCache.set(schema as object, compiled); }
+  return compiled;
+}
+
+function compileCheck(schema: unknown, args: unknown): boolean { return getCompiled(schema).Check(args); }
+
+function validationErrors(schema: unknown, args: unknown): Array<{ instancePath?: string; path?: string }> {
+  return Array.from(getCompiled(schema).Errors(args)) as Array<{ instancePath?: string; path?: string }>;
+}
+
+function errorPath(error: { instancePath?: string; path?: string }): string[] {
+  const path = error.instancePath ?? error.path ?? "";
+  return path.replace(/^\//, "").split("/").filter(Boolean).map((p) => p.replace(/~1/g, "/").replace(/~0/g, "~"));
+}
+
+function schemaTypes(schema: unknown): string[] {
+  if (!isRecord(schema)) return [];
+  if (typeof schema.type === "string") return [schema.type];
+  if (Array.isArray(schema.type)) return schema.type.filter((t): t is string => typeof t === "string");
+  if (Array.isArray(schema.anyOf)) return schema.anyOf.flatMap(schemaTypes);
+  if (Array.isArray(schema.oneOf)) return schema.oneOf.flatMap(schemaTypes);
+  return [];
+}
+
+function schemaAtPath(schema: unknown, path: readonly string[]): unknown {
+  let current = schema;
+  for (const part of path) {
+    if (!isRecord(current)) return undefined;
+    const types = schemaTypes(current);
+    if (types.includes("object") && isRecord(current.properties)) { current = current.properties[part]; continue; }
+    if (types.includes("array")) { current = current.items; continue; }
+    return undefined;
+  }
+  return current;
+}
+
+function parentAtPath(value: unknown, path: readonly string[]): { parent: unknown; key: string } | undefined {
+  if (path.length === 0) return undefined;
+  let parent = value;
+  for (const part of path.slice(0, -1)) {
+    if (Array.isArray(parent)) parent = parent[Number(part)];
+    else if (isRecord(parent)) parent = parent[part];
+    else return undefined;
+  }
+  return { parent, key: path[path.length - 1] };
+}
+
+function getAtPath(value: unknown, path: readonly string[]): unknown {
+  let current = value;
+  for (const part of path) {
+    if (Array.isArray(current)) current = current[Number(part)];
+    else if (isRecord(current)) current = current[part];
+    else return undefined;
+  }
+  return current;
+}
+
+function setAtPath(value: unknown, path: readonly string[], next: unknown): boolean {
+  if (path.length === 0) return false;
+  const target = parentAtPath(value, path);
+  if (!target) return false;
+  if (Array.isArray(target.parent)) target.parent[Number(target.key)] = next;
+  else if (isRecord(target.parent)) target.parent[target.key] = next;
+  else return false;
+  return true;
+}
+
+function deleteAtPath(value: unknown, path: readonly string[]): boolean {
+  const target = parentAtPath(value, path);
+  if (!target) return false;
+  if (Array.isArray(target.parent)) target.parent.splice(Number(target.key), 1);
+  else if (isRecord(target.parent)) delete target.parent[target.key];
+  else return false;
+  return true;
+}
+
+function isOptionalProperty(rootSchema: unknown, path: readonly string[]): boolean {
+  if (path.length === 0) return false;
+  const parentSchema = schemaAtPath(rootSchema, path.slice(0, -1));
+  if (!isRecord(parentSchema) || !isRecord(parentSchema.properties)) return false;
+  const required = Array.isArray(parentSchema.required) ? parentSchema.required : [];
+  return Object.hasOwn(parentSchema.properties, path[path.length - 1]) && !required.includes(path[path.length - 1]);
+}
+
+function expects(schema: unknown, type: "array" | "object"): boolean { return schemaTypes(schema).includes(type); }
+
+/**
+ * Lenient JSON parse for model-emitted tool args. Strict `JSON.parse` first;
+ * when that fails, treat the text as possibly truncated mid-structure
+ * (DeepSeek truncates tool-call JSON at generation limits) — close an
+ * unterminated string literal and any unclosed `{`/`[` brackets, then retry.
+ * `truncated: true` reports that a recovery close was applied.
+ */
+export function tryParseLenientJson(text: string): { value: unknown; truncated: boolean } | undefined {
+  try {
+    return { value: JSON.parse(text), truncated: false };
+  } catch { /* not strict JSON — try truncation recovery */ }
+
+  const closed = closeTruncatedJson(text);
+  if (closed === text) return undefined;
+  try {
+    return { value: JSON.parse(closed), truncated: true };
+  } catch {
+    return undefined;
+  }
+}
+
+// Append missing closers for an unterminated string + unclosed brackets,
+// scanning literal-aware: a `}`/`]` inside a quoted string is data, not a closer.
+function closeTruncatedJson(text: string): string {
+  const stack: Array<"{" | "["> = [];
+  let inString = false;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === "\\") escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"') { inString = true; continue; }
+    if (ch === "{") { stack.push("{"); continue; }
+    if (ch === "[") { stack.push("["); continue; }
+    if (ch === "}") { if (stack[stack.length - 1] === "{") stack.pop(); continue; }
+    if (ch === "]") { if (stack[stack.length - 1] === "[") stack.pop(); continue; }
+  }
+  // Pre-suffix recovery, before appending closers:
+  // - A dangling escape backslash would turn the closing `"` we append into an
+  //   escaped quote (`\"`) and leave the string unterminated. Complete it as a
+  //   literal backslash instead (e.g. {"path":"C:\ truncated mid-escape).
+  // - A trailing comma before an unclosed bracket makes the closed JSON
+  //   invalid (DeepSeek often truncates right after a comma). Strip trailing
+  //   whitespace/commas so the appended closers yield valid JSON.
+  if (inString && escaped) text += "\\";
+  else if (!inString && stack.length > 0) text = text.replace(/[\s,]+$/, "");
+  let suffix = "";
+  if (inString) suffix += '"'; // unterminated string literal (e.g. {"path":"abc)
+  while (stack.length > 0) suffix += stack.pop() === "{" ? "}" : "]";
+  return suffix ? text + suffix : text;
+}
+
+function tryRepairPath(rootSchema: unknown, args: unknown, path: readonly string[]): RepairKind | undefined {
+  const current = getAtPath(args, path);
+  const targetSchema = schemaAtPath(rootSchema, path);
+  if (current === null && isOptionalProperty(rootSchema, path) && deleteAtPath(args, path)) return "optional-null";
+  if (typeof current === "string" && (expects(targetSchema, "array") || expects(targetSchema, "object"))) {
+    const parsedResult = tryParseLenientJson(current);
+    if (parsedResult !== undefined) {
+      const parsed = parsedResult.value;
+      const plainKind: RepairKind = parsedResult.truncated ? "truncated-json-closed" : "json-string";
+      if ((expects(targetSchema, "array") && Array.isArray(parsed)) || (expects(targetSchema, "object") && isRecord(parsed))) {
+        if (setAtPath(args, path, parsed)) return plainKind;
+      }
+      if (expects(targetSchema, "array") && isRecord(parsed)) {
+        if (setAtPath(args, path, [parsed])) return parsedResult.truncated ? "truncated-json-closed" : "json-object-wrapped-array";
+      }
+    }
+  }
+  if (expects(targetSchema, "array") && isRecord(current) && Object.keys(current).length === 0) { if (setAtPath(args, path, [])) return "empty-object-array"; }
+  if (expects(targetSchema, "array") && typeof current === "string") { if (setAtPath(args, path, [current])) return "bare-string-array"; }
+  return undefined;
+}
+
+function tryParamAliases(toolName: string, schema: unknown, args: unknown): RepairKind | undefined {
+  if (!ALIASABLE_TOOLS.has(toolName) || !isRecord(args) || !isRecord(schema) || !isRecord(schema.properties)) return undefined;
+  const required = Array.isArray(schema.required) ? schema.required : [];
+  let applied: RepairKind | undefined;
+  for (const [wrong, right] of Object.entries(PARAM_ALIASES)) {
+    if (!required.includes(right) || right in args || !(wrong in args)) continue;
+    const types = schemaTypes(schema.properties[right]);
+    const value = args[wrong];
+    const valueType = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+    if (types.length > 0 && !types.includes(valueType)) continue;
+    args[right] = value;
+    delete args[wrong];
+    applied = "param-alias";
+  }
+  // Nested objects/arrays (e.g. edit's edits[] items): same rename rule,
+  // schema-guided at each level. Replaces the live "must have required
+  // properties oldText, newText" failure class (23 hits / 14 days).
+  const visit = (current: unknown, currentSchema: unknown): void => {
+    if (Array.isArray(current)) {
+      for (const item of current) visit(item, isRecord(currentSchema) ? (currentSchema as any).items : undefined);
+      return;
+    }
+    if (!isRecord(current) || !isRecord(currentSchema)) return;
+    const req = Array.isArray(currentSchema.required) ? currentSchema.required : [];
+    const props = isRecord(currentSchema.properties) ? currentSchema.properties : {};
+    for (const [wrong, right] of Object.entries(PARAM_ALIASES)) {
+      if (!(wrong in current) || right in current || !req.includes(right) || !Object.hasOwn(props, right)) continue;
+      const value = current[wrong];
+      const valueType = value === null ? "null" : Array.isArray(value) ? "array" : typeof value;
+      const types = schemaTypes(props[right]);
+      if (types.length > 0 && !types.includes(valueType)) continue;
+      current[right] = value;
+      delete current[wrong];
+      applied = "param-alias";
+    }
+    for (const [k, v] of Object.entries(current)) visit(v, props[k]);
+  };
+  visit(args, schema);
+  return applied;
+}
+
+function normalizedLinkTarget(value: string): string { return value.replace(/^https?:\/\//i, "").replace(/\s+/g, "").replace(/^\/+/, ""); }
+
+export function unwrapDegenerateMarkdownAutolink(value: string): string {
+  return value.replace(/\[([^\]\n]+)\]\((https?:\/\/[^)]+)\)/g, (match, text: string, url: string) => {
+    const normalizedText = text.replace(/\s+/g, "");
+    const normalizedUrl = normalizedLinkTarget(url);
+    if (normalizedUrl === normalizedText) return text;
+    const suffix = `/${normalizedText}`;
+    if (normalizedUrl.endsWith(suffix) && /^[\s.]*$/.test(normalizedUrl.slice(0, -suffix.length))) return text;
+    return match;
+  });
+}
+
+function cleanPathFields(value: unknown): { value: unknown; changed: boolean } {
+  let changed = false;
+  const visit = (current: unknown, key?: string): unknown => {
+    if (typeof current === "string" && key && PATH_FIELD_NAMES.has(key)) {
+      const next = unwrapDegenerateMarkdownAutolink(current);
+      changed ||= next !== current;
+      return next;
+    }
+    if (Array.isArray(current)) return current.map((item) => visit(item));
+    if (!isRecord(current)) return current;
+    const next: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(current)) next[k] = visit(v, k);
+    return next;
+  };
+  const nextValue = visit(value);
+  return { value: changed ? nextValue : value, changed };
+}
+
+/**
+ * Unified argument repair for all model families.
+ * DeepSeek + GLM repairs are the same logic — GLM adds top-level-json-string
+ * as a safe superset. One function, no family branching needed.
+ */
+export function repairToolArguments(toolName: string, schema: unknown, args: unknown): RepairResult {
+  const pathCleaned = cleanPathFields(args);
+  if (compileCheck(schema, pathCleaned.value)) {
+    return { args: pathCleaned.value, repaired: pathCleaned.changed, repairs: pathCleaned.changed ? ["path-markdown-autolink"] : [] };
+  }
+
+  const candidate = structuredClone(pathCleaned.value);
+  const repairs: RepairKind[] = pathCleaned.changed ? ["path-markdown-autolink"] : [];
+  const aliased = tryParamAliases(toolName, schema, candidate);
+  if (aliased) repairs.push(aliased);
+  for (const error of validationErrors(schema, candidate)) {
+    const repaired = tryRepairPath(schema, candidate, errorPath(error));
+    if (repaired) repairs.push(repaired);
+  }
+
+  if (repairs.length > 0 && compileCheck(schema, candidate)) {
+    return { args: candidate, repaired: true, repairs };
+  }
+
+  // Top-level JSON string → object (safe for any model; originally GLM-4.7 bug)
+  if (typeof candidate === "string" && expects(schema, "object")) {
+    const parsedResult = tryParseLenientJson(candidate);
+    if (parsedResult !== undefined && isRecord(parsedResult.value) && compileCheck(schema, parsedResult.value)) {
+      const kind: RepairKind = parsedResult.truncated ? "truncated-json-closed" : "top-level-json-string";
+      return { args: parsedResult.value, repaired: true, repairs: [...repairs, kind] };
+    }
+  }
+
+  return { args: repairs.length > 0 ? candidate : args, repaired: repairs.length > 0, repairs };
+}

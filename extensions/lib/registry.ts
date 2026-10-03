@@ -13,6 +13,8 @@ import path from "node:path";
 import type { PanelGroup } from "./panel.js";
 import routerModule from "../modules/router/index.ts";
 import { routerConfig } from "../modules/router/configPanel.ts";
+import zaiModule from "../modules/zai/index.ts";
+import { zaiConfig } from "../modules/zai/configPanel.ts";
 import classifierModule from "../modules/classifier/index.ts";
 import { classifierConfig } from "../modules/classifier/configPanel.js";
 import advisorModule from "../modules/advisor/index.ts";
@@ -22,6 +24,10 @@ import composerModule, { composerConfig } from "../modules/composer/index.ts";
 import ponytailModule, { ponytailConfig } from "../modules/ponytail/index.ts";
 import subagentModule from "../modules/subagent/index.ts";
 import { subagentConfig } from "../modules/subagent/configPanel.js";
+import steeringModule from "../modules/steering/index.ts";
+import { steeringConfig } from "../modules/steering/configPanel.js";
+import repairModule from "../modules/repair/index.ts";
+import { repairConfig } from "../modules/repair/configPanel.js";
 import uxModule, { uxConfig } from "../modules/ux/index.ts";
 import serenaModule from "../modules/serena/index.ts";
 import fffModule from "../modules/fff/index.ts";
@@ -80,6 +86,9 @@ export const MODULES: ModuleEntry[] = [
   // CORE: usage depends on the router provider — a switch that can empty the
   // catalogue out from under usage is a footgun, so the provider is always on.
   { name: "router", core: true, category: "Providers", describe: "Route requests to a yardmaster/OmniRoute endpoint and expose its models.", load: routerModule, config: routerConfig },
+  // Z.AI direct provider (GLM via the Anthropic endpoint) — independent of the
+  // router; registers unconditionally so /login zai-anthropic stays reachable.
+  { name: "zai", category: "Providers", describe: "Z.AI Coding Plan via the Anthropic endpoint — GLM-5.x with explicit prompt caching, fast tier, ZCode-parity request signing. Key via /login zai-anthropic or $ZAI_ANTHROPIC_API_KEY.", load: zaiModule, config: zaiConfig },
   // Classifier right after router: its classify tool resolves decision models
   // from the router provider's registry catalog (needs router registered, not
   // the module object itself — order is for /config grouping readability).
@@ -103,7 +112,16 @@ export const MODULES: ModuleEntry[] = [
   // `subagent` tool's instructions param — hooks resolve at call time, so
   // order is not load-bearing; this is grouping readability.
   { name: "subagent", category: "Tasks", describe: "In-process subagents: scout/tester/worker/planner/reviewer agents, role-based model pools, classifier tier+thinking routing, background tasks with liveness, herdr delegation.", load: subagentModule, config: subagentConfig, tools: ["subagent", "herdr"] },
-  // ── Tools ──────────────────────────────────────────────────────────────
+  // Steering LAST before the config module (load order is load-bearing even
+  // though its /config rows live on the Model tab, which PI_TAB_ORDER sorts
+  // independently): its before_agent_start handler must run AFTER ponytail's
+  // and subagent's so the deepseek-v4-pro anchor bootstrap REPLACES the final
+  // prompt (byte-identical minimal prompt) instead of being re-appended to.
+  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): first-tool hints, reasoning strip, leak cleaning, error recovery hints, DeepSeek guidance + v4-pro minimal-mode anchor.", load: steeringModule, config: steeringConfig },
+  // ── Tools ─────────────────────────────────────────────────────────────
+  // Repair first in the section: it wraps the built-in tools; serena/fff ride
+  // on top (no load-order dependency — hooks resolve at call time).
+  { name: "repair", category: "Tools", tools: ["apply_patch", "str_replace_editor"], describe: "Tool-call hardening: schema argument repair, edit mismatch retry, destructive-command guard. Wraps the built-in tools once; adds apply_patch + str_replace_editor.", load: repairModule, config: repairConfig },
   { name: "serena", category: "Tools", describe: "Serena semantic code tools via a persistent Python worker.", load: serenaModule, tools: [
     "serena_status", "serena_list_tools", "serena_get_symbols_overview", "serena_find_symbol",
     "serena_find_referencing_symbols", "serena_find_declaration", "serena_find_implementations",

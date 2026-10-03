@@ -230,6 +230,89 @@ cap-3 preview). Raw SDK event labels (`message_end`…) never render — only
   vendored unchanged. Auto-review is NOT ported (advisor covers turn-end
   review; a diff-reviewer belongs to a future model-tools port).
 
+### Repair module (repair)
+
+Ported from the tool-hardening half of `@bacnh85/pi-model-tools` 0.9.5 (see
+`extensions/modules/repair/`). Wraps the 7 built-in tools (read, write, edit,
+grep, find, ls, bash) EXACTLY ONCE each (pi lets an extension tool override a
+built-in by name) and adds `apply_patch` (Codex-style V4D diff tool) and
+`str_replace_editor` (byte-faithful DSH Minimal-pair editor — the schema text
+is load-bearing for the steering module's anchor).
+
+DELIBERATE DEVIATION from upstream: the deterministic half is MODEL-AGNOSTIC
+here — schema argument repair, read-notice decontamination, and the tool_call
+guards (destructive bash + read-on-guessed-path) run for ALL models (upstream
+gated them on a detected deepseek/glm family; the family-gated steering half
+lives in the steering module, a different file set). Edit mismatch repair
+(strip read-notice contamination, trim-tolerant retry, nearest-region error,
+apply_patch escalation) is gated on `repair.editRetry`.
+
+Settings: the `repair` section (`arguments`, `editRetry`, `guards` — read PER
+TOOL CALL; `autoBg`, `autoBgSecs` — bind at module LOAD because the wrapped
+bash description sits in the cache-safe request head, so those rows take
+effect next session; `/repair` status discloses the load-bound values).
+Layering: defaults → global settings.json → trusted project file. Per-tool
+kill-switch: wrapped tools honor `ceulen.disabledTools` at registration
+(`defaultActive: false`), so /config's live tool toggles work over the
+wrapped built-ins too.
+
+### Steering module (steering)
+
+Ported from the model-family half of `@bacnh85/pi-model-tools` 0.9.5 (see
+`extensions/modules/steering/`): provider-agnostic family detection
+(deepseek-v4 | glm — substring matching, works through the router proxy:
+`combo/deepseek-v4.1-flash` matches), first-tool hints (bash-first / clone-
+first / find-first — user-message tail ONLY, first provider round of the
+turn), reasoning strip + leaked-content cleaning (the biggest prefix-cache-
+stability factor), error categorization + recovery hints, DeepSeek selection
+guidance / superpower (off by default) / strict-Serena steering, and the
+**ds-anchor** (deepseek-v4-pro minimal-mode two-phase bootstrap, on by
+default: request #1 gets the byte-identical DSH minimal prompt +
+bash/str_replace_editor only, max_tokens 256000; promotes on the first
+durable assistant reply; fail-open everywhere; `/steering` shows the anchor
+trace ring).
+
+LOAD-ORDER CONTRACT (the reason steering is its own registry entry, placed
+after subagent and before repair/serena/config): pi chains
+`before_agent_start` results — each handler's returned systemPrompt becomes
+the next handler's event.systemPrompt. Steering registers LAST of the prompt
+rewriters, so during the anchor bootstrap its returned minimal prompt
+REPLACES everything ponytail/advisor/subagent composed (the only place a
+ceulen module clobbers instead of composes); on the normal path it composes
+onto `event.systemPrompt` and never drops existing content. Do not add a
+second system-prompt-rewriting module after it.
+
+Settings: the `steering` section (`firstToolHints`, `selectionGuidance`,
+`superpower`, `superpowerPrompt`, `strictSerena`, `stripReasoning`,
+`dsAnchor`, `weNeed`), read per turn. The steering reminder customType is
+`ceulen-steering`. `/steering` = status (family, flags, cache stats,
+anchor state + trace). The zai-provider payload hooks (fast-mode body,
+throttle, signing) are NOT here — the zai module owns them, gated on provider
+id, not model family.
+
+### Z.AI provider module (zai)
+
+Ported from `@bacnh85/pi-model-tools` 0.9.5's provider plumbing (see
+`extensions/modules/zai/`): the `zai-anthropic` provider — GLM-5.x through
+Z.ai's Anthropic Messages endpoint (`https://api.z.ai/api/anthropic`),
+giving explicit `cache_control` prompt caching, the `speed:"fast"` serving
+tier, and effort-based reasoning that the OpenAI-compatible endpoint lacks.
+Registered UNCONDITIONALLY (`apiKey: "$ZAI_ANTHROPIC_API_KEY"` keeps `/login
+zai-anthropic` reachable). Includes the cross-process dispatch throttle
+(file lock, default 1000 ms, Z.ai 429/1302 rate-limit guard, fail-open) and
+**ZCode Client-Signing V4** (identity headers + X-Session-Id + per-request
+Ed25519 signatures + PoW, ported from TriDefender/zcode-api, fail-open
+everywhere: gate unreachable / handshake failure / legacy single-part key /
+two consecutive 401s → unsigned bypass).
+
+Settings: the `zai` section (`baseUrl` — menu over the 4 known endpoints;
+`speed` fast|standard; `signing` on by default; `minIntervalMs`), layered
+env `ZAI_ANTHROPIC_*` > trusted project > global. All values are read PER
+REQUEST except the provider registration itself (a `baseUrl` save live-
+re-registers the provider, router precedent). `/zai` = status, never prints
+the key. ZCode signing only matters on the `zcode.z.ai/api/v1/ultra-zai`
+route — `api.z.ai` ignores the `X-Client-*` headers.
+
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 
 - The bundle entry wraps each module's `pi` in `guarded()` (extensions/index.ts, one shared ownership map for the whole load loop): a name claimed by a DIFFERENT module throws at load; same-module re-claims pass (router re-registers its provider at runtime — that's the supported update path). Contract tests: `extensions/modules/router/test/guard.test.ts`.
@@ -454,7 +537,16 @@ threshold}`, `subagent.roles.{fast,coder,smart}` (diff-based — pristine
 defaults never written; clear-to-empty deletes = default restored),
 `subagent.{idle,hard}TimeoutMins` — writes the GLOBAL `subagent` section,
 applied live (settings read per execute()); **Tasks** tab, `Subagents`
-section). A NON-CORE module
+section) and **steering** (`steering.{firstToolHints,selectionGuidance,
+superpower,superpowerPrompt,strictSerena,stripReasoning,dsAnchor,weNeed}` —
+writes the GLOBAL `steering` section, read per turn so saves apply live;
+**Model** tab, `Steering` section) and **repair** (`repair.{arguments,
+editRetry,guards,autoBg,autoBgSecs}` — writes the GLOBAL `repair` section;
+first three apply next turn, the bash pair binds at load = next session,
+disclosed by row warning + save notify; **Tools** tab, `Repair` section) and
+**zai** (`zai.{baseUrl,speed,signing,minIntervalMs}` — writes the GLOBAL
+`zai` section; baseUrl save live-re-registers the provider, the rest read
+per request; **Providers** tab, `Z.AI (Anthropic)` section). A NON-CORE module
 without a contribution factory gets
 a synthesized Enable-only section (serena → **Tools** · `Serena`, fff →
 **Tools** · `FFF search`, rtk → **Shell** · `RTK`). The per-module kill-switch

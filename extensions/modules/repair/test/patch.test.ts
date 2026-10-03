@@ -1,0 +1,563 @@
+// ponytail: vendored from @bacnh85/pi-model-tools 0.9.5 —
+// extensions/test/unit/apply-patch.test.ts (import path adapted; the lib file
+// is lib/patch.ts in ceulen).
+import assert from "node:assert";
+import { describe, it } from "node:test";
+import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+  parsePatch,
+  seekSequence,
+  applyPatchToFiles,
+  PatchParseError,
+} from "../lib/patch.js";
+
+describe("parsePatch", () => {
+  it("parses an update op with context/removed/added", () => {
+    const p = parsePatch(
+      "*** Begin Patch\n*** Update File: a.ts\n@@ ctx\n-old\n+new\n*** End Patch",
+    );
+    assert.strictEqual(p.ops.length, 1);
+    assert.strictEqual(p.ops[0].kind, "update");
+    assert.strictEqual(p.ops[0].path, "a.ts");
+  });
+
+  it("parses an add op", () => {
+    const p = parsePatch("*** Add File: new.txt\n+line 1\n+line 2\n*** End Patch");
+    assert.strictEqual(p.ops[0].kind, "add");
+    assert.strictEqual(p.ops[0].path, "new.txt");
+  });
+
+  it("parses a delete op", () => {
+    const p = parsePatch("*** Delete File: old.txt\n*** End Patch");
+    assert.strictEqual(p.ops[0].kind, "delete");
+    assert.strictEqual(p.ops[0].path, "old.txt");
+  });
+
+  it("parses a rename (update with →)", () => {
+    const p = parsePatch("*** Update File: a.ts → b.ts\n@@ ctx\n-x\n+y\n*** End Patch");
+    assert.strictEqual(p.ops[0].movePath, "b.ts");
+  });
+
+  it("parses a rename (-> ascii)", () => {
+    const p = parsePatch("*** Update File: a.ts -> b.ts\n*** End Patch");
+    assert.strictEqual(p.ops[0].movePath, "b.ts");
+  });
+
+  it("throws on payload outside a file section", () => {
+    assert.throws(() => parsePatch("+foo\n*** End Patch"), PatchParseError);
+  });
+
+  it("throws on no file ops", () => {
+    assert.throws(() => parsePatch("*** Begin Patch\n*** End Patch"), PatchParseError);
+  });
+
+  it("throws on '-' in an Add File section", () => {
+    assert.throws(
+      () => parsePatch("*** Add File: x\n+a\n-b\n*** End Patch"),
+      PatchParseError,
+    );
+  });
+
+  it("treats a bare context line (no leading space) as context", () => {
+    // DeepSeek/gpt-oss frequently omit the leading-space context marker.
+    const p = parsePatch(
+      "*** Update File: a.ts\n@@ alpha\n}\n-x\n+y\n*** End Patch",
+    );
+    // The '}' is context, not an error.
+    assert.strictEqual(p.ops[0].kind, "update");
+    assert.doesNotThrow(() => parsePatch("*** Update File: a.ts\n}\n-x\n+y\n*** End Patch"));
+  });
+});
+
+describe("seekSequence", () => {
+  it("exact match", () => {
+    const r = seekSequence(["foo", "bar", "baz"], ["bar", "baz"]);
+    assert.strictEqual(r.count, 1);
+    assert.strictEqual(r.firstIndex, 1);
+    assert.strictEqual(r.exact, true);
+  });
+  it("rstrip match when trailing whitespace differs", () => {
+    const r = seekSequence(["foo ", "bar\t"], ["foo", "bar"]);
+    assert.strictEqual(r.count, 1);
+    assert.strictEqual(r.exact, false);
+  });
+  it("trim match when leading whitespace differs", () => {
+    const r = seekSequence(["  foo", "\tbar"], ["foo", "bar"]);
+    assert.strictEqual(r.count, 1);
+    assert.strictEqual(r.exact, false);
+  });
+  it("unicode-normalize match for smart quotes/dashes", () => {
+    // file has a smart dash, pattern has ASCII hyphen
+    const r = seekSequence(["cost \u2013 low"], ["cost - low"]);
+    assert.strictEqual(r.count, 1);
+    assert.strictEqual(r.exact, false);
+  });
+  it("returns 0 when not found", () => {
+    const r = seekSequence(["a", "b"], ["z"]);
+    assert.strictEqual(r.count, 0);
+    assert.strictEqual(r.firstIndex, -1);
+  });
+  it("returns 0 when pattern longer than lines", () => {
+    const r = seekSequence(["a"], ["a", "b", "c"]);
+    assert.strictEqual(r.count, 0);
+  });
+  it("counts multiple matches", () => {
+    const r = seekSequence(["x", "x", "x"], ["x"]);
+    assert.strictEqual(r.count, 3);
+  });
+});
+
+// ── End-to-end apply against a real temp dir ──
+
+async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
+  const dir = await mkdtemp(join(tmpdir(), "apply-patch-"));
+  try {
+    return await fn(dir);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+describe("applyPatchToFiles — update", () => {
+  it("applies a single update hunk", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.ts");
+      await writeFile(file, "alpha\nbeta\ngamma\n", "utf-8");
+      // anchor on the unchanged line above the change (alpha stays)
+      const parsed = parsePatch(
+        "*** Update File: a.ts\n@@ alpha\n-beta\n+BETA\n*** End Patch",
+      );
+      const res = await applyPatchToFiles(parsed, dir);
+      const out = (await readFile(file, "utf-8")).toString();
+      assert.strictEqual(out, "alpha\nBETA\ngamma\n");
+      assert.strictEqual(res.exact, true);
+      assert.match(res.diff, /BETA/);
+    });
+  });
+
+  it("applies multiple hunks in one file", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.ts");
+      await writeFile(file, "one\nX\ntwo\nX\nthree\n", "utf-8");
+      const parsed = parsePatch(
+        "*** Update File: a.ts\n@@ one\n-X\n+1\n@@ two\n-X\n+2\n*** End Patch",
+      );
+      await applyPatchToFiles(parsed, dir);
+      const out = (await readFile(file, "utf-8")).toString();
+      assert.strictEqual(out, "one\n1\ntwo\n2\nthree\n");
+    });
+  });
+
+  it("errors when context is not found", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.ts");
+      await writeFile(file, "alpha\nbeta\n", "utf-8");
+      // 0.8.1: a bogus @@ label + a UNIQUE removed payload now applies via the
+      // anchor-demotion fallback (see label-anchor tests below). This stays an
+      // error only because the payload matches nothing either.
+      const parsed = parsePatch(
+        "*** Update File: a.ts\n@@ nope\n-zeta\n+ZETA\n*** End Patch",
+      );
+      await assert.rejects(() => applyPatchToFiles(parsed, dir), /not found/);
+    });
+  });
+
+  it("errors when context is ambiguous", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.ts");
+      await writeFile(file, "dup\nA\ndup\nA\n", "utf-8");
+      // anchor ["dup","A"] genuinely appears twice.
+      const parsed = parsePatch(
+        "*** Update File: a.ts\n@@ dup\n-A\n+AA\n*** End Patch",
+      );
+      await assert.rejects(() => applyPatchToFiles(parsed, dir), /ambiguous/);
+    });
+  });
+
+  it("preserves BOM and CRLF", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.ts");
+      await writeFile(file, "\uFEFFalpha\r\nbeta\r\n", "utf-8");
+      // anchor on the unchanged line above (alpha stays)
+      const parsed = parsePatch(
+        "*** Update File: a.ts\n@@ alpha\n-beta\n+BETA\n*** End Patch",
+      );
+      await applyPatchToFiles(parsed, dir);
+      const out = (await readFile(file, "utf-8")).toString();
+      assert.strictEqual(out, "\uFEFFalpha\r\nBETA\r\n");
+      assert.ok(out.startsWith("\uFEFF"), "BOM preserved");
+      assert.ok(out.includes("\r\n"), "CRLF preserved");
+    });
+  });
+
+  it("collapses @@ anchor repeated as context line", async () => {
+    // Model writes `@@ alpha /  alpha` treating @@ as a locator header.
+    // The duplicate context line is collapsed so only one "alpha" is matched.
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.ts");
+      await writeFile(file, "alpha\nbeta\n", "utf-8");
+      const parsed = parsePatch(
+        "*** Update File: a.ts\n@@ alpha\n alpha\n-beta\n+BETA\n*** End Patch",
+      );
+      await applyPatchToFiles(parsed, dir);
+      const out = (await readFile(file, "utf-8")).toString();
+      assert.strictEqual(out, "alpha\nBETA\n");
+    });
+  });
+
+  it("collapses @@ anchor repeated as removed line", async () => {
+    // Anchor text equals the first removed line (e.g. @@ line1 / -line1).
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.ts");
+      await writeFile(file, "X\nfoo\n", "utf-8");
+      const parsed = parsePatch(
+        "*** Update File: a.ts\n@@ X\n-X\n+Y\n*** End Patch",
+      );
+      await applyPatchToFiles(parsed, dir);
+      const out = (await readFile(file, "utf-8")).toString();
+      assert.strictEqual(out, "Y\nfoo\n");
+    });
+  });
+});
+
+describe("applyPatchToFiles — add / delete / multi-file", () => {
+  it("adds a new file", async () => {
+    await withTempDir(async (dir) => {
+      const parsed = parsePatch(
+        "*** Add File: new.txt\n+hello\n+world\n*** End Patch",
+      );
+      await applyPatchToFiles(parsed, dir);
+      const out = (await readFile(join(dir, "new.txt"), "utf-8")).toString();
+      assert.strictEqual(out, "hello\nworld");
+    });
+  });
+
+  it("deletes a file", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "old.txt");
+      await writeFile(file, "bye\n", "utf-8");
+      const parsed = parsePatch("*** Delete File: old.txt\n*** End Patch");
+      await applyPatchToFiles(parsed, dir);
+      await assert.rejects(() => readFile(file, "utf-8"));
+    });
+  });
+
+  it("applies a multi-file patch", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "a.ts"), "x\n1\n", "utf-8");
+      await writeFile(join(dir, "b.ts"), "y\n2\n", "utf-8");
+      const parsed = parsePatch(
+        "*** Update File: a.ts\n@@ x\n-1\n+A\n*** Update File: b.ts\n@@ y\n-2\n+B\n*** End Patch",
+      );
+      const res = await applyPatchToFiles(parsed, dir);
+      assert.strictEqual(res.files.length, 2);
+      assert.strictEqual((await readFile(join(dir, "a.ts"), "utf-8")).toString(), "x\nA\n");
+      assert.strictEqual((await readFile(join(dir, "b.ts"), "utf-8")).toString(), "y\nB\n");
+    });
+  });
+
+  it("renames a file (update →)", async () => {
+    await withTempDir(async (dir) => {
+      await writeFile(join(dir, "old.ts"), "ctx\n1\n", "utf-8");
+      const parsed = parsePatch(
+        "*** Update File: old.ts → new.ts\n@@ ctx\n-1\n+2\n*** End Patch",
+      );
+      await applyPatchToFiles(parsed, dir);
+      assert.strictEqual((await readFile(join(dir, "new.ts"), "utf-8")).toString(), "ctx\n2\n");
+      await assert.rejects(() => readFile(join(dir, "old.ts"), "utf-8"));
+    });
+  });
+
+  it("honors an absolute path outside cwd (like pi built-in tools)", async () => {
+    await withTempDir(async (dir) => {
+      // An absolute path that is NOT under cwd must still work (pi's resolveToCwd
+      // allows absolute paths anywhere; apply_patch must match that).
+      const outside = join(tmpdir(), "apply-patch-outside-" + Date.now() + ".ts");
+      try {
+        await writeFile(outside, "ctx\n1\n", "utf-8");
+        const parsed = parsePatch(`*** Add File: ${outside}\n+x\n*** End Patch`);
+        await assert.rejects(() => applyPatchToFiles(parsed, dir), /already exists/);
+      } finally {
+        await rm(outside, { force: true });
+      }
+    });
+  });
+});
+
+// Regression tests for the bare-blank-line parser hazard and EOF-append path.
+describe("applyPatchToFiles — markdown / blank-line / EOF regression", () => {
+  it("bare blank line inside a +block is an added empty line, not context", async () => {
+    // Reproduces the failure shape from ISSUE-apply_patch.md: a +block where
+    // the model emits the blank SEPARATORS between paragraphs WITHOUT the
+    // '+' prefix (bare blank lines). Before the fix each bare blank became a
+    // context line, splitting the added block into two hunks; the second
+    // sub-hunk landed on matchBlock [""] → wrong spot / "context not found".
+    await withTempDir(async (dir) => {
+      const file = join(dir, "plan.md");
+      const orig = "Some intro.\n\naccount. Re-import by dropping new Excel files.\n";
+      await writeFile(file, orig, "utf-8");
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: plan.md",
+        "@@ account. Re-import by dropping new Excel files.",
+        "+## STATUS: EXECUTED",
+        "",                 // ← bare blank separator (no '+' prefix)
+        "+All steps complete.",
+        "+Self-check: 19/19.",
+        "",                 // ← another bare blank separator
+        "+Build: clean.",
+        "*** End Patch",
+      ].join("\n");
+      await applyPatchToFiles(parsePatch(patch), dir);
+      const out = (await readFile(file, "utf-8")).toString();
+      assert.strictEqual(
+        out,
+        "Some intro.\n\naccount. Re-import by dropping new Excel files.\n" +
+        "## STATUS: EXECUTED\n\nAll steps complete.\nSelf-check: 19/19.\n\nBuild: clean.\n",
+      );
+    });
+  });
+
+  it("Update with only +lines (no @@ anchor) appends at EOF", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.txt");
+      await writeFile(file, "one\ntwo\nthree\n", "utf-8");
+      const parsed = parsePatch("*** Update File: a.txt\n+four\n+five\n*** End Patch");
+      await applyPatchToFiles(parsed, dir);
+      const out = (await readFile(file, "utf-8")).toString();
+      assert.strictEqual(out, "one\ntwo\nthree\nfour\nfive\n");
+    });
+  });
+
+  it("unresolvable anchor throws a message containing the anchor + nearest region", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.md");
+      await writeFile(file, "alpha\nbeta\ngamma\n", "utf-8");
+      const parsed = parsePatch("*** Update File: a.md\n@@ nope-no-such-line\n-zeta\n+ZETA\n*** End Patch");
+      await assert.rejects(
+        () => applyPatchToFiles(parsed, dir),
+        (err: Error) => {
+          assert.match(err.message, /Hunk context not found/);
+          assert.match(err.message, /nope-no-such-line/);
+          assert.match(err.message, /Nearest matching region/i);
+          return true;
+        },
+      );
+    });
+  });
+
+  it("ambiguous anchor error names the first matching line numbers", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.txt");
+      await writeFile(file, "dup\nA\ndup\nB\ndup\n", "utf-8");
+      // Pure addition after a non-unique anchor → matchBlock = ["dup"] → 3 matches.
+      const parsed = parsePatch("*** Update File: a.txt\n@@ dup\n+y\n*** End Patch");
+      await assert.rejects(
+        () => applyPatchToFiles(parsed, dir),
+        /ambiguous \(3 matches\)[\s\S]*Found at lines: 1, 3, 5/,
+      );
+    });
+  });
+
+  it("applies the exact failing payload twice in succession (no stale state)", async () => {
+    // Pins the fix AND the no-stale-buffer guarantee: the second apply must
+    // operate on the file state left by the first, not a stale snapshot.
+    await withTempDir(async (dir) => {
+      const file = join(dir, "plan.md");
+      const orig = "Some intro.\n\naccount. Re-import by dropping new Excel files.\n";
+      await writeFile(file, orig, "utf-8");
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: plan.md",
+        "@@ account. Re-import by dropping new Excel files.",
+        "+## STATUS: EXECUTED",
+        "+",
+        "+Self-check: 19/19.",
+        "*** End Patch",
+      ].join("\n");
+      // First apply: adds the status block.
+      await applyPatchToFiles(parsePatch(patch), dir);
+      let out = (await readFile(file, "utf-8")).toString();
+      assert.ok(out.includes("## STATUS: EXECUTED"), "first apply should add the block");
+      // Second apply with a NEW anchor on the just-added line proves the tool
+      // re-reads current bytes (no stale buffer) rather than matching the
+      // original anchor a second time (which would now be ambiguous/missing).
+      const patch2 = [
+        "*** Begin Patch",
+        "*** Update File: plan.md",
+        "@@ Self-check: 19/19.",
+        "+",
+        "+E2E: 11/11.",
+        "*** End Patch",
+      ].join("\n");
+      await applyPatchToFiles(parsePatch(patch2), dir);
+      out = (await readFile(file, "utf-8")).toString();
+      assert.ok(out.includes("E2E: 11/11."), "second apply must extend the first");
+      assert.strictEqual(
+        out,
+        "Some intro.\n\naccount. Re-import by dropping new Excel files.\n" +
+        "## STATUS: EXECUTED\n\nSelf-check: 19/19.\n\nE2E: 11/11.\n",
+      );
+    });
+  });
+});
+
+// Regression tests for 0.8.1: bare-@@ hunk separation + @@-label anchor demotion.
+describe("applyPatchToFiles — bare @@ separators and label anchors", () => {
+  it("bare @@ separates consecutive context-free hunks (scattered single-line replacements)", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "tong-luan.md");
+      await writeFile(file, "vy-1\nmid-a\nt7-1\nmid-b\nch6-1\n", "utf-8");
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: tong-luan.md",
+        "@@",
+        "-vy-1",
+        "+vy-2",
+        "@@",
+        "-t7-1",
+        "+t7-2",
+        "@@",
+        "-ch6-1",
+        "+ch6-2",
+        "*** End Patch",
+      ].join("\n");
+      const result = await applyPatchToFiles(parsePatch(patch), dir);
+      assert.strictEqual(result.exact, true);
+      assert.strictEqual(await readFile(file, "utf-8"), "vy-2\nmid-a\nt7-2\nmid-b\nch6-2\n");
+    });
+  });
+
+  it("bare @@ drops the previous hunk's trailing context instead of gluing it to the next hunk", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "writer.md");
+      await writeFile(
+        file,
+        ["## Mandates", "", "### 1", "forbidden-1", "required-1", "xung-ho", "### 2", "no-euph", "mandatory", "sensation", ""].join("\n"),
+        "utf-8",
+      );
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: writer.md",
+        "@@",
+        "## Mandates",
+        "+### 0 new",
+        "### 1",
+        "forbidden-1",
+        "required-1",
+        "@@",
+        "### 2",
+        "no-euph",
+        "mandatory",
+        "+new-bullet",
+        "*** End Patch",
+      ].join("\n");
+      await applyPatchToFiles(parsePatch(patch), dir);
+      assert.strictEqual(
+        await readFile(file, "utf-8"),
+        ["## Mandates", "### 0 new", "", "### 1", "forbidden-1", "required-1", "xung-ho", "### 2", "no-euph", "mandatory", "new-bullet", "sensation", ""].join("\n"),
+      );
+    });
+  });
+
+  it("a @@ label that is not a file line is demoted to a hint when the removed payload is unique", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "chuong.html");
+      await writeFile(file, "<p>intro</p>\n<p>old paragraph body</p>\n<p>outro</p>\n", "utf-8");
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: chuong.html",
+        "@@ Tay Dung run, dat len eo Lan (paraphrase label)",
+        "-<p>old paragraph body</p>",
+        "+<p>new paragraph body</p>",
+        "*** End Patch",
+      ].join("\n");
+      const result = await applyPatchToFiles(parsePatch(patch), dir);
+      assert.strictEqual(result.exact, false); // fuzzy: anchor was ignored
+      assert.strictEqual(await readFile(file, "utf-8"), "<p>intro</p>\n<p>new paragraph body</p>\n<p>outro</p>\n");
+    });
+  });
+
+  it("a @@ label with an ambiguous removed payload still errors", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.md");
+      await writeFile(file, "dup\nmid\ndup\n", "utf-8");
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: a.md",
+        "@@ invented label",
+        "-dup",
+        "+DUP",
+        "*** End Patch",
+      ].join("\n");
+      await assert.rejects(() => applyPatchToFiles(parsePatch(patch), dir), /Hunk context not found/);
+    });
+  });
+
+  it("bare @@ at section start, doubled, or trailing stays a no-op", async () => {
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.txt");
+      await writeFile(file, "one\ntwo\n", "utf-8");
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: a.txt",
+        "@@",
+        "@@",
+        "-one",
+        "+ONE",
+        "@@",
+        "*** End Patch",
+      ].join("\n");
+      await applyPatchToFiles(parsePatch(patch), dir);
+      assert.strictEqual(await readFile(file, "utf-8"), "ONE\ntwo\n");
+    });
+  });
+});
+
+describe("applyPatchToFiles — bare @@ edge cases", () => {
+  it("bare @@ after an unclaimed leading context keeps that context (no silent drop)", async () => {
+    // `@@ anchor` then a bare `@@` then payload: the leading context was never
+    // claimed by a payload hunk, so the bare @@ must NOT discard it — dropping
+    // it made [X] ambiguous where [anchor, X] was unique.
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.md");
+      await writeFile(file, "anchor\nX\nfill\nX\n", "utf-8");
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: a.md",
+        "@@ anchor",
+        "@@",
+        "-X",
+        "+Y",
+        "*** End Patch",
+      ].join("\n");
+      await applyPatchToFiles(parsePatch(patch), dir);
+      assert.strictEqual(await readFile(file, "utf-8"), "anchor\nY\nfill\nX\n");
+    });
+  });
+
+  it("two hunks demoted to the same target error as overlapping instead of silently dropping one", async () => {
+    // Different failing labels, identical removed payload: both demote to the
+    // same span; before the overlap guard the reverse-order application
+    // silently discarded one hunk's added lines.
+    await withTempDir(async (dir) => {
+      const file = join(dir, "a.md");
+      await writeFile(file, "intro\nX\noutro\n", "utf-8");
+      const patch = [
+        "*** Begin Patch",
+        "*** Update File: a.md",
+        "@@ label-a",
+        "-X",
+        "+A",
+        "@@ label-b",
+        "-X",
+        "+B",
+        "*** End Patch",
+      ].join("\n");
+      await assert.rejects(() => applyPatchToFiles(parsePatch(patch), dir), /overlap/i);
+      assert.strictEqual(await readFile(file, "utf-8"), "intro\nX\noutro\n");
+    });
+  });
+});
