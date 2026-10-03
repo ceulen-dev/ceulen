@@ -138,7 +138,8 @@ export interface State {
   inFlight?: Promise<SubscriptionUsageSnapshot>;
   refreshTimer?: NodeJS.Timeout;
   debounceTimer?: NodeJS.Timeout;
-  responseStartTime?: number;
+  /** performance.now() at before_provider_request — monotonic (Date.now() can step with NTP). */
+  responseStartPerf?: number;
   lastTokPerSec?: number;
   lastTokPerSecLabel?: string;
   cumulativeOutput: number;
@@ -1879,7 +1880,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("before_provider_request", async (_event, _ctx) => {
-    state.responseStartTime = Date.now();
+    state.responseStartPerf = performance.now();
   });
 
   pi.on("message_end", async (event, _ctx) => {
@@ -1889,14 +1890,18 @@ export default function (pi: ExtensionAPI) {
       // footer).
       const cost = Number((event.message.usage as any)?.cost?.total);
       if (Number.isFinite(cost) && cost > 0) state.cumulativeCost += cost;
-      if (state.responseStartTime) {
+      if (state.responseStartPerf !== undefined) {
         // usage.output already includes reasoning tokens (Pi SDK contract) —
         // this is total tok/s in both thinking and normal mode.
         const output = (event.message.usage as any)?.output ?? 0;
         const reasoning = (event.message.usage as any)?.reasoning ?? 0;
-        const elapsed = Date.now() - state.responseStartTime;
-        state.responseStartTime = undefined;
-        if (elapsed > 0 && output > 0) {
+        const elapsed = performance.now() - state.responseStartPerf;
+        state.responseStartPerf = undefined;
+        // 100ms floor (omp parity): a sub-floor reading is noise, e.g. a
+        // 50-token continuation landing in 80ms would flash "625 tok/s".
+        // Aborted/errored streams publish nothing — partial usage is not a rate.
+        const stop = (event.message as { stopReason?: string }).stopReason;
+        if (elapsed >= 100 && output > 0 && stop !== "aborted" && stop !== "error") {
           state.lastTokPerSec = Math.round(output / (elapsed / 1000));
           state.lastTokPerSecLabel = tokPerSecLabel(output, reasoning, elapsed);
           setGenRate({ tps: state.lastTokPerSec });
@@ -1910,7 +1915,7 @@ export default function (pi: ExtensionAPI) {
 
   pi.on("after_provider_response", async (event, _ctx) => {
     if (event.status >= 400) {
-      state.responseStartTime = undefined;
+      state.responseStartPerf = undefined;
     }
     if (state.adapter) scheduleRefresh(state);
   });

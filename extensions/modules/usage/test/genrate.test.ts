@@ -34,7 +34,7 @@ test("message_end publishes tok/s to the shared rate store; session_start resets
   assert.equal(getGenRate().tps, undefined, "fresh session starts with no rate");
 
   await pi.handlers.before_provider_request!({}, stubCtx);
-  await new Promise((r) => setTimeout(r, 5)); // non-zero elapsed for the tok/s math
+  await new Promise((r) => setTimeout(r, 110)); // clear the 100ms noise floor
   const usage = { output: 1000, reasoning: 400, cost: { total: 0 } };
   await pi.handlers.message_end!({ message: { role: "assistant", usage } }, stubCtx);
   const tps = getGenRate().tps;
@@ -42,4 +42,29 @@ test("message_end publishes tok/s to the shared rate store; session_start resets
 
   await pi.handlers.session_start!({ reason: "new" }, stubCtx);
   assert.equal(getGenRate().tps, undefined, "new session clears the previous rate");
+});
+
+test("tok/s guards: sub-floor duration and aborted/errored streams publish nothing", async () => {
+  const pi = makePi() as { handlers: Record<string, (e: unknown, c: never) => Promise<void> | void> };
+  extension(pi);
+
+  await pi.handlers.session_start!({ reason: "new" }, stubCtx);
+  const usage = { output: 1000, reasoning: 0, cost: { total: 0 } };
+
+  // Sub-floor: fast continuation would otherwise flash a huge rate.
+  await pi.handlers.before_provider_request!({}, stubCtx);
+  await pi.handlers.message_end!({ message: { role: "assistant", usage } }, stubCtx);
+  assert.equal(getGenRate().tps, undefined, "<100ms elapsed is noise, not a rate");
+
+  // Aborted partial: accumulated output is not a rate either.
+  await pi.handlers.before_provider_request!({}, stubCtx);
+  await new Promise((r) => setTimeout(r, 110));
+  await pi.handlers.message_end!({ message: { role: "assistant", stopReason: "aborted", usage } }, stubCtx);
+  assert.equal(getGenRate().tps, undefined, "aborted stream publishes nothing");
+
+  // Errored stream.
+  await pi.handlers.before_provider_request!({}, stubCtx);
+  await new Promise((r) => setTimeout(r, 110));
+  await pi.handlers.message_end!({ message: { role: "assistant", stopReason: "error", usage } }, stubCtx);
+  assert.equal(getGenRate().tps, undefined, "errored stream publishes nothing");
 });
