@@ -1,6 +1,6 @@
 {
   "name": "ceulen",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "Ceulen — the Pi coding agent, fully dressed: one bundle extension carrying the full toolkit with a single /ceulen config command.",
   "type": "module",
   "license": "MIT",

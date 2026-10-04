@@ -253,6 +253,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
     ux: { section: "UX discipline", icon: "📐" },
     ponytail: { section: "Ponytail", icon: "🦥" },
     plan: { section: "Plan mode", icon: "🗺️" },
+    todo: { section: "Todo", icon: "☑" },
     serena: { section: "Serena" },
     repair: { section: "Repair", icon: "🔧" },
     fff: { section: "FFF search" },

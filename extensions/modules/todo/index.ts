@@ -39,12 +39,20 @@ import type {
   ExtensionContext,
   ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
+import { Text } from "@earendil-works/pi-tui";
 import { Type, type Static } from "typebox";
+import {
+  createTodoWidgetController,
+  renderTodoBoard,
+  type WidgetTheme,
+} from "./lib/render.ts";
+import { readLingerSecs } from "./lib/settings.ts";
 import { readDisabledTools } from "../../lib/tools.js";
 
 export const TODO_TOOL = "todo";
 export const TODO_ENTRY_TYPE = "ceulen-todo";
 export const TODO_STATUS_KEY = "ceulen-todo";
+export const TODO_WIDGET_KEY = "ceulen-todo";
 
 export type TodoStatus = "pending" | "in_progress" | "done" | "blocked";
 
@@ -118,23 +126,24 @@ function clonePhases(phases: readonly TodoPhase[]): TodoPhase[] {
 }
 
 /** A phase is BLOCKED when it has unmet blockers — derived, never stored. */
-function isBlocked(phase: TodoPhase, byId: Map<string, TodoPhase>): boolean {
+export function isBlocked(phase: TodoPhase, phases: readonly TodoPhase[]): boolean {
+  const byId = new Map(phases.map((p) => [p.id, p]));
   return phase.blockedBy.some((dep) => {
     const depPhase = byId.get(dep);
     return depPhase !== undefined && depPhase.status !== "done";
   });
 }
 
-function effectiveStatus(phase: TodoPhase, byId: Map<string, TodoPhase>): TodoStatus {
-  return isBlocked(phase, byId) ? "blocked" : phase.status;
+export function effectiveStatus(phase: TodoPhase, phases: readonly TodoPhase[]): TodoStatus {
+  return isBlocked(phase, phases) ? "blocked" : phase.status;
 }
 
 /** Next actionable phase: first running one, else the first pending unblocked phase. */
 function nextActionable(phases: readonly TodoPhase[]): TodoPhase | undefined {
   const byId = new Map(phases.map((p) => [p.id, p]));
   return (
-    phases.find((p) => p.status === "in_progress" && !isBlocked(p, byId)) ??
-    phases.find((p) => p.status === "pending" && !isBlocked(p, byId))
+    phases.find((p) => p.status === "in_progress" && !isBlocked(p, phases)) ??
+    phases.find((p) => p.status === "pending" && !isBlocked(p, phases))
   );
 }
 
@@ -146,9 +155,8 @@ function counts(phases: readonly TodoPhase[]): { done: number; total: number } {
 export function statusLine(phases: readonly TodoPhase[]): string | undefined {
   const { done, total } = counts(phases);
   if (total === 0 || done === total) return undefined;
-  const byId = new Map(phases.map((p) => [p.id, p]));
-  const active = phases.find((p) => p.status === "in_progress" && !isBlocked(p, byId));
-  const blocked = phases.filter((p) => p.status !== "done" && isBlocked(p, byId)).length;
+  const active = phases.find((p) => p.status === "in_progress" && !isBlocked(p, phases));
+  const blocked = phases.filter((p) => p.status !== "done" && isBlocked(p, phases)).length;
   return [
     `▸ ${done}/${total} done`,
     active ? `in_progress: ${active.title}` : "next: " + (nextActionable(phases)?.title ?? "—"),
@@ -165,7 +173,7 @@ function renderBoard(phases: readonly TodoPhase[], note?: string): string {
   const byId = new Map(phases.map((p) => [p.id, p]));
   const { done, total } = counts(phases);
   const lines = phases.map((p, i) => {
-    const st = effectiveStatus(p, byId);
+    const st = effectiveStatus(p, phases);
     const waiters = p.blockedBy.filter((dep) => byId.get(dep)?.status !== "done");
     const tail = [
       st === "blocked" && waiters.length > 0 ? `blocked by ${waiters.join(", ")}` : undefined,
@@ -346,6 +354,14 @@ export default function todoModule(pi: ExtensionAPI): void {
   let phases: TodoPhase[] = [];
   /** Last live ctx — the status item is set through it on every mutation. */
   let liveUi: ExtensionContext["ui"] | undefined;
+  /** Above-editor HUD (colored board + all-done linger). */
+  const widget = createTodoWidgetController();
+
+  const syncWidget = (ctx?: { mode?: string; ui: ExtensionContext["ui"] }): void => {
+    // getPhases: the render closure reads LIVE state — a captured array would
+    // freeze the HUD at the install-time snapshot (caught live in a herdr pane).
+    widget.sync(ctx, phases, readLingerSecs(), () => phases);
+  };
 
   const syncStatus = (ui: ExtensionContext["ui"] | undefined = liveUi): void => {
     if (!ui) return;
@@ -356,10 +372,11 @@ export default function todoModule(pi: ExtensionAPI): void {
     }
   };
 
-  const commit = (next: TodoPhase[], ui?: ExtensionContext["ui"]): void => {
+  const commit = (next: TodoPhase[], ctx?: { mode?: string; ui: ExtensionContext["ui"] }): void => {
     phases = next;
     pi.appendEntry(TODO_ENTRY_TYPE, { phases });
-    syncStatus(ui);
+    syncStatus(ctx?.ui);
+    syncWidget(ctx);
   };
 
   const tool: ToolDefinition<typeof todoSchema, { phases: TodoPhase[] }> = {
@@ -379,12 +396,24 @@ export default function todoModule(pi: ExtensionAPI): void {
     ],
     defaultActive: !readDisabledTools().has(TODO_TOOL),
     parameters: todoSchema,
+    // TUI-only: the colored board (status colors, strikethrough on done).
+    // The LLM-facing text content stays the plain board — this only swaps
+    // what the transcript draws. No phases in details → the plain text blob.
+    renderResult(result, _options, theme) {
+      const detail = result.details as { phases?: TodoPhase[] } | undefined;
+      const boardPhases = Array.isArray(detail?.phases) && detail!.phases!.every(isTodoPhase) ? detail!.phases! : [];
+      if (boardPhases.length === 0) {
+        const text = result.content[0];
+        return new Text(text?.type === "text" ? text.text : "", 0, 0);
+      }
+      return new Text(renderTodoBoard(boardPhases, theme as unknown as WidgetTheme).join("\n"), 0, 0);
+    },
     async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
       const ui = ctx.ui;
       liveUi = ui;
       const result = applyTodo(phases, params);
       const failed = result.errors.length > 0;
-      if (!failed && result.changed) commit(result.phases, ui);
+      if (!failed && result.changed) commit(result.phases, ctx);
       const effective = failed ? phases : result.phases;
       // Mutations restate the batch contract; a pure view stays quiet.
       const tail = failed
@@ -415,7 +444,7 @@ export default function todoModule(pi: ExtensionAPI): void {
           ctx.ui.notify("Todo list is already empty.", "info");
           return;
         }
-        commit([], ctx.ui);
+        commit([], ctx);
         ctx.ui.notify("Todo list cleared.", "info");
         return;
       }
@@ -436,11 +465,15 @@ export default function todoModule(pi: ExtensionAPI): void {
       [];
     phases = resolveTodoPhases(entries);
     syncStatus(ctx.ui);
+    // A resumed session with open work shows the HUD again; an all-done
+    // snapshot from a previous session stays hidden (no re-linger).
+    syncWidget(ctx);
   });
 
   // The indicator must not leak past this runtime (subagent-precedent: the
   // widget controller owns set + clear on session change).
   pi.on("session_shutdown", () => {
+    widget.dispose();
     try {
       liveUi?.setStatus(TODO_STATUS_KEY, undefined);
     } catch {

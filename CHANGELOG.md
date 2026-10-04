@@ -1,6 +1,19 @@
 # Changelog
 
-## Unreleased
+## 0.9.0 — 2026-10-04
+
+- **todo HUD**: OMP-parity live UI for the todo module — an above-editor
+  widget (same placement as the subagent HUD) rendering the board as a
+  nested tree (` └─ Tasks · n/m` head over `    ├─/└─` checkbox rows),
+  where every connector turns accent once its phase completes — the
+  completed tree reads as one lit progress path. Done rows stay visible
+  (success green + strikethrough), the current phase draws mdLink blue,
+  blocked rows warning + `(blocked by …)`, notes collapse to `+n`.
+  The transcript tool-result row draws the same colored board. When ALL
+  phases complete the board lingers `todo.lingerSecs` seconds (global
+  settings.json, default 60; 0 = instant, −1 = never; closed-set row on
+  `/config` → Tasks → Todo), then auto-clears; any new mutation cancels
+  the timer. The LLM-facing tool-result text stays the plain board.
 
 - **a2a**: new module — the A2A Protocol v1.0 bidirectional peer ported from
   `@bacnh85/pi-a2a` 0.7.13: 7 outbound tools (`a2a_call` with

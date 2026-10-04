@@ -29,6 +29,7 @@ import { planConfig } from "../modules/plan/configPanel.js";
 import a2aModule from "../modules/a2a/index.ts";
 import { a2aConfig } from "../modules/a2a/configPanel.js";
 import todoModule from "../modules/todo/index.ts";
+import { todoConfig } from "../modules/todo/configPanel.ts";
 import steeringModule from "../modules/steering/index.ts";
 import { steeringConfig } from "../modules/steering/configPanel.js";
 import repairModule from "../modules/repair/index.ts";
@@ -128,7 +129,7 @@ export const MODULES: ModuleEntry[] = [
   // No before_agent_start → no prompt-rewrite ordering constraint; its
   // child sessions reuse the host-only session guards in the module.
   { name: "a2a", category: "Tasks", describe: "A2A Protocol v1.0 peer: call remote agents (a2a_call…), be called by them (opt-in inbound server), local/mDNS/gateway discovery.", load: a2aModule, config: a2aConfig, tools: ["a2a_call", "a2a_status", "a2a_discover", "a2a_list", "a2a_history", "a2a_orchestrate", "a2a_peers"] },
-  { name: "todo", category: "Tasks", describe: "Phased task board: the `todo` tool (init/start/done/block/unblock) with session persistence, blockers, and a status-segment progress readout.", load: todoModule, tools: ["todo"] },
+  { name: "todo", category: "Tasks", describe: "Phased task board: the `todo` tool (init/start/done/block/unblock) with session persistence, blockers, an above-editor HUD, and a status-segment progress readout.", load: todoModule, config: todoConfig, tools: ["todo"] },
   // ── Tools ─────────────────────────────────────────────────────────────
   // Repair first in the section: it wraps the built-in tools; serena/fff ride
   // on top (no load-order dependency — hooks resolve at call time).

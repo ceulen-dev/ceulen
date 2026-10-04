@@ -513,6 +513,33 @@ result text is the rendered board + OMP's batch contract in promptGuidelines
 `before_agent_start` handler, so the module stays OUTSIDE the steering
 load-order contract. `/todo` prints the board; `/todo clear` resets.
 
+**Live UI (OMP-parity HUD)**: the TUI gets an above-editor widget (key
+`ceulen-todo`, the subagent-widget `setWidget` pattern) rendering the themed
+board in OMP's visual language (user-approved from a live omp screenshot):
+header `TODO` (accent bold), then a tree spine — `└─ Tasks · done/total`
+(mdLink blue, counts dim, `· blocked` chip when any) over checkbox rows
+`☑/☐ title`: done = success green + `theme.strikethrough` (rows STAY visible,
+the window keeps the row just above the active one), current = mdLink blue,
+pending = dim, blocked = warning + `(blocked by …)` tail; `+ n more phases`
+tail when the open window exceeds 5. Renderers + controller live in
+`lib/render.ts` (pure, WidgetTheme shim, `truncateToWidth`; the controller's
+render reads live state via `getPhases` — a captured array froze the board at
+the install-time snapshot, caught live in a herdr pane). The tool's
+`renderResult` draws the same colored board over the transcript row — the
+LLM-facing text content stays the plain board. The tree is OMP's PROGRESS
+PATH: rows nest one level under the head (` └─ Tasks` head, `    ├─`
+children) and every connector turns accent once its phase is done — the
+completed tree reads as one lit path (all-done view: fully accent); the
+transcript renderResult board shares the geometry. When ALL phases are done
+the completed board LINGERS `todo.lingerSecs`
+seconds (global settings.json, default 60; 0 = instant, −1 = never; closed
+set row on `/config` → Tasks → Todo ☑ via `configPanel.ts`), then the widget
+clears; any new mutation cancels the timer, `/todo clear` clears at once,
+and a resumed session with open work re-shows the HUD (an all-done snapshot
+stays hidden). NOT ported: compact-terminal mode, OMP's
+subagent-completion→todo auto-reconcile, dismiss/reveal persistence
+(`todo_hud_state`), `/todo hide|show`.
+
 ### Rules module (rules)
 
 Ported from OMP's sticky context files + rulebook (see

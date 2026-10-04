@@ -250,3 +250,279 @@ describe("/todo command", () => {
     assert.equal(h.notifications.at(-1), "Todo list is empty.");
   });
 });
+
+// ---------------------------------------------------------------------------
+// Themed renderers + HUD widget (lib/render.ts)
+// ---------------------------------------------------------------------------
+
+import { createTodoWidgetController, renderTodoBoard, renderTodoWidgetLines, type WidgetTheme } from "../lib/render.ts";
+
+/** Recording theme shim — asserts colors by token, keeps text readable. */
+function recTheme(): WidgetTheme & { tokens: string[] } {
+  const tokens: string[] = [];
+  return {
+    tokens,
+    fg: (color: string, text: string) => {
+      tokens.push(color);
+      return `<${color}>${text}</>`;
+    },
+    bold: (text: string) => `**${text}**`,
+    strikethrough: (text: string) => `~~${text}~~`,
+  };
+}
+
+const board = () => run([], { action: "init", phases: [{ title: "Read the repo" }, { title: "Port the tool" }, { title: "Verify" }] });
+
+describe("renderTodoBoard (OMP look)", () => {
+  it("colors by status: done success+strikethrough, current mdLink, pending muted, blocked warning", () => {
+    const t = recTheme();
+    const phases = board();
+    mark(phases, "p1", "done");
+    mark(phases, "p2", "in_progress");
+    mark(phases, "p3", "blocked", ["p2"]);
+    const lines = renderTodoBoard(phases, t);
+    // Nested-tree geometry (OMP): rows indent under an implied head with their
+    // own connectors; a done row's connector lights accent (the progress path).
+    assert.match(lines[0]!, /<accent>    ├─ <\/><success>☑<\/> <success>~~Read the repo~~<\/>/);
+    assert.match(lines[1]!, /<dim>    ├─ <\/><mdLink>☐<\/> <mdLink>Port the tool<\/>/);
+    assert.match(lines[2]!, /<dim>    └─ <\/><dim>☐<\/> <warning>Verify<\/><dim> \(blocked by p2\)<\/>/);
+    assert.ok(t.tokens.includes("success") && t.tokens.includes("mdLink") && t.tokens.includes("warning"));
+  });
+
+  it("done rows STAY VISIBLE with success + strikethrough (OMP parity — no omission in the full board)", () => {
+    const t = recTheme();
+    const phases = board();
+    mark(phases, "p1", "done");
+    const lines = renderTodoBoard(phases, t);
+    assert.equal(lines.length, 3);
+    assert.match(lines[0]!, /~~Read the repo~~/);
+  });
+
+  it("blocked tail lists unmet blockers only, notes ride the dim tail", () => {
+    const t = recTheme();
+    const phases = run([], { action: "init", phases: [{ id: "a", title: "One", notes: "check npm test" }, { id: "b", title: "Two", blockedBy: ["a"] }] });
+    const lines = renderTodoBoard(phases, t);
+    assert.match(lines[1]!, /\(blocked by a\)/);
+    assert.match(lines[0]!, /\(check npm test\)/);
+    // a satisfied → the dependent shows open (unmet-only rule)
+    mark(phases, "a", "done");
+    assert.match(renderTodoBoard(phases, t)[1]!, /<dim>Two<\/>$/);
+  });
+
+  it("without a theme the board is plain text (no ANSI)", () => {
+    const lines = renderTodoBoard(board());
+    for (const line of lines) assert.ok(!line.includes("\u001b") && !line.includes("<"), line);
+    assert.match(lines[0]!, /   ├─ ☐ Read the repo/);
+  });
+
+  it("long titles truncate to width", () => {
+    const long = "x".repeat(200);
+    const phases = run([], { action: "init", phases: [{ title: long }] });
+    const lines = renderTodoBoard(phases, undefined, 40);
+    assert.ok(lines[0]!.length <= 40 + 40, `len=${lines[0]!.length}`);
+  });
+});
+
+describe("renderTodoWidgetLines (OMP look)", () => {
+  it("header TODO + group head Tasks · done/total; done rows stay, current mdLink", () => {
+    const t = recTheme();
+    const phases = board();
+    mark(phases, "p1", "done");
+    mark(phases, "p2", "in_progress");
+    const lines = renderTodoWidgetLines(phases, t);
+    assert.match(lines[0]!, /<accent>\*\*TODO\*\*<\/>/);
+    assert.match(lines[1]!, /^ <dim>└─ <\/><mdLink>\*\*Tasks\*\*<\/><dim> · 1\/3<\/>/);
+    // Done rows stay visible (OMP parity), current phase drawn in mdLink.
+    assert.match(lines[2]!, /<success>☑<\/> <success>~~Read the repo~~<\/>/);
+    assert.match(lines[3]!, /<mdLink>☐<\/> <mdLink>Port the tool<\/>/);
+    assert.match(lines[4]!, /<dim>Verify<\/>/);
+  });
+
+  it("caps the window at 5 open phases with a + n more tail", () => {
+    const phases = run([], { action: "init", phases: Array.from({ length: 8 }, (_, i) => ({ title: `Phase ${i + 1}` })) });
+    const lines = renderTodoWidgetLines(phases, recTheme());
+    const body = lines.filter((l) => /☐/.test(l));
+    assert.equal(body.length, 5);
+    assert.match(lines.at(-1)!, /\+ 3 more phases/);
+  });
+
+  it("done phases auto-unblock dependents (real blockedBy edge, not the title)", () => {
+    // Regression: a drill init once put "blocked by p5" only in the TITLE —
+    // the dependent then auto-started while its blocker was still pending.
+    const r = run([], {
+      action: "init",
+      phases: [
+        { title: "A" },
+        { title: "B", blockedBy: ["p1"] },
+      ],
+    });
+    assert.ok(r[1]!.status === "pending", "dependent must not auto-start");
+    assert.equal(r[1]!.blockedBy[0], "p1");
+    const after = run(r, { action: "done", id: "p1" });
+    assert.ok(after[1]!.status === "in_progress", "finishing the blocker auto-starts the dependent");
+  });
+
+  it("all-done renders the closure view: every phase checked green, counts on the group head", () => {
+    const t = recTheme();
+    const phases = board();
+    for (const p of phases) p.status = "done";
+    const lines = renderTodoWidgetLines(phases, t);
+    assert.match(lines[1]!, /<dim> · 3\/3<\/>/);
+    // All-done: the whole path is lit (head + connectors accent) — OMP's
+    // completed-tree look from the user's screenshot.
+    assert.match(lines[1]!, /^ <accent>└─ <\/>/);
+    assert.match(lines[2]!, /<accent>    ├─ <\/><success>☑<\/>/);
+    assert.equal(lines.filter((l) => /☑/.test(l)).length, 3);
+    assert.ok(lines.every((l) => !l.includes("▸ ")), "no footer fraction line (counts moved to the head)");
+  });
+
+  it("empty list renders nothing", () => {
+    assert.deepEqual(renderTodoWidgetLines([], recTheme()), []);
+  });
+});
+
+describe("todo HUD widget controller", () => {
+  interface WidgetCall { content: unknown }
+  function harness() {
+    const widgets: WidgetCall[] = [];
+    const ui: any = {
+      setWidget: (key: string, content: unknown) => widgets.push({ content }),
+      setStatus: () => {},
+    };
+    const ctx = { mode: "tui", ui };
+    const ctl = createTodoWidgetController();
+    return { widgets, ui, ctx, ctl };
+  }
+
+  it("installs on first open work, re-renders on change, headless is a no-op", () => {
+    const h = harness();
+    const live = board();
+    h.ctl.sync(h.ctx, live, 60, () => live);
+    assert.equal(h.widgets.length, 1, "widget installed once");
+    const factory = h.widgets[0]!.content as any;
+    assert.equal(typeof factory, "function", "component-factory form (theme-aware)");
+    // Re-render through the factory: captures theme, renders lines.
+    let renders = 0;
+    const comp = factory({ requestRender: () => renders++ }, recTheme());
+    const lines: string[] = comp.render(120);
+    assert.match(lines[0]!, /TODO/);
+    h.ctl.sync(h.ctx, live, 60, () => live);
+    assert.equal(h.widgets.length, 1, "already installed → requestRender, not re-set");
+    assert.ok(renders >= 1);
+    // Headless: nothing installs.
+    const headless = harness();
+    headless.ctl.sync({ mode: "rpc", ui: headless.ui } as any, board(), 60);
+    assert.equal(headless.widgets.length, 0);
+  });
+
+  it("re-renders draw CURRENT state, not the install-time snapshot (live-caught stale closure)", () => {
+    const h = harness();
+    const live = board(); // 3 phases, p1 auto-started
+    h.ctl.sync(h.ctx, live, 60, () => live);
+    const comp = (h.widgets[0]!.content as any)({ requestRender: () => {} }, recTheme());
+    assert.match(comp.render(120).join("\n"), /\*\*Tasks\*\*<\/><dim> · 0\/3<\/>/);
+    assert.ok(!/· 3\/3/.test(comp.render(120).join("\n")), "open board while work remains");
+    // Mutate the SAME array (module state) and re-sync: render must reflect it.
+    for (const p of live) p.status = "done";
+    h.ctl.sync(h.ctx, live, 60, () => live);
+    const after = comp.render(120).join("\n");
+    assert.match(after, /Tasks[^\n]*3\/3/, "group-head counts update after mutation");
+    assert.equal((after.match(/☑/g) ?? []).length, 3, "all rows checked in the completion view");
+    // Also without an explicit getPhases: sync swaps the internal view.
+    const h2 = harness();
+    const first = board();
+    h2.ctl.sync(h2.ctx, first, 60);
+    const comp2 = (h2.widgets[0]!.content as any)({ requestRender: () => {} }, recTheme());
+    const done = board();
+    for (const p of done) p.status = "done";
+    h2.ctl.sync(h2.ctx, done, 60);
+    assert.match(comp2.render(120).join("\n"), /· 3\/3/);
+    assert.equal((comp2.render(120).join("\n").match(/☑/g) ?? []).length, 3);
+  });
+
+  it("all-done with linger 0 clears the widget instantly; -1 never arms the timer", () => {
+    const done = () => { const p = board(); for (const x of p) x.status = "done"; return p; };
+    const instant = harness();
+    instant.ctl.sync(instant.ctx, board(), 60);
+    instant.ctl.sync(instant.ctx, done(), 0);
+    assert.equal((instant.widgets.at(-1)!.content as any), undefined, "linger 0 → removed");
+    assert.equal(instant.ctl.lingerArmed(), false);
+
+    const never = harness();
+    never.ctl.sync(never.ctx, board(), 60);
+    never.ctl.sync(never.ctx, done(), -1);
+    assert.equal(never.widgets.length, 1, "linger -1 → widget stays");
+    assert.equal(never.ctl.lingerArmed(), false, "no timer armed");
+  });
+
+  it("a new mutation after all-done cancels the pending linger (generation guard)", () => {
+    const done = () => { const p = board(); for (const x of p) x.status = "done"; return p; };
+    const h = harness();
+    h.ctl.sync(h.ctx, done(), 1); // arms a 1s timer
+    assert.ok(h.ctl.lingerArmed(), "timer armed");
+    h.ctl.sync(h.ctx, board(), 60); // new work before it fires
+    assert.equal(h.ctl.lingerArmed(), false, "timer canceled by newer sync");
+    assert.equal(h.widgets.length, 1, "widget re-used, not re-installed");
+  });
+
+  it("clear/dispose remove the widget; clear tolerates an unknown ui (stale ctx)", () => {
+    const h = harness();
+    h.ctl.sync(h.ctx, board(), 60);
+    h.ctl.clear({ mode: "tui", ui: { setWidget: () => {} } as any });
+    assert.equal((h.widgets.at(-1)!.content as any), undefined);
+    h.ctl.sync(h.ctx, board(), 60);
+    h.ctl.dispose();
+    assert.equal((h.widgets.at(-1)!.content as any), undefined);
+  });
+});
+
+// helpers used above
+function mark(phases: TodoPhase[], id: string, status: TodoPhase["status"], blockedBy?: string[]): void {
+  const hit = phases.find((p) => p.id === id)!;
+  hit.status = status;
+  if (blockedBy) hit.blockedBy = blockedBy;
+}
+
+describe("tool renderResult + config row", () => {
+  it("renderResult draws the colored board from details.phases; falls back to the text blob", async () => {
+    const h = createPiHarness();
+    const tool = h.tools.get("todo");
+    const theme = recTheme();
+    // A mutation result carries phases in details → themed board.
+    await h.call({ action: "init", phases: [{ title: "One" }] });
+    const component = tool.renderResult(
+      { content: [{ type: "text", text: "board" }], details: { phases: run([], { action: "init", phases: [{ title: "One" }] }) } },
+      { expanded: true, isPartial: false },
+      theme,
+      {} as never,
+    );
+    assert.match(component.render(120).join("\n"), /<mdLink>☐<\/> <mdLink>One<\/>/);
+    // No phases (error path with junk details) → plain text passthrough.
+    const fallback = tool.renderResult(
+      { content: [{ type: "text", text: "✗ boom" }], details: {} },
+      { expanded: true, isPartial: false },
+      theme,
+      {} as never,
+    );
+    assert.match(fallback.render(120).join("\n"), /^✗ boom\s*$/);
+  });
+
+  it("the /config row writes todo.lingerSecs through writeTodoSection", async () => {
+    const { buildTodoGroups, todoConfig } = await import("../configPanel.ts");
+    const working = { value: "300" };
+    const groups = buildTodoGroups(working);
+    const row0 = groups[0]!.rows[0]!;
+    assert.equal(row0.key, "todo.lingerSecs");
+    assert.equal(row0.defaultValue, "60");
+    // Menu is a closed set incl. Never.
+    const menu = (row0 as any).menu();
+    assert.deepEqual(menu.map((m: any) => m.value), ["0", "60", "300", "900", "-1"]);
+    // set() mutates the working copy; save() persists via writeTodoSection.
+    row0.set("900");
+    assert.equal(working.value, "900");
+    // save() with no owned edited key is a no-op.
+    const saved: string[] = [];
+    await todoConfig().save(new Set(["other.key"]), { ui: { notify: (m: string) => saved.push(m) } } as never);
+    assert.equal(saved.length, 0);
+  });
+});
