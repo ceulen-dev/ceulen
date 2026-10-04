@@ -101,7 +101,7 @@ describe("@import expansion", () => {
     write(path.join(cwd, ".pi/inc/one.md"), "one\n@sibling/two.md\n");
     write(path.join(cwd, ".pi/inc/sibling/two.md"), "two\n");
 
-    const model = loadRules(cwd);
+    const model = loadRules(cwd, userDir);
     assert.equal(model.rules.length, 1);
     assert.ok(model.rules[0].body.includes("top"));
     assert.ok(model.rules[0].body.includes("one"));
@@ -111,12 +111,12 @@ describe("@import expansion", () => {
   });
 
   it("leaves cycles and repeats literal and never crashes", () => {
-    const { cwd } = workspace();
+    const { cwd, userDir } = workspace();
     write(path.join(cwd, ".pi/RULES.md"), "## a\n@a.md\n@b.md\n@b.md\n");
     write(path.join(cwd, ".pi/a.md"), "AAA\n@b.md\n");
     write(path.join(cwd, ".pi/b.md"), "BBB\n@a.md\n");
 
-    const body = loadRules(cwd).rules[0].body;
+    const body = loadRules(cwd, userDir).rules[0].body;
     assert.ok(body.includes("AAA"));
     assert.ok(body.includes("BBB"));
     // a.md already pulled b.md, so b.md's own @a.md back-reference stays literal.
@@ -126,31 +126,31 @@ describe("@import expansion", () => {
   });
 
   it("marks a missing import in one line instead of failing", () => {
-    const { cwd } = workspace();
+    const { cwd, userDir } = workspace();
     write(path.join(cwd, ".pi/RULES.md"), "## a\nsee @nope/missing.md for details\n");
-    assert.ok(loadRules(cwd).rules[0].body.includes("[missing import: @nope/missing.md]"));
+    assert.ok(loadRules(cwd, userDir).rules[0].body.includes("[missing import: @nope/missing.md]"));
   });
 
   it("stops expanding past the depth limit", () => {
-    const { cwd } = workspace();
+    const { cwd, userDir } = workspace();
     const chain = Array.from({ length: MAX_IMPORT_DEPTH + 2 }, (_, i) => `level-${i}`);
     write(path.join(cwd, ".pi/RULES.md"), `## a\n@f0.md\n`);
     chain.forEach((text, i) => write(path.join(cwd, `.pi/f${i}.md`), `${text}\n@f${i + 1}.md\n`));
 
-    const body = loadRules(cwd).rules[0].body;
+    const body = loadRules(cwd, userDir).rules[0].body;
     assert.ok(body.includes(`level-${MAX_IMPORT_DEPTH - 1}`));
     assert.ok(body.includes(`[import depth limit reached: @f${MAX_IMPORT_DEPTH}.md]`));
     assert.ok(!body.includes(`level-${MAX_IMPORT_DEPTH + 1}`));
   });
 
   it("does not expand @tokens inside fences, or email/git tokens", () => {
-    const { cwd } = workspace();
+    const { cwd, userDir } = workspace();
     write(path.join(cwd, ".pi/doc.md"), "EXPANDED\n");
     write(
       path.join(cwd, ".pi/RULES.md"),
       ["## a", "```", "@doc.md", "```", "mail me at user@example.com", "clone git@github.com:o/r.git", "also `@nope.ts`"].join("\n"),
     );
-    const body = loadRules(cwd).rules[0].body;
+    const body = loadRules(cwd, userDir).rules[0].body;
     assert.ok(!body.includes("EXPANDED"), "fenced @tokens stay literal");
     assert.ok(body.includes("user@example.com"));
     assert.ok(body.includes("git@github.com:o/r.git"));
@@ -182,20 +182,20 @@ describe("precedence", () => {
 
 describe("composeRulesBlock", () => {
   it("is undefined when no RULES.md exists anywhere (zero footprint)", () => {
-    const { cwd } = workspace();
-    const model = loadRules(cwd);
+    const { cwd, userDir } = workspace();
+    const model = loadRules(cwd, userDir);
     assert.equal(model.block, undefined);
     assert.deepEqual(model.files, []);
     assert.equal(composeRulesBlock(model, cwd), undefined);
   });
 
   it("marks the block and lists rulebook names with descriptions only", () => {
-    const { cwd } = workspace();
+    const { cwd, userDir } = workspace();
     write(
       path.join(cwd, ".pi/RULES.md"),
       ["## sticky-one", "S body", "", "## book-one", "description: B description", "B body secret"].join("\n"),
     );
-    const model = loadRules(cwd);
+    const model = loadRules(cwd, userDir);
     const block = model.block!;
 
     assert.ok(block.startsWith("<user-rules>"));
@@ -222,9 +222,9 @@ describe("composeRulesBlock", () => {
   });
 
   it("truncates a single oversized sticky rule instead of dumping it whole", () => {
-    const { cwd } = workspace();
+    const { cwd, userDir } = workspace();
     write(path.join(cwd, ".pi/RULES.md"), `## huge\n${"x".repeat(STICKY_CHAR_CAP * 2)}\n`);
-    const block = loadRules(cwd).block!;
+    const block = loadRules(cwd, userDir).block!;
     assert.ok(block.includes("[rule body truncated at the sticky cap]"));
     assert.ok(block.length < STICKY_CHAR_CAP + 500);
   });
@@ -232,10 +232,10 @@ describe("composeRulesBlock", () => {
 
 describe("mtime cache", () => {
   it("re-reads after an edit and after an edit to an imported file", async () => {
-    const { cwd } = workspace();
+    const { cwd, userDir } = workspace();
     const imported = write(path.join(cwd, ".pi/snippet.md"), "OLD-IMPORT\n");
     write(path.join(cwd, ".pi/RULES.md"), "## a\n@snippet.md\n");
-    assert.ok(loadRules(cwd).rules[0].body.includes("OLD-IMPORT"));
+    assert.ok(loadRules(cwd, userDir).rules[0].body.includes("OLD-IMPORT"));
 
     // Same mtimeMs/size would hide the change — bump mtime explicitly.
     const bump = (file: string, text: string) => {
@@ -245,19 +245,19 @@ describe("mtime cache", () => {
     };
 
     bump(imported, "NEW-IMPORT\n");
-    assert.ok(loadRules(cwd).rules[0].body.includes("NEW-IMPORT"), "imported-file edits invalidate the cache");
+    assert.ok(loadRules(cwd, userDir).rules[0].body.includes("NEW-IMPORT"), "imported-file edits invalidate the cache");
 
     bump(path.join(cwd, ".pi/RULES.md"), "## a\nBODY-V2\n@missing.md\n");
-    assert.ok(loadRules(cwd).rules[0].body.includes("BODY-V2"));
+    assert.ok(loadRules(cwd, userDir).rules[0].body.includes("BODY-V2"));
 
     clearRuleCache();
-    assert.ok(loadRules(cwd).rules[0].body.includes("BODY-V2"));
+    assert.ok(loadRules(cwd, userDir).rules[0].body.includes("BODY-V2"));
   });
 
   it("returns the cached model unchanged when nothing on disk moved", () => {
-    const { cwd } = workspace();
+    const { cwd, userDir } = workspace();
     write(path.join(cwd, ".pi/RULES.md"), "## a\nstable\n");
-    const first = loadRules(cwd);
-    assert.equal(loadRules(cwd), first, "same mtime+size → the same model object");
+    const first = loadRules(cwd, userDir);
+    assert.equal(loadRules(cwd, userDir), first, "same mtime+size → the same model object");
   });
 });

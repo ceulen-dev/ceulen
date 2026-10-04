@@ -19,11 +19,14 @@ import { readDisabledTools } from "../../../lib/tools";
 
 const temps: string[] = [];
 const envBackup = process.env.PI_CODING_AGENT_DIR;
-delete process.env.PI_CODING_AGENT_DIR; // keep user-level discovery off the dev machine
+const agentDir = tmp("rules-agent-"); // empty agent dir: an inherited one adds a live user RULES.md
+mkdirSync(agentDir, { recursive: true });
+process.env.PI_CODING_AGENT_DIR = agentDir;
 
 after(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true });
   if (envBackup !== undefined) process.env.PI_CODING_AGENT_DIR = envBackup;
+  else delete process.env.PI_CODING_AGENT_DIR;
   clearDisabled();
 });
 
@@ -47,9 +50,7 @@ function workspace(files: Record<string, string> = {}): string {
   return cwd;
 }
 
-/** Empty dir used as PI_CODING_AGENT_DIR (an inherited one adds a live user RULES.md). */
-const agentDir = tmp("rules-agent-");
-mkdirSync(agentDir, { recursive: true });
+/** Empty dir used as PI_CODING_AGENT_DIR — set at the top of this file. */
 
 interface Harness {
   events: Map<string, (event: any, ctx: any) => any>;
