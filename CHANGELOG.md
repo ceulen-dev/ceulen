@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.8.0 — 2026-10-04
+
+- **todo**: new module (OMP port) — phased task tracking: one `todo` tool
+  (`init/start/done/rm/block/unblock/append/view`) over an ordered phase list.
+  Blocked is derived from unmet `blockedBy` edges (finishing a blocker
+  auto-unblocks dependents); the earliest pending unblocked phase auto-starts
+  after every mutation; `start` errors while another phase is in progress
+  unless `force`. Every mutation persists (`ceulen-todo` entries, rehydrated
+  on session start) and updates a `▸ n/m done · in_progress: …` status
+  segment. `/todo` prints the board, `/todo clear` resets.
+- **rules**: new module (OMP port) — sticky RULES.md + rulebook. Sources:
+  nearest-first walk from cwd to root for `.pi/RULES.md`, then
+  `~/.pi/agent/RULES.md`; project names override user. One rule per
+  `## name` section — a `description:` first line makes it a rulebook rule
+  (listed in the prompt, body served on demand by the `rule_get` tool);
+  otherwise the body is sticky (appended to every request inside
+  `<user-rules>…</user-rules>`, 4000-char cap with a loud truncation marker).
+  `@path` imports expand at load (cycle-guarded); files cached by mtime so
+  edits apply without `/reload`. `/rules` = status, `/rules reload` = drop
+  the cache. Zero footprint when no RULES.md exists anywhere.
+- **subagent**: `subagent.idleTimeoutMins` now actually reaches the timeout
+  resolver (it was dead config — children always died on the env default);
+  a typo'd `@alias` fails the dispatch loud on BOTH runners instead of
+  silently running the child on the parent model; the classifier tier gates
+  on the chosen label's own probability, not the max across all labels.
+- **router**: `/config` saves re-register the provider from the EFFECTIVE
+  (trust-aware) snapshot — a trusted-project endpoint is no longer clobbered
+  and the catalog refresh can no longer send the API key to a saved-but-
+  shadowed URL; `combo/*` thinking `off` now OMITS `reasoning_effort`
+  (the upstream 422s on the literal value — found by live-testing).
+- **steering**: registry reorder — steering is now genuinely the LAST
+  `before_agent_start` rewriter (serena/web loaded after it and appended to
+  the ds-anchor bootstrap prompt, breaking byte-identity on request #1).
+- **advisor**: the "paused after 3 consecutive failures" notice actually
+  reaches the user (it was defeated by its own pause flag); the cursor
+  reseed fires when enable + chain are saved in one `/config` write.
+- **usage**: session cost / tok-s accumulators reset on `session_start` —
+  "Session cost" no longer reports whole-process totals after `/new` or
+  reload.
+- **zai**: config panel baseline honors project trust; the 401 ladder clears
+  its signed-request marker on success so unsigned 401s no longer count
+  toward signing bypass.
+- **web**: garbage input on a number row is skipped instead of persisted as
+  `0`; nested-shaped project `web` entries are disclosed as save shadows.
+- **munin**: config panel baseline honors project trust.
+- **registry**: `isProjectTrusted` walks each agent dir from cwd (a mutated
+  cursor made the second dir probe at `/`).
+
 ## 0.7.0 — 2026-10-04
 
 - **web**: new module — the 11 unified web tools ported from `@bacnh85/pi-web`
