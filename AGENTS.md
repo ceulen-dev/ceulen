@@ -438,6 +438,47 @@ Per-tool kill-switch: all 11 tools register `defaultActive` from
 live. Standalone `@bacnh85/pi-web` must be removed when this module is enabled
 (the conflict guard refuses the duplicate `web_*` names).
 
+### Todo module (todo)
+
+Ported from OMP's phased task tracking (see
+`/Volumes/Dev/agents/omp/packages/coding-agent/src/tools/todo.ts`), reduced to
+phase granularity (see `extensions/modules/todo/index.ts` header for the
+enumerated deviations). One `todo` tool: `init/start/done/rm/block/unblock/
+append/view` over an ordered list of phases `{title, status:
+pending|in_progress|done, blockedBy?, notes?}`. Blocked is DERIVED from unmet
+`blockedBy` edges (finishing a blocker auto-unblocks dependents); after every
+successful mutation the earliest pending unblocked phase auto-starts;
+`start` errors while another phase is `in_progress` (unless `force`). Every
+mutation persists via `pi.appendEntry` (customType `ceulen-todo`, one entry
+per mutation, session_start rehydrates the LAST via `getBranch()` — the plan
+module's pattern) and updates the `ceulen-todo` status segment (`▸ 2/5 done ·
+in_progress: …`), cleared on all-done/empty and on session_shutdown. The
+result text is the rendered board + OMP's batch contract in promptGuidelines
+(batch todo calls with real work, never call todo alone) — no
+`before_agent_start` handler, so the module stays OUTSIDE the steering
+load-order contract. `/todo` prints the board; `/todo clear` resets.
+
+### Rules module (rules)
+
+Ported from OMP's sticky context files + rulebook (see
+`/Volumes/Dev/agents/omp/docs/context-files.md`), lean (format documented at
+the top of `extensions/modules/rules/lib/rules.ts`). Sources, nearest-first:
+`<dir>/.pi/RULES.md` walking cwd → root, then `~/.pi/agent/RULES.md`;
+duplicate names resolve first-wins (project beats user). Format: one rule per
+`## <name>` section; a body whose first line is `description: …` is a
+RULEBOOK rule (the prompt carries only `- name: description`; the body is
+served on demand by the `rule_get` tool); no description line = STICKY rule
+whose body is appended to EVERY request inside `<user-rules>…</user-rules>`,
+capped at 4000 chars (lowest-precedence dropped first under a loud truncation
+marker). `@path` imports expand at load (relative to the importing file,
+5-hop limit, cycle-guarded, missing → literal marker). The
+`before_agent_start` handler is APPEND-ONLY (the fff precedent) and returns
+`undefined` when no RULES.md exists anywhere — zero footprint by default; it
+loads immediately BEFORE steering in the registry (it is a prompt composer,
+so it must precede the last rewriter). Rule files are cached by mtime (the
+ponytail config pattern) — edits apply without /reload; `/rules` = status,
+`/rules reload` = drop the cache.
+
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 
 - The bundle entry wraps each module's `pi` in `guarded()` (extensions/index.ts, one shared ownership map for the whole load loop): a name claimed by a DIFFERENT module throws at load; same-module re-claims pass (router re-registers its provider at runtime — that's the supported update path). Contract tests: `extensions/modules/router/test/guard.test.ts`.

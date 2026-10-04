@@ -26,6 +26,7 @@ import subagentModule from "../modules/subagent/index.ts";
 import { subagentConfig } from "../modules/subagent/configPanel.js";
 import planModule from "../modules/plan/index.ts";
 import { planConfig } from "../modules/plan/configPanel.js";
+import todoModule from "../modules/todo/index.ts";
 import steeringModule from "../modules/steering/index.ts";
 import { steeringConfig } from "../modules/steering/configPanel.js";
 import repairModule from "../modules/repair/index.ts";
@@ -38,6 +39,7 @@ import muninModule from "../modules/munin/index.ts";
 import { muninConfig } from "../modules/munin/configPanel.ts";
 import webModule from "../modules/web/index.ts";
 import { webConfig } from "../modules/web/configPanel.ts";
+import rulesModule from "../modules/rules/index.ts";
 import configModule from "../modules/config/index.ts";
 
 /** A module's contribution to the central `/config` panel. */
@@ -120,6 +122,7 @@ export const MODULES: ModuleEntry[] = [
   // (sandbox: read-only) and its before_agent_start must compose BEFORE
   // steering (the last prompt rewriter — see its entry below).
   { name: "plan", category: "Tasks", describe: "Read-only plan mode: /plan toggle, tool gating, write_plan + ask_user_question, plan model/thinking, approval handoff.", load: planModule, config: planConfig, tools: ["write_plan", "ask_user_question"] },
+  { name: "todo", category: "Tasks", describe: "Phased task board: the `todo` tool (init/start/done/block/unblock) with session persistence, blockers, and a status-segment progress readout.", load: todoModule, tools: ["todo"] },
   // ── Tools ─────────────────────────────────────────────────────────────
   // Repair first in the section: it wraps the built-in tools; serena/fff ride
   // on top (no load-order dependency — hooks resolve at call time).
@@ -142,8 +145,9 @@ export const MODULES: ModuleEntry[] = [
   { name: "web", category: "Tools", describe: "Unified web tools: search (SearXNG/Brave/Firecrawl), extract & crawl (JSDOM/Firecrawl/Crawl4AI/agy), screenshot/PDF, CDP browser interaction, Gemini research, image generation, one-off chat.", load: webModule, config: webConfig, tools: [
     "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status",
   ] },
+  { name: "rules", category: "Context", describe: "Sticky RULES.md constraints carried in every request + a rulebook of on-demand rules served by rule_get. Nearest-first project walk over user-level.", load: rulesModule, tools: ["rule_get"] },
   // Steering LAST of the prompt rewriters, i.e. after EVERY before_agent_start
-  // composer (ponytail/plan/subagent/munin/advisor/ux/fff/serena/web) and
+  // composer (ponytail/plan/subagent/munin/advisor/ux/fff/serena/web/rules) and
   // before the config module (load order is load-bearing even though its
   // /config rows live on the Model tab, which PI_TAB_ORDER sorts
   // independently): pi chains before_agent_start results, so steering must run
