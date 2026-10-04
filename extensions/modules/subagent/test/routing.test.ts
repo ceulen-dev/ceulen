@@ -34,6 +34,27 @@ test("resolveChildTimeouts: enabled cap is clamped up to the idle window", () =>
   assert.equal(r2.hardTimeoutMs, 30 * 60_000);
 });
 
+test("resolveChildTimeouts: idleTimeoutMins overrides the env-derived inactivity default", () => {
+  // Default comes from PI_SUBAGENT_INACTIVITY_TIMEOUT_MINS (3 min unless overridden).
+  const envMins = Number(process.env.PI_SUBAGENT_INACTIVITY_TIMEOUT_MINS ?? 3);
+  const base = resolveChildTimeouts({});
+  assert.equal(base.timeoutMs, envMins * 60_000);
+
+  const r = resolveChildTimeouts({ idleTimeoutMins: 1 });
+  assert.equal(r.error, undefined);
+  assert.equal(r.timeoutMs, 60_000, "idleTimeoutMins:1 must win over the env-derived default");
+
+  // 0/undefined = keep the current behaviour (env default).
+  assert.equal(resolveChildTimeouts({ idleTimeoutMins: 0 }).timeoutMs, base.timeoutMs);
+  assert.equal(resolveChildTimeouts({ idleTimeoutMins: undefined }).timeoutMs, base.timeoutMs);
+
+  // Still a DEFAULT: explicit per-call / frontmatter timeouts take precedence.
+  assert.equal(resolveChildTimeouts({ idleTimeoutMins: 1, requested: 5 * 60_000 }).timeoutMs, 5 * 60_000);
+  assert.equal(resolveChildTimeouts({ idleTimeoutMins: 1, agentTimeoutMins: 2 }).timeoutMs, 2 * 60_000);
+  // The hard cap is still clamped up to the (now shorter) idle window.
+  assert.equal(resolveChildTimeouts({ idleTimeoutMins: 1, hardTimeoutMins: 30 }).hardTimeoutMs, 30 * 60_000);
+});
+
 // ── Role expansion (tier override mechanics) ────────────────────────────────
 
 const ROLES: RolesConfig = {
@@ -164,6 +185,44 @@ test("classifyTask: tier gates on the winning label's probability, not the answe
   assert.equal(rejected?.tier, undefined, "label probability 0.54 < 0.6 must fail open even at confidence 0.9");
 });
 
+test("classifyTask: tier gates on the CHOSEN label's probability, not a rival's max", async () => {
+  // choice 'fast' at 0.40 with a 0.90 rival: the old Math.max gate wrongly
+  // applied the rival's certainty to 'fast' and cleared the threshold.
+  const ctx = (answers: unknown) => ({
+    modelRegistry: {
+      getAvailableOfType: async () => [{ provider: "router", id: "jev" }],
+      classify: async () => ({ stopReason: "stop", answers }),
+    },
+  } as never);
+  const rival = await classifyTask(
+    ctx({ tier: { type: "choice", choice: "fast", probabilities: { fast: 0.4, coder: 0.9 } } }),
+    { ...DEFAULT_ROUTING, mode: "classify" },
+    WORKER, "t", undefined, ROLES,
+  );
+  assert.equal(rival?.tier, undefined, "a 0.9 rival must not clear the threshold for a 0.4 choice");
+
+  const own = await classifyTask(
+    ctx({ tier: { type: "choice", choice: "fast", probabilities: { fast: 0.72, coder: 0.28 } } }),
+    { ...DEFAULT_ROUTING, mode: "classify" },
+    WORKER, "t", undefined, ROLES,
+  );
+  assert.equal(own?.tier, "fast", "the chosen label's own 0.72 clears it");
+
+  // Missing / malformed probability for the chosen label → no tier (fail open).
+  const absent = await classifyTask(
+    ctx({ tier: { type: "choice", choice: "fast", probabilities: { coder: 0.95 } } }),
+    { ...DEFAULT_ROUTING, mode: "classify" },
+    WORKER, "t", undefined, ROLES,
+  );
+  assert.equal(absent?.tier, undefined, "unreported label probability = no verdict");
+  const bogus = await classifyTask(
+    ctx({ tier: { type: "choice", choice: "fast", probabilities: { fast: 7 } } }),
+    { ...DEFAULT_ROUTING, mode: "classify" },
+    WORKER, "t", undefined, ROLES,
+  );
+  assert.equal(bogus?.tier, undefined, "out-of-range probability is not certainty");
+});
+
 test("classifyTask: classifier error fails open", async () => {
   const ctx = {
     modelRegistry: {
@@ -258,6 +317,121 @@ test("resolveModelWithColdStartRetry: a resolvable model short-circuits (no refr
   const resolved = await resolveModelWithColdStartRetry(ctx, ["router/zai/glm-5.3-flash"]);
   assert.equal(resolved.model, model);
   assert.equal(refreshes, 0, "a hit must never pay a refresh");
+});
+
+// ── Unresolved @role fails loud (shared SDK + herdr resolution path) ────────
+
+/** Fake-pi harness: registers the real module and drives `subagent.execute`,
+ *  so the assertion covers the shared routedChain gate, not a re-implementation. */
+async function dispatchHarness(agentsMd: Record<string, string>, roles: RolesConfig["roles"], herdrEnv = false) {
+  const dir = mkdtempSync(join(tmpdir(), "ceulen-subagent-dispatch-"));
+  const agentDir = join(dir, "agents");
+  mkdirSync(agentDir, { recursive: true });
+  process.env.PI_CODING_AGENT_DIR = dir; // agent dir holds both agents/ and settings.json
+  process.env.PI_SUBAGENT_HERDR = "off";
+  if (herdrEnv) {
+    // herdrActive requires the env marker AND a successful binary probe.
+    process.env.HERDR_ENV = "1";
+    process.env.HERDR_WORKSPACE_ID = "ws";
+    const { herdrCli } = await import("../lib/herdr.ts");
+    herdrCli.exec = async () => ({ code: 0, stdout: "herdr 1.0.0", stderr: "" });
+  }
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ subagent: { roles, routing: { mode: "off" } } }));
+  for (const [name, body] of Object.entries(agentsMd)) writeFileSync(join(agentDir, name), body);
+
+  // index.ts is CJS-compiled by tsx (bundled extension) — `__dirname` must exist.
+  (globalThis as Record<string, unknown>).__dirname = join(import.meta.dirname, "..");
+  const { default: subagentModule } = await import("../index.ts");
+  const tools = new Map<string, { execute: (...a: unknown[]) => Promise<any> }>();
+  const hooks = new Map<string, ((...a: unknown[]) => unknown)[]>();
+  const pi = {
+    registerTool: (t: { name: string }) => tools.set(t.name, t as never),
+    registerCommand: () => {}, registerMessageRenderer: () => {}, registerShortcut: () => {},
+    on: (name: string, fn: (...a: unknown[]) => unknown) => {
+      (hooks.get(name) ?? hooks.set(name, []).get(name)!).push(fn);
+    },
+    getAllTools: () => [{ name: "read" }],
+    registerFlag: () => {}, getFlag: () => undefined,
+    events: { emit: () => {}, on: () => () => {} },
+    getSettings: () => ({}),
+  };
+  subagentModule(pi as never);
+  // The parent model is deliberately DIFFERENT from the role-pool model: the
+  // defect's signature is a child dispatched on "test/parent" because the
+  // empty candidate list fell through to resolveModel's parent fallback.
+  const parentModel = { provider: "test", id: "parent" };
+  const roleModel = { provider: "test", id: "role" };
+  const ctx = {
+    cwd: dir, mode: "print", hasUI: false, isProjectTrusted: () => false,
+    model: parentModel,
+    modelRegistry: {
+      getAvailable: () => [parentModel, roleModel], find: () => parentModel, refresh: async () => {},
+      getAvailableOfType: async () => [], classify: async () => ({ stopReason: "error" }),
+      runtime: { hasConfiguredAuth: () => true, streamSimple: async function* () {} }, authStorage: {},
+    },
+    ui: { notify: () => {} },
+    sessionManager: { getBranch: () => [], getSessionFile: () => undefined },
+  };
+  for (const handler of hooks.get("session_start") ?? []) await handler({ reason: "start" }, ctx);
+  const tool = tools.get("subagent")!;
+  return {
+    dispatch: (agent: string, extra: Record<string, unknown> = {}) =>
+      tool.execute("tc", { agent, task: "say hi", agentScope: "user", runner: "sdk", ...extra }, undefined, undefined, ctx),
+    cleanup: () => {
+      delete process.env.PI_CODING_AGENT_DIR;
+      delete process.env.HERDR_ENV;
+      delete process.env.HERDR_WORKSPACE_ID;
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+test("dispatch: a typo'd @role fails loud instead of silently using the parent model", async () => {
+  const h = await dispatchHarness(
+    {
+      "typo.md": '---\nname: typo\ndescription: t\ntools: read\nmodel: "@smartt"\n---\nbody\n',
+      "good.md": '---\nname: good\ndescription: g\ntools: read\nmodel: "@smart"\n---\nbody\n',
+      // One unresolvable extra entry beside a resolvable chain stays a diagnostic.
+      "partial.md": '---\nname: partial\ndescription: p\ntools: read\nmodels: ["@smart", "@nope"]\n---\nbody\n',
+    },
+    { fast: ["test/role"], coder: ["test/role"], smart: ["test/role"] },
+  );
+  try {
+    const bad = await h.dispatch("typo");
+    assert.equal(bad.isError, true, "a dispatch that resolves NOTHING must fail");
+    assert.match(bad.content[0].text, /Unresolved model role\(s\): @smartt/);
+
+    // A resolvable @role still dispatches — on the ROLE pool's model, never
+    // the parent model the silent fallback would have swapped in.
+    const ok = await h.dispatch("good");
+    assert.equal(ok.details?.results?.[0]?.model, "test/role");
+    assert.doesNotMatch(ok.content[0].text, /Unresolved model role/);
+
+    // A resolvable chain plus one unknown extra role keeps working (the
+    // unresolved entry is a diagnostic, not a dispatch failure).
+    const partial = await h.dispatch("partial");
+    assert.equal(partial.details?.results?.[0]?.model, "test/role");
+    assert.doesNotMatch(partial.content[0].text, /Unresolved model role/);
+  } finally {
+    h.cleanup();
+  }
+});
+
+test("dispatch: the herdr runner surfaces the SAME unresolved-@role failure", async () => {
+  const h = await dispatchHarness(
+    { "typo.md": '---\nname: typo\ndescription: t\ntools: read\nmodel: "@smartt"\n---\nbody\n' },
+    { smart: ["test/role"] },
+    true, // HERDR_ENV set + probe passes → prepareHerdrOne is the code path
+  );
+  try {
+    // No explicit runner: auto-detection picks herdr. It must fail on the typo
+    // BEFORE creating a pane (shared routedChain gate, not a second resolver).
+    const res = await h.dispatch("typo", { runner: undefined });
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /Unresolved model role\(s\): @smartt/);
+  } finally {
+    h.cleanup();
+  }
 });
 
 // ── Recursion guard ─────────────────────────────────────────────────────────

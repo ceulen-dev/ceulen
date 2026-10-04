@@ -7,7 +7,7 @@
 
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { row, type PanelGroup } from "../../lib/panel.js";
-import type { ModuleConfig } from "../../lib/registry.js";
+import { isProjectTrusted, type ModuleConfig } from "../../lib/registry.js";
 import {
   DEFAULT_MUNIN_BASE_URL,
   getMuninConfig,
@@ -76,7 +76,10 @@ const OWNED_PREFIX = "munin.";
  *  from the save ctx (factories receive none); reads use process.cwd(),
  *  matching router's panel pattern. */
 export function muninConfig(): ModuleConfig {
-  const before = readMuninSettings(process.cwd(), true);
+  // Baseline = what the tools resolve: the factory has no ctx, so the shared
+  // trust helper decides (the same rule the save ctx applies) — an untrusted
+  // checkout must not show phantom project values.
+  const before = readMuninSettings(process.cwd(), isProjectTrusted(process.cwd()));
   const working = structuredClone(before);
   return {
     groups: () => buildMuninGroups(working),

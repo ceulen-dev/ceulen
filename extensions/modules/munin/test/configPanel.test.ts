@@ -1,7 +1,7 @@
 // NEW for the ceulen port — panel groups shape, effective-value display, and
 // the project-level save path (write target, patch diffing, trust + env notes).
 
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it, beforeEach, afterEach } from "node:test";
@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { projectSettingsPath } from "../lib/helpers.js";
 import { buildMuninGroups, muninConfig, readMuninSettings, type MuninSettings } from "../configPanel.js";
 
-const ENV_KEYS = ["MUNIN_API_KEY", "MUNIN_PROJECT", "MUNIN_BASE_URL"] as const;
+const ENV_KEYS = ["MUNIN_API_KEY", "MUNIN_PROJECT", "MUNIN_BASE_URL", "PI_CODING_AGENT_DIR"] as const;
 
 describe("buildMuninGroups", () => {
   it("renders the Memory tab with masked apiKey row", () => {
@@ -67,6 +67,31 @@ describe("readMuninSettings", () => {
     process.env.MUNIN_PROJECT = undefined;
     const none = readMuninSettings(join(cwd, "nowhere"), false);
     assert.deepEqual(none, { project: "", baseUrl: "https://munin.kalera.ai", apiKey: "" });
+  });
+
+  it("muninConfig resolves the trust flag itself (no phantom project values untrusted)", () => {
+    // The factory gets no ctx, so the baseline must resolve trust through the
+    // shared helper — a hardcoded `true` shows a trusted-project value in an
+    // UNTRUSTED checkout (the phantom-value bug class).
+    const agentDir = mkdtempSync(join(tmpdir(), "munin-agent-"));
+    const cwd = mkdtempSync(join(tmpdir(), "munin-trust-"));
+    dirs.push(agentDir, cwd);
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    process.env.MUNIN_API_KEY = "env-key"; // keep getMuninConfig from throwing
+    process.env.MUNIN_PROJECT = "env-id";
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(projectSettingsPath(cwd), JSON.stringify({ munin: { baseUrl: "https://project.test" } }));
+    const prevCwd = process.cwd();
+    process.chdir(cwd);
+    const baseUrlRow = () => muninConfig().groups()[0]!.rows[1]!.value;
+    try {
+      writeFileSync(join(agentDir, "trust.json"), JSON.stringify({ [process.cwd()]: true }));
+      assert.equal(baseUrlRow(), "https://project.test", "trusted → project value shown");
+      writeFileSync(join(agentDir, "trust.json"), JSON.stringify({ [process.cwd()]: false }));
+      assert.equal(baseUrlRow(), "https://munin.kalera.ai", "untrusted → project value ignored");
+    } finally {
+      process.chdir(prevCwd);
+    }
   });
 });
 

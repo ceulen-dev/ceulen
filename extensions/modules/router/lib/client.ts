@@ -276,10 +276,12 @@ const FORMAT_TO_LEVEL_MAP: Record<string, Record<string, string | null>> = {
   // (GLM's single thinking-on tier), max→"max"; xhigh/minimal unsupported (hidden).
   "zai":      { off:"none", minimal:null, low:"high", medium:"high", high:"high", xhigh:null, max:"max" },
   "minimax":  { off:"none", minimal:null, low:"low", medium:"medium", high:"high", xhigh:"xhigh", max:"xhigh" },
-  // Yardmaster CC-enum backends (combo/, live-probed): valid effort values are
-  // exactly off|low|medium|high|xhigh|max — "none"/"minimal" 400. "off" is
-  // honored (omitting it leaves the upstream defaulting to thinking ON).
-  "cc-enum":  { off:"off", minimal:null, low:"low", medium:"medium", high:"high", xhigh:"xhigh", max:"max" },
+  // Yardmaster CC-enum backends (combo/, live-probed): "none"/"minimal" 400,
+  // and the literal "off" 422s too (reasoning_effort: unknown variant 'off',
+  // observed live on combo/deepseek-v4.1-flash 2026-10-04 — an earlier probe
+  // claiming off was honored was wrong). off → null omits the parameter
+  // entirely (SDK no-level branch); the upstream then applies its own default.
+  "cc-enum":  { off:null, minimal:null, low:"low", medium:"medium", high:"high", xhigh:"xhigh", max:"max" },
 };
 
 function getThinkingLevelMap(modelId: string): Record<string, string | null> {

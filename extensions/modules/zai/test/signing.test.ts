@@ -302,6 +302,25 @@ describe("zcode-signing", () => {
     await signedHeaders(manager, URL_ULTRA); // must still sign
   });
 
+  it("401 ladder: a success clears the signed-request marker (later unsigned 401 is not attributed)", async () => {
+    const { fetchImpl, calls } = makeFetch({ gateEnabled: true });
+    const manager = new ClientSigningManager({ identity: IDENTITY, fetchImpl });
+    await signedHeaders(manager); // signed #1
+    manager.noteResponseOk(); // 200 — marker cleared
+    manager.noteResponse401(); // 401 on an UNSIGNED request: must be a no-op
+    // State untouched: the next sign reuses the handshake key (no re-handshake)
+    // and no bypass kicked in.
+    assert.equal(calls.handshakeCount, 1);
+    const headers = await signedHeaders(manager, URL_ULTRA);
+    assert.equal(calls.handshakeCount, 1, "no invalidation from the stale marker");
+    assert.ok(headers["X-Client-Sig"], "a stale marker must not invalidate the handshake key");
+    // And it did not count toward the ladder: two real signed 401s are still required.
+    manager.noteResponse401();
+    await signedHeaders(manager, URL_ULTRA); // re-handshake, count 1 → still signs
+    manager.noteResponse401(); // count 2 → bypass
+    assert.equal(await manager.sign(URL_ULTRA, baseHeaders(), CRED), false, "bypass needs two SIGNED 401s");
+  });
+
   it("origin allowlist: non-z.ai base URL → unsigned, zero network (no credential egress)", async () => {
     const { fetchImpl, calls } = makeFetch({ gateEnabled: true });
     const manager = new ClientSigningManager({ identity: IDENTITY, fetchImpl });

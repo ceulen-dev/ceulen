@@ -20,7 +20,8 @@ import {
 } from "./lib/config.js";
 import {
   ENV_TO_SETTINGS_KEY,
-  readWebSettings,
+  readProjectWebSection,
+  sectionValue,
   writeWebSection,
 } from "./lib/settings.js";
 
@@ -146,6 +147,31 @@ export function buildWebGroups(working: Record<string, string>): PanelGroup[] {
 
 const OWNED_PREFIX = "web.";
 
+/** The save patch for the rows edited since the pre-edit snapshot. Number rows
+ *  persist as numbers (timeoutMs semantics), strings as strings, and an empty
+ *  string clears the key (writeWebSection semantics). Free text that is not a
+ *  finite number is SKIPPED — writing 0 would clobber the stored cap with a
+ *  value the consumer then clamps (or bricks the timeout loaders). Exported
+ *  for tests. */
+export function diffWebPatch(
+  working: Record<string, string>,
+  before: Record<string, string>,
+): Record<string, string | number> {
+  const patch: Record<string, string | number> = {};
+  for (const spec of webRowSpecs()) {
+    if (working[spec.key] === before[spec.key]) continue;
+    const raw = working[spec.key] ?? "";
+    if (spec.kind === "number" && raw !== "") {
+      const n = Number.parseInt(raw, 10);
+      if (!Number.isFinite(n)) continue; // garbage → leave the stored value alone
+      patch[spec.key] = n;
+    } else {
+      patch[spec.key] = raw;
+    }
+  }
+  return patch;
+}
+
 /** web's ModuleConfig for the central /config panel. cwd/trust come from the
  *  save ctx (factories receive none); reads use process.cwd(), matching
  *  munin's panel pattern. */
@@ -165,24 +191,23 @@ export function webConfig(): ModuleConfig {
       // Diff against the pre-edit effective values: only changed keys are
       // written (masked rows start empty — an untouched masked row diffs to
       // no change).
-      const patch: Record<string, string | number> = {};
-      for (const spec of webRowSpecs()) {
-        if (working[spec.key] !== before[spec.key]) {
-          // number rows persist as numbers (timeoutMs semantics), strings as
-          // strings; empty string clears the key (writeWebSection semantics).
-          patch[spec.key] = spec.kind === "number" && working[spec.key] !== ""
-            ? (Number.parseInt(working[spec.key], 10) || 0)
-            : working[spec.key];
-        }
-      }
+      const patch = diffWebPatch(working, before);
       writeWebSection(patch, target);
       const notes = [`Web config saved to ${target} — effective immediately (read per tool call).`];
       // Disclose env vars that still override saved values, and a trusted
       // project file that shadows a field.
       const envOverrides = webRowSpecs().filter((s) => patch[s.key] !== undefined && process.env[s.envVar]).map((s) => s.envVar);
       if (envOverrides.length) notes.push(`Still overridden by env: ${envOverrides.join(", ")}.`);
-      const project = readWebSettings(ctx.cwd, ctx.isProjectTrusted?.() === true);
-      const shadowed = Object.keys(patch).filter((k) => project[k] !== undefined && project[k] !== "");
+      // Resolve through the SAME lookup the runtime uses, so a hand-written
+      // NESTED project entry (web.brave.apiKey as {brave:{apiKey}}) is
+      // disclosed instead of shadowing the save silently. The PROJECT layer
+      // alone — a merged read reports the just-written global key as a shadow.
+      const shadowed = ctx.isProjectTrusted?.() === true
+        ? Object.keys(patch).filter((k) => {
+            const v = sectionValue(readProjectWebSection(ctx.cwd), k);
+            return v !== undefined && v !== null && v !== "";
+          })
+        : [];
       if (shadowed.length) notes.push(`A trusted project .pi/settings.json web section shadows: ${shadowed.join(", ")}.`);
       ctx.ui.notify(notes.join(" "), "info");
     },

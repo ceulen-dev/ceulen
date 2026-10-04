@@ -171,7 +171,9 @@ export interface WatcherHost {
   sendUserMessage(content: string, options?: { deliverAs?: "steer" | "followUp" }): void;
   /** Display-only immediate card (session entry; never enters LLM context). */
   appendEntry<T = unknown>(customType: string, data?: T): void;
-  /** Error/status toast, liveness-gated by the caller (never leaks into a replaced session). */
+  /** Error/status toast, liveness-gated by the caller (never leaks into a replaced session).
+   *  The pause notice is the ONE message that must survive the runtime's own
+   *  `stats.paused` flag — the caller gates it on liveness WITHOUT the pause term. */
   notify(message: string): void;
 }
 

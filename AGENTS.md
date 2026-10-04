@@ -186,14 +186,20 @@ cap-3 preview). Raw SDK event labels (`message_end`…) never render — only
 - **Classifier routing** (`subagent.routing.mode`, default `classify`): one
   Jev round-trip per task picks model tier (fast/coder/smart) + thinking
   (score ladder off…xhigh); `subagent.routing.threshold` (0.6) gates tier on
-  the WINNING LABEL'S probability (max of `probabilities`, classifier-module
-  precedent) and effort on the score answer's `confidence`; `solutionSpace`
+  the CHOSEN LABEL'S OWN probability (`probabilities[choice]` — a
+  high-probability rival must not clear the threshold; a missing/out-of-range
+  value fails open) and effort on the score answer's `confidence`; `solutionSpace`
   per task feeds the state. Precedence — pins beat dynamic, dynamic beats
   defaults: chain-entry `:level` > `agentModels` pin (disables both; no
   classify call) > `agentThinking` pin (disables effort only) > classifier >
   frontmatter defaults. An unresolvable chain (typo'd `@alias`) suppresses the
   tier question — the dispatch fails loud on the typo instead of a tier
-  verdict silently swapping in the role pools. Fail-open: classifier off/error/below-threshold →
+  verdict silently swapping in the role pools: the shared `routedChain()`
+  returns an error listing the unresolved roles when the chain resolves to
+  NOTHING, and BOTH runners surface it (an empty candidate list would otherwise
+  read as "use the parent model" in `resolveModel`). A resolvable chain plus an
+  unknown extra role still dispatches — that is a diagnostic, not a failure.
+  Fail-open: classifier off/error/below-threshold →
   static role chain. Both runners share ONE `routedChain()` (index.ts): the
   herdr path (`prepareHerdrOne`) used to resolve the chain straight from
   frontmatter, so routing only ever applied to in-process/SDK dispatches —
@@ -225,7 +231,11 @@ cap-3 preview). Raw SDK event labels (`message_end`…) never render — only
 - **Liveness timeouts** (upstream's always-on 20-min hard cap is GONE):
   `subagent.hardTimeoutMins` defaults 0 = OFF — a child producing events is
   never hard-killed; the idle window (`subagent.idleTimeoutMins`, default 3,
-  every SDK event resets it) is the hang detector. `operation:"wait"` blocks
+  every SDK event resets it) is the hang detector. The setting reaches the
+  resolver as `resolveChildTimeouts({ idleTimeoutMins })` — >0 replaces the
+  env-derived default (`PI_SUBAGENT_INACTIVITY_TIMEOUT_MINS`); 0/undefined keeps
+  it, and an explicit per-call `timeout` / frontmatter `timeout:` still wins.
+  `operation:"wait"` blocks
   up to 600s on a background task and reports liveness age (STALLED flag)
   from the thread store.
 - herdr delegation (visible panes when pi runs inside herdr; `runner:"sdk"`
@@ -330,7 +340,9 @@ durable assistant reply; fail-open everywhere; `/steering` shows the anchor
 trace ring).
 
 LOAD-ORDER CONTRACT (the reason steering is its own registry entry, placed
-after subagent and before repair/serena/config): pi chains
+last of the prompt rewriters — after every before_agent_start composer
+(ponytail/plan/subagent/munin/advisor/ux/fff/serena/web) and immediately
+before rtk/config): pi chains
 `before_agent_start` results — each handler's returned systemPrompt becomes
 the next handler's event.systemPrompt. Steering registers LAST of the prompt
 rewriters, so during the anchor bootstrap its returned minimal prompt

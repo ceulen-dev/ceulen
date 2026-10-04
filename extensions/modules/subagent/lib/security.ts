@@ -478,6 +478,13 @@ export interface ResolveChildTimeoutsOptions {
    * ceulen delta: 0 disables the cap (upstream had no off switch).
    */
   hardTimeoutMins?: number;
+  /**
+   * Idle (inactivity) window in minutes from `subagent.idleTimeoutMins`.
+   * > 0 REPLACES the env-derived default (PI_SUBAGENT_INACTIVITY_TIMEOUT_MINS);
+   * 0/undefined keeps the current behaviour. It is a DEFAULT, so an explicit
+   * per-call `requested` or frontmatter `agentTimeoutMins` still wins.
+   */
+  idleTimeoutMins?: number;
 }
 
 export interface ResolveChildTimeoutsResult {
@@ -495,13 +502,17 @@ export interface ResolveChildTimeoutsResult {
  *
  * Precedence: per-call timeout > agent frontmatter `timeout:` > global/caller
  * timeout. The idle window IS the hang detector (every SDK event resets it).
+ * `idleTimeoutMins` (> 0) supplies that window as the default; 0/undefined
+ * falls back to the env-derived default (3 min).
  * When the hard cap is enabled (hardTimeoutMins > 0), it is clamped up to the
  * idle window — a lifetime cap smaller than the idle window is nonsensical.
  * 0/undefined ⇒ undefined: a child producing events is never hard-killed.
  */
 export function resolveChildTimeouts(options: ResolveChildTimeoutsOptions): ResolveChildTimeoutsResult {
   const agentMs = options.agentTimeoutMins ? options.agentTimeoutMins * 60_000 : undefined;
-  const result = normalizeTimeout({ requested: options.requested ?? agentMs ?? options.globalTimeout });
+  const idleMins = options.idleTimeoutMins ?? 0;
+  const defaultValue = idleMins > 0 ? Math.min(idleMins, MAX_TIMEOUT_MINS) * 60_000 : DEFAULT_TIMEOUT_MS;
+  const result = normalizeTimeout({ requested: options.requested ?? agentMs ?? options.globalTimeout, defaultValue });
   if (result.error) return { error: result.error };
   const capMins = options.hardTimeoutMins ?? 0;
   if (capMins <= 0) return { timeoutMs: result.timeoutMs, hardTimeoutMs: undefined };

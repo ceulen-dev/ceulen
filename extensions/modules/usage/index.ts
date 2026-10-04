@@ -1870,6 +1870,17 @@ export default function (pi: ExtensionAPI) {
     state.ctx = ctx;
     resetGenRate(); // fresh session, fresh Generation Rate item
     resetUsageItem(); // ...and fresh usage windows
+    // The cumulative figures are labelled "Session cost"/"Session avg" in
+    // /usage, so they must not survive into the next session (/new, reload,
+    // switch, fork). session_start fires before the new session's first
+    // message_end, so an in-flight review of the old session cannot re-add
+    // into these (its message_end precedes this handler).
+    state.cumulativeCost = 0;
+    state.cumulativeOutput = 0;
+    state.cumulativeDurationMs = 0;
+    state.responseStartPerf = undefined; // a request spanning the switch has no valid elapsed
+    state.lastTokPerSec = undefined;
+    state.lastTokPerSecLabel = undefined;
     updateActiveAdapter(state, ctx.model);
     if (state.adapter) deferRefresh(state, true);
   });

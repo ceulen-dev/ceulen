@@ -5,11 +5,19 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ModuleConfig } from "../../lib/registry.js";
+import { isProjectTrusted, type ModuleConfig } from "../../lib/registry.js";
 import { row, type PanelGroup } from "../../lib/panel.js";
 import { getSettings, writeRouterSection, type RouterSettings } from "./lib/config.js";
 import { registerProvider, maybeRefreshCatalog } from "./lib/provider.js";
 import { refreshActiveModel } from "./lib/refresh.js";
+
+/** Read the panel's working copy: the EFFECTIVE values (env/project overrides
+ *  shown), so the panel never hides what the next request will actually use.
+ *  `trusted` is required — the caller decides, mirroring the rule the save-time
+ *  ctx applies (see zai's precedent). */
+export function readRouterSettings(trusted: boolean): RouterSettings {
+  return getSettings({ trustProject: trusted });
+}
 
 /** Build the router panel groups over a working copy (mutated by row setters).
  *  ONE group — the OMP "Providers" tab carries a single "Router" section
@@ -40,12 +48,14 @@ export function buildRouterGroups(cfg: RouterSettings): PanelGroup[] {
   ];
 }
 
-/** Persist the working copy + apply it live: re-register the provider so its
- *  closure picks up the new values, force a catalog refresh (new endpoint or
- *  reasoning flag must take effect immediately — bypass TTL, supersede any
- *  in-flight fetch), then keep the active model valid. Notifies effective vs
- *  saved values (env/repo precedence can shadow the persisted ones) — one
- *  save path, no drift. */
+/** Persist the working copy + apply it live: re-register the provider from the
+ *  EFFECTIVE settings (so a trusted repo's `router.baseUrl` is what the next
+ *  request and the forced catalog refresh actually use — re-registering the raw
+ *  saved copy would redirect the endpoint while `ROUTER_BASE_URL` set), force a
+ *  catalog refresh (new endpoint or reasoning flag must take effect immediately
+ *  — bypass TTL, supersede any in-flight fetch), then keep the active model
+ *  valid. Notifies effective vs saved values (env/repo precedence can shadow
+ *  the persisted ones) — one save path, no drift. */
 export async function saveRouterConfig(pi: ExtensionAPI, before: RouterSettings, working: RouterSettings, ctx: ExtensionContext): Promise<void> {
   if (working.baseUrl === before.baseUrl && working.enableReasoning === before.enableReasoning) {
     ctx.ui.notify("No changes.", "info");
@@ -55,12 +65,13 @@ export async function saveRouterConfig(pi: ExtensionAPI, before: RouterSettings,
     baseUrl: working.baseUrl !== before.baseUrl ? working.baseUrl : undefined,
     enableReasoning: working.enableReasoning !== before.enableReasoning ? working.enableReasoning : undefined,
   });
-  registerProvider(pi, working);
+  const trusted = ctx.isProjectTrusted?.() === true;
+  const effective = readRouterSettings(trusted);
+  registerProvider(pi, effective);
   try {
     await maybeRefreshCatalog(ctx, { force: true });
   } catch { /* refresh errors are surfaced by Pi elsewhere */ }
   await refreshActiveModel(pi, ctx);
-  const effective = getSettings();
   const overridden =
     (working.baseUrl !== effective.baseUrl && working.baseUrl !== "") ||
     working.enableReasoning !== effective.enableReasoning;
@@ -77,7 +88,10 @@ const OWNED_KEYS = ["router.baseUrl", "router.enableReasoning"];
 
 /** Router's ModuleConfig for the central /config panel. */
 export function routerConfig(pi: ExtensionAPI): ModuleConfig {
-  const before = getSettings();
+  // Baseline = what the next request resolves: the factory gets no ctx, so the
+  // shared trust helper decides (same rule save-time ctx.isProjectTrusted
+  // applies) — an untrusted checkout must not show phantom project values.
+  const before = readRouterSettings(isProjectTrusted(process.cwd()));
   const working = structuredClone(before);
   return {
     groups: () => buildRouterGroups(working),

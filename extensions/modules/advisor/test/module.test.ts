@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, beforeEach, describe, it } from "node:test";
-import advisorModule, { __setIsolatedForTest } from "../index.js";
+import advisorModule, { __getRuntimeForTest, __setIsolatedForTest } from "../index.js";
 import { advisorConfig } from "../configPanel.js";
 import { writeAdvisorSettings } from "../lib/config.js";
 
@@ -229,6 +229,38 @@ describe("advisor module wiring", () => {
     await cmd.handler("on", ctx);
     assert.ok(state.activeTools.has("advisor"), "tool re-activated by /advisor on without waiting for session_start");
   });
+
+  it("session_start(review off, no chain) + /config save enabling both reseeds the cursor (no history replay)", async () => {
+    const { pi, state } = createFakePi();
+    advisorModule(pi);
+    writeSettings({ advisor: { enabled: false } });
+    // Session opens with the review OFF and NO chain → runtime cursor stays undefined.
+    let ctx = available(fakeCtx(toolCalls(4)));
+    await fire(pi, state, "session_start", ctx);
+    const rt = __getRuntimeForTest();
+    assert.ok(rt, "runtime created for the session");
+    assert.equal(rt!.cursor, undefined, "no chain + review off → nothing reviewed yet");
+    assert.equal(rt!.models.length, 0, "no advisor model configured at start");
+
+    // ONE /config save sets enabled:true AND the chain. The reseed must key on
+    // the target watch state (willWatch), not on the not-yet-updated watchEnabled.
+    const entries = toolCalls(4);
+    ctx = available(fakeCtx(entries));
+    const m = advisorConfig();
+    m.groups()[0]!.rows[0]!.set(true);
+    m.groups()[0]!.rows[1]!.set(MODEL);
+    await m.save(new Set(["advisor.enabled", "advisor.model"]), ctx);
+
+    assert.deepEqual(readSettings().advisor, { enabled: true, models: [MODEL], watch: { minToolCalls: 3, immuneTurns: 3 } }, "enabled + chain written in one save");
+    assert.equal(rt!.cursor, entries.at(-1).id, "cursor reseeded to the transcript tail — the pre-existing history is not replayed");
+
+    // And the watch actually reviews only NEW work: the settled turn adds
+    // nothing, so the reseeded cursor leaves the existing 4 tool calls unseen.
+    let calls = 0;
+    __setIsolatedForTest(async (_c, models) => { calls++; return { text: "", model: models[0], usage: NO_USAGE }; });
+    await fire(pi, state, "agent_settled", step(available(fakeCtx(entries)), "tui"));
+    assert.equal(calls, 0, "nothing new since the reseed → no review of the pre-existing turn");
+  });
 });
 
 describe("advisor review flow", () => {
@@ -388,6 +420,37 @@ describe("advisor review flow", () => {
     await fire(pi, state, "agent_settled", step(ctx, "tui"));
     assert.equal(calls, 0, "no isolated call without a model");
     assert.equal(state.entries.length, 0);
+  });
+
+  it("the 3-strike pause notice reaches the user exactly once through the real wiring", async () => {
+    const { pi, state } = await arm({ advisor: { models: [MODEL], watch: { minToolCalls: 0, immuneTurns: 1 } } });
+    __setIsolatedForTest(async () => { throw new Error("429 rate limited"); });
+    const base = toolCalls(1);
+    const ctx = step(available(fakeCtx(base)), "tui");
+    // Three consecutive failing reviews — each its own settled turn with new work.
+    for (const extra of [toolCalls(1), toolCalls(1), toolCalls(1)]) {
+      ctx.sessionManager = { ...ctx.sessionManager, getEntries: () => [...base, ...extra] };
+      await fire(pi, state, "agent_settled", ctx);
+    }
+    const pause = ctx.notes.filter((n: any) => n.message.includes("Advisor watch paused"));
+    assert.equal(pause.length, 1, "the pause toast lands (previously dead code behind the paused flag)");
+    assert.equal(pause[0].level, "error", "delivered as an error toast");
+    assert.equal(__getRuntimeForTest()!.stats.paused, true, "the watch is still paused");
+    assert.equal(state.userMessages.length, 0, "no note delivered by the failed reviews");
+
+    // Paused means NO further reviews until /advisor on — the next turn skips.
+    let calls = 0;
+    __setIsolatedForTest(async (_c, models) => { calls++; return { text: "", model: models[0], usage: NO_USAGE }; });
+    ctx.sessionManager = { ...ctx.sessionManager, getEntries: () => [...base, ...toolCalls(1), ...toolCalls(1)] };
+    await fire(pi, state, "agent_settled", ctx);
+    assert.equal(calls, 0, "paused watch issues no further review");
+
+    // …and /advisor on resumes, as the notice promises: no duplicate toast.
+    await state.commands.get("advisor").handler("on", ctx);
+    assert.equal(__getRuntimeForTest()!.stats.paused, false, "resumed");
+    await fire(pi, state, "agent_settled", ctx);
+    assert.equal(calls, 1, "reviews resume after /advisor on");
+    assert.equal(ctx.notes.filter((n: any) => n.message.includes("Advisor watch paused")).length, 1, "still exactly one pause notice");
   });
 });
 

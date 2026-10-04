@@ -9,7 +9,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ModuleConfig } from "../../lib/registry.js";
+import { isProjectTrusted, type ModuleConfig } from "../../lib/registry.js";
 import { row, type PanelGroup } from "../../lib/panel.js";
 import { DEFAULT_BASE_URL, KNOWN_BASE_URLS } from "./lib/anthropic.js";
 import { DEFAULT_MIN_INTERVAL_MS } from "./lib/throttle.js";
@@ -139,7 +139,10 @@ function changed(before: ZaiSettings, working: ZaiSettings, key: string): boolea
 
 /** zai's ModuleConfig for the central /config panel. */
 export function zaiConfig(pi: ExtensionAPI): ModuleConfig {
-  const before = readZaiSettings(process.cwd(), true);
+  // Baseline = what the next request resolves: the factory gets no ctx, so the
+  // shared trust helper decides (same rule save-time ctx.isProjectTrusted
+  // applies) — an untrusted checkout must not show phantom project values.
+  const before = readZaiSettings(process.cwd(), isProjectTrusted(process.cwd()));
   const working = structuredClone(before);
   return {
     groups: () => buildZaiGroups(working),

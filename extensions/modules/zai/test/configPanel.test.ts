@@ -204,4 +204,27 @@ describe("zaiConfig save", () => {
     assert.equal(notifications[0]!.level, "info");
     assert.match(notifications[0]!.message, /NOT trusted/);
   });
+
+  it("baseline honors the trust helper (no phantom project values untrusted)", () => {
+    const agentDir = tempDir("zai-trust-agent-");
+    process.env.PI_CODING_AGENT_DIR = agentDir;
+    const cwd = tempDir("zai-trust-cwd-");
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ zai: { baseUrl: "https://open.bigmodel.cn/api/anthropic" } }));
+    const trustFile = join(agentDir, "trust.json");
+    const prevCwd = process.cwd();
+    process.chdir(cwd);
+    try {
+      writeFileSync(trustFile, JSON.stringify({ [process.cwd()]: true }));
+      assert.equal(
+        zaiConfig(fakePi().pi).groups()[0]!.rows[0]!.value,
+        "https://open.bigmodel.cn/api/anthropic",
+        "trusted → project value shown",
+      );
+      writeFileSync(trustFile, JSON.stringify({ [process.cwd()]: false }));
+      assert.equal(zaiConfig(fakePi().pi).groups()[0]!.rows[0]!.value, DEFAULT_BASE_URL, "untrusted → project value ignored");
+    } finally {
+      process.chdir(prevCwd);
+    }
+  });
 });

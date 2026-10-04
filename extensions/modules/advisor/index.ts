@@ -34,6 +34,12 @@ export function __setIsolatedForTest(fn: IsolatedCall | undefined): void {
   testIsolated = fn;
 }
 
+// ponytail: test-only read of the newest module instance's runtime (cursor/wiring assertions).
+let testRuntime: (() => WatcherRuntime | undefined) | undefined;
+export function __getRuntimeForTest(): WatcherRuntime | undefined {
+  return testRuntime?.();
+}
+
 interface NoteData {
   severity: Severity;
   note: string;
@@ -61,6 +67,7 @@ function renderNoteCard(raw: NoteData | undefined, expanded: boolean, theme: The
 
 export default function advisorModule(pi: ExtensionAPI): void {
   let runtime: WatcherRuntime | undefined;
+  testRuntime = () => runtime;
   let runtimeSessionId: string | undefined;
   /** Effective settings as last loaded/applied — the base for partial writes. */
   let settings: AdvisorConfig = DEFAULTS;
@@ -75,6 +82,12 @@ export default function advisorModule(pi: ExtensionAPI): void {
   function applySettings(next: AdvisorConfig, ctx: ExtensionContext): void {
     const masterChanged = next.enabled !== settings.enabled;
     settings = next;
+    // The session watch state this save TARGETS — computed before the reseed
+    // below: an explicit master change re-arms/disarms the session, an unchanged
+    // master leaves a /advisor watch-off override in place. Reading watchEnabled
+    // directly would miss a save that sets enabled + chain together, because
+    // watchEnabled is only updated at the end of this function.
+    const willWatch = masterChanged ? next.enabled : watchEnabled;
     const rt = runtime;
     const wasEmpty = !rt || rt.models.length === 0;
     if (rt) {
@@ -86,7 +99,7 @@ export default function advisorModule(pi: ExtensionAPI): void {
         rt.failures = 0;
       }
       // Enabling mid-session must not replay history.
-      if (wasEmpty && next.models.length > 0 && watchEnabled) reseedCursor(rt, ctx);
+      if (wasEmpty && next.models.length > 0 && willWatch) reseedCursor(rt, ctx);
     }
     // An explicit master change re-arms/disarms the session; otherwise a
     // /advisor watch-off override stays in place.
@@ -178,11 +191,16 @@ export default function advisorModule(pi: ExtensionAPI): void {
     // watch-off flips the flag, repeated failures pause — a review in flight
     // across any of these must deliver nothing.
     const live = () => runtime === rt && watchEnabled && rt.models.length > 0 && !rt.stats.paused;
+    // Reviews/notes additionally require "not paused": the 3-strike pause exists
+    // precisely because the review just failed, so a notify behind live() could
+    // never tell the user the watch stopped. Passed as a separate predicate — the
+    // pause flag still suppresses outbound notes and further reviews.
+    const alive = () => runtime === rt && watchEnabled && rt.models.length > 0;
     void reviewTurn(rt, ctx, {
       sendMessage: (message, options) => { if (live()) pi.sendMessage(message, options as never); },
       sendUserMessage: (content, options) => { if (live()) pi.sendUserMessage(content, options); },
       appendEntry: (customType, data) => { if (live()) pi.appendEntry(customType, data); },
-      notify: (message) => { if (live()) ctx.ui.notify(message, "error"); },
+      notify: (message) => { if (alive()) ctx.ui.notify(message, "error"); },
     }, testIsolated).catch((err) => { if (live()) ctx.ui.notify(`Advisor review failed: ${String(err)}`, "error"); });
   });
 

@@ -444,10 +444,13 @@ export class ClientSigningManager {
     this.lastSignedKey = "";
   }
 
-  /** Called on any non-401 response: a success between 401s keeps them from counting as consecutive. */
+  /** Called on any non-401 response: a success between 401s keeps them from counting as consecutive.
+   *  Also drops the pending signed-key marker — a later UNSIGNED request's 401 must not be
+   *  attributed to the (successful) signed request before it. */
   noteResponseOk(): void {
     const state = this.states.get(this.lastSignedKey);
     if (state) state.consecutive401s = 0;
+    this.lastSignedKey = "";
   }
 
   private async buildSignedHeaders(

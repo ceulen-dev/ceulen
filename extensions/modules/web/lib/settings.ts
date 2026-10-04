@@ -54,10 +54,19 @@ export function readWebSettings(cwd = process.cwd(), trusted = isProjectTrusted(
   return { ...global, ...readSection(path.join(path.resolve(cwd), ".pi", "settings.json")) };
 }
 
+/** The project `.pi/settings.json` `web` section ALONE (no global merge) — the
+ *  only layer that can shadow a GLOBAL /config save. Used for shadow disclosure
+ *  (a merged read would report the just-written global key as a shadow). */
+export function readProjectWebSection(cwd: string): WebSettings {
+  return readSection(path.join(path.resolve(cwd), ".pi", "settings.json"));
+}
+
 /** Read one value from a `web` section by settings key. Accepts BOTH the
  *  flat panel form (`"brave.apiKey"`) and a nested form (`brave.apiKey` as
- *  { brave: { apiKey } } path) so hand-written settings of either shape work. */
-function sectionValue(section: WebSettings, key: string): unknown {
+ *  { brave: { apiKey } } path) so hand-written settings of either shape work.
+ *  Exported so the /config panel resolves shadow disclosure the same way the
+ *  runtime does. */
+export function sectionValue(section: WebSettings, key: string): unknown {
   if (key in section) return section[key];
   const parts = key.split(".");
   let cur: unknown = section;

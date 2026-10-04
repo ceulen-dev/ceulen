@@ -105,6 +105,85 @@ describe("config", () => {
     });
   });
 
+  // ── /config Router save: re-register from the EFFECTIVE settings ─────────
+  // With a trusted project endpoint P shadowing global G, saving any /config
+  // change must leave the provider on P (registering the raw saved copy would
+  // clobber it with G); the disclosure must report the effective values.
+  describe("saveRouterConfig re-registers from effective settings", () => {
+    const repoPath = () => join(process.cwd(), ".pi", "settings.json");
+
+    async function withRepoSettings(router: unknown, fn: () => Promise<void>): Promise<void> {
+      const prev = existsSync(repoPath()) ? readFileSync(repoPath(), "utf8") : null;
+      mkdirSync(join(process.cwd(), ".pi"), { recursive: true });
+      writeFileSync(repoPath(), JSON.stringify({ router }));
+      try {
+        await fn();
+      } finally {
+        if (prev === null) unlinkSync(repoPath());
+        else writeFileSync(repoPath(), prev);
+      }
+    }
+
+    function makeSaveHarness(trusted: boolean) {
+      const registered: string[] = [];
+      const notes: { text: string; level: string }[] = [];
+      const pi = {
+        registerProvider: (_n: string, config: { baseUrl: string }) => { registered.push(config.baseUrl); },
+      };
+      const ctx = {
+        ui: { notify: (text: string, level: string) => { notes.push({ text, level }); } },
+        model: undefined,
+        modelRegistry: { refresh: async () => ({}), find: () => undefined },
+        isProjectTrusted: () => trusted,
+      };
+      return { pi, ctx, registered, notes };
+    }
+
+    it("trusted project endpoint wins over the saved copy", async () => {
+      try { unlinkSync(settingsPath()); } catch { /* ignore */ }
+      writeSettings({ baseUrl: "http://global" });
+      const { saveRouterConfig } = await import("../configPanel.js");
+      const h = makeSaveHarness(true);
+      await withRepoSettings({ baseUrl: "http://trusted-repo" }, async () => {
+        // The panel baseline/working copy is the effective (project) value…
+        const before = { baseUrl: "http://trusted-repo", enableReasoning: true };
+        await saveRouterConfig(h.pi as never, before, { ...before, enableReasoning: false }, h.ctx as never);
+      });
+      assert.deepEqual(h.registered, ["http://trusted-repo"], "provider re-registered with the project endpoint, not the saved global one");
+      assert.equal(h.notes.at(-1)!.level, "info", "no phantom override when saved and effective agree");
+      assert.match(h.notes.at(-1)!.text, /http:\/\/trusted-repo/);
+    });
+
+    it("untrusted project endpoint is ignored — the saved value is registered", async () => {
+      try { unlinkSync(settingsPath()); } catch { /* ignore */ }
+      writeSettings({ baseUrl: "http://global" });
+      const { saveRouterConfig } = await import("../configPanel.js");
+      const h = makeSaveHarness(false);
+      await withRepoSettings({ baseUrl: "http://trusted-repo" }, async () => {
+        const before = { baseUrl: "http://global", enableReasoning: true };
+        await saveRouterConfig(h.pi as never, before, { ...before, enableReasoning: false }, h.ctx as never);
+      });
+      assert.deepEqual(h.registered, ["http://global"], "untrusted repo scope never owns the endpoint");
+    });
+
+    it("env ROUTER_BASE_URL shadows the save: disclosed + provider follows env", async () => {
+      try { unlinkSync(settingsPath()); } catch { /* ignore */ }
+      writeSettings({ baseUrl: "http://global" });
+      process.env.ROUTER_BASE_URL = "http://from-env/";
+      try {
+        const { saveRouterConfig } = await import("../configPanel.js");
+        const h = makeSaveHarness(false);
+        const before = { baseUrl: "", enableReasoning: true };
+        await saveRouterConfig(h.pi as never, before, { ...before, baseUrl: "http://panel-typed" }, h.ctx as never);
+        assert.deepEqual(h.registered, ["http://from-env"], "catalog refresh + requests hit the effective env endpoint");
+        assert.equal(h.notes.at(-1)!.level, "warning");
+        assert.match(h.notes.at(-1)!.text, /ROUTER_BASE_URL/);
+      } finally {
+        delete process.env.ROUTER_BASE_URL;
+      }
+    });
+  });
+
   it("legacy NINE_ROUTER_BASE_URL still works", async () => {
     try { unlinkSync(settingsPath()); } catch { /* ignore */ }
     process.env.NINE_ROUTER_BASE_URL = "http://legacy-env";
@@ -398,13 +477,15 @@ describe("client", () => {
     }
   });
 
-  it("combo/ backends map onto the CC enum (off honored, none/minimal never sent)", async () => {
+  it("combo/ backends map onto the CC enum (nothing invalid is ever sent)", async () => {
     const { mapModel } = await import("../lib/client.js");
     const tlm = (id: string) => mapModel({ id }, true).thinkingLevelMap ?? {};
     // The deepseek family map would send off→"none" — the yardmaster combo
     // backend 400s on it (live-probed 2026-10-03). cc-enum must win.
     const m = tlm("combo/deepseek-v4.1-flash");
-    assert.equal(m.off, "off");
+    // The literal "off" 422s upstream too (reasoning_effort: unknown variant
+    // 'off', live 2026-10-04) — off must OMIT the parameter, not send "off".
+    assert.equal(m.off, null);
     assert.equal(m.low, "low");
     assert.equal(m.medium, "medium");
     assert.equal(m.max, "max");

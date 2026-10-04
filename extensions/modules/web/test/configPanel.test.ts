@@ -7,7 +7,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import { buildWebGroups, readWebRowValues, webConfig } from "../configPanel";
+import { buildWebGroups, diffWebPatch, readWebRowValues, webConfig } from "../configPanel";
 import { writeWebSection } from "../lib/settings";
 
 function tmpAgentDir(): string {
@@ -126,6 +126,72 @@ describe("web configPanel", () => {
       if (old === undefined) delete process.env.BRAVE_API_KEY;
       else process.env.BRAVE_API_KEY = old;
       fs.rmSync(dir, { recursive: true, force: true });
+      delete process.env.PI_CODING_AGENT_DIR;
+    }
+  });
+
+  it("diffWebPatch: free-text garbage on a number row leaves the key untouched", () => {
+    // Live-found regression: parseInt('abc') || 0 wrote a 0 cap to disk, which
+    // the consumer then clamped — silently clobbering the user's real value.
+    const before = { "image.dailyCap": "20", "crawl4ai.timeoutMs": "60000", "brave.apiKey": "old" };
+    assert.deepEqual(diffWebPatch({ ...before, "image.dailyCap": "abc" }, before), {}, "garbage number row skipped, never 0");
+    // A real number still persists as a number; empty string still clears.
+    assert.deepEqual(diffWebPatch({ ...before, "crawl4ai.timeoutMs": "45000" }, before), { "crawl4ai.timeoutMs": 45000 });
+    assert.deepEqual(diffWebPatch({ ...before, "image.dailyCap": "" }, before), { "image.dailyCap": "" });
+  });
+
+  it("save keeps the stored cap when the panel edit is garbage ('abc' → no write)", async () => {
+    const dir = tmpAgentDir();
+    try {
+      writeWebSection({ "image.dailyCap": 20 }, path.join(dir, "settings.json"));
+      const cfg = webConfig();
+      cfg.groups()[0]!.rows.find((r) => r.key === "web.image.dailyCap")!.set("abc");
+      const ctx = { cwd: "/nonexistent", ui: { notify: () => {} }, isProjectTrusted: () => false } as never;
+      await cfg.save(new Set(["web.image.dailyCap"]), ctx);
+      const raw = JSON.parse(fs.readFileSync(path.join(dir, "settings.json"), "utf8"));
+      assert.equal(raw.web["image.dailyCap"], 20, "stored cap survives a garbage edit");
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      delete process.env.PI_CODING_AGENT_DIR;
+    }
+  });
+
+  it("discloses a NESTED project web entry that shadows the save", async () => {
+    const dir = tmpAgentDir();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "web-nested-"));
+    try {
+      // Hand-written nested shape: the flat panel key is NOT a top-level key.
+      fs.mkdirSync(path.join(cwd, ".pi"), { recursive: true });
+      fs.writeFileSync(path.join(cwd, ".pi", "settings.json"), JSON.stringify({ web: { brave: { apiKey: "nested-project-key" } } }));
+      const cfg = webConfig();
+      cfg.groups()[0]!.rows.find((r) => r.key === "web.brave.apiKey")!.set("panel-key");
+      const notifications: string[] = [];
+      const ctx = { cwd, ui: { notify: (m: string) => notifications.push(m) }, isProjectTrusted: () => true } as never;
+      await cfg.save(new Set(["web.brave.apiKey"]), ctx);
+      const note = notifications.join(" ");
+      assert.match(note, /shadows: brave\.apiKey/, note);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
+      delete process.env.PI_CODING_AGENT_DIR;
+    }
+  });
+
+  it("trusted save with no project web section reports no phantom shadow", async () => {
+    const dir = tmpAgentDir();
+    const cwd = fs.mkdtempSync(path.join(os.tmpdir(), "web-noproj-"));
+    try {
+      const cfg = webConfig();
+      cfg.groups()[0]!.rows.find((r) => r.key === "web.brave.apiKey")!.set("panel-key");
+      const notifications: string[] = [];
+      const ctx = { cwd, ui: { notify: (m: string) => notifications.push(m) }, isProjectTrusted: () => true } as never;
+      await cfg.save(new Set(["web.brave.apiKey"]), ctx);
+      // Disclosure reads the PROJECT layer alone: a merged read would see the
+      // key just written to global and call it a shadow.
+      assert.doesNotMatch(notifications.join(" "), /shadows:/);
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+      fs.rmSync(cwd, { recursive: true, force: true });
       delete process.env.PI_CODING_AGENT_DIR;
     }
   });

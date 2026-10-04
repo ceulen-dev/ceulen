@@ -1002,7 +1002,7 @@ export default function (pi: ExtensionAPI) {
         task: string,
         solutionSpace?: string,
         precomputed?: RoutingVerdict,
-      ): Promise<{ chain: ExpandedCandidates; defaultThinking: SubagentThinkingLevel | undefined }> {
+      ): Promise<{ chain: ExpandedCandidates; defaultThinking: SubagentThinkingLevel | undefined; error?: string }> {
         let tierOverride: string[] | undefined;
         let classifierThinking: SubagentThinkingLevel | undefined;
         // A precomputed verdict already carries tier/effort (single-mode
@@ -1019,7 +1019,18 @@ export default function (pi: ExtensionAPI) {
         const chain = tierOverride
           ? expandModelCandidates(tierOverride, rolesCfg.roles)
           : resolveAgentModelChain(agent, rolesCfg);
-        return { chain, defaultThinking: classifierThinking ?? effectiveAgentThinking(agent, rolesCfg) };
+        return {
+          chain,
+          defaultThinking: classifierThinking ?? effectiveAgentThinking(agent, rolesCfg),
+          // A typo'd `@alias` must FAIL LOUD: an empty candidate list would
+          // otherwise read as "use the parent model" (resolveModel's fallback)
+          // and silently dispatch the child on the parent model. Only when
+          // NOTHING resolves — one bad entry beside a resolvable chain is a
+          // diagnostic, not a dispatch failure. Both runners share this path.
+          error: chain.unresolved.length > 0 && chain.candidates.length === 0
+            ? `Unresolved model role(s): ${chain.unresolved.join(", ")} — fix the agent frontmatter or subagent.roles.`
+            : undefined,
+        };
       }
 
       // Helper (herdr runner): validate + create topology + start the child pi,
@@ -1035,14 +1046,15 @@ export default function (pi: ExtensionAPI) {
       ): Promise<{ handle: HerdrHandle; timeoutMs: number; startedAt: number } | { error: string }> {
         const agent = agents.find((a) => a.name === agentName);
         if (!agent) return { error: `Unknown agent: "${agentName}".` };
-        const { chain: agentChain, defaultThinking } = await routedChain(agent, task, solutionSpace, verdict);
+        const { chain: agentChain, defaultThinking, error: chainError } = await routedChain(agent, task, solutionSpace, verdict);
+        if (chainError) return { error: chainError };
         const resolved = await resolveModelWithColdStartRetry(ctx, agentChain.candidates);
         if (!resolved.model) {
           return { error: `No model resolved for agent "${agentName}" (tried: ${resolved.attempted.join(", ") || "none"}).` };
         }
         // herdr children run full pi — they need SOME lifetime cap so an
         // unattended pane can't run forever; fall back to the idle window.
-        const timeouts = resolveChildTimeouts({ requested: timeoutMs, agentTimeoutMins: agent.timeout, hardTimeoutMins: subSettings.hardTimeoutMins });
+        const timeouts = resolveChildTimeouts({ requested: timeoutMs, agentTimeoutMins: agent.timeout, idleTimeoutMins: subSettings.idleTimeoutMins, hardTimeoutMins: subSettings.hardTimeoutMins });
         if (timeouts.error) return { error: timeouts.error };
         const hardTimeoutMs = timeouts.hardTimeoutMs ?? timeouts.timeoutMs ?? 0;
         if (!hardTimeoutMs) return { error: "Invalid herdr timeout configuration." };
@@ -1147,7 +1159,8 @@ export default function (pi: ExtensionAPI) {
           return makeErrorResult(agentName, task, `Unknown agent: "${agentName}". Available: ${available}.`);
         }
 
-        const { chain: agentChain, defaultThinking } = await routedChain(agent, task, solutionSpace);
+        const { chain: agentChain, defaultThinking, error: chainError } = await routedChain(agent, task, solutionSpace);
+        if (chainError) return makeErrorResult(agentName, task, chainError);
         const resolved = await resolveModelWithColdStartRetry(ctx, agentChain.candidates);
         if (!resolved.model) {
           const tried = resolved.attempted.join(", ") || "none";
@@ -1171,7 +1184,7 @@ export default function (pi: ExtensionAPI) {
           // Precedence: per-call timeout > agent frontmatter default > global
           // default; hard cap from settings (0 = OFF — a child producing events
           // is never hard-killed; the idle window is the hang detector).
-          const timeouts = resolveChildTimeouts({ requested: timeoutMs, agentTimeoutMins: agent.timeout, globalTimeout: params.timeout, hardTimeoutMins: subSettings.hardTimeoutMins });
+          const timeouts = resolveChildTimeouts({ requested: timeoutMs, agentTimeoutMins: agent.timeout, globalTimeout: params.timeout, idleTimeoutMins: subSettings.idleTimeoutMins, hardTimeoutMins: subSettings.hardTimeoutMins });
           if (timeouts.error) throw new Error(timeouts.error);
           effectiveTimeoutMs = timeouts.timeoutMs;
           effectiveHardMs = timeouts.hardTimeoutMs;

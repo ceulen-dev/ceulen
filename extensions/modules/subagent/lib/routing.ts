@@ -11,8 +11,9 @@
 //   2. `agentModels` pin  → disables BOTH overrides (no classify call is made)
 //   3. `agentThinking` pin → disables the effort override only
 //   4. classifier (tier + effort): tier gates on the WINNING LABEL'S probability
-//      (max of `probabilities` — classifier-module precedent), effort on the
-//      score answer's `confidence`; both must be >= threshold
+//      (`probabilities[choice]`, NOT the max across labels — a high-probability
+//      rival must not clear the threshold for a low-confidence choice), effort
+//      on the score answer's `confidence`; both must be >= threshold
 //   5. agent frontmatter defaults (what the classifier amends; what applies
 //      when routing is off / the call fails / confidence is low)
 //
@@ -33,7 +34,7 @@ export interface RoutingSettings {
   /** Optional classifier model override (provider/id or id); empty = first available. */
   model: string;
   /** Minimum certainty to act on an answer: tier = winning label's
-   *  probability, effort = the score answer's `confidence` field. */
+   *  OWN probability, effort = the score answer's `confidence` field. */
   threshold: number;
 }
 
@@ -188,9 +189,13 @@ export async function classifyTask(
     const tierAnswer = result.answers.tier as { choice?: string; probabilities?: Record<string, number> } | undefined;
     let tier: Tier | undefined;
     if (wantTier && tierAnswer?.choice && (TIERS as readonly string[]).includes(tierAnswer.choice)) {
-      const probs = tierAnswer.probabilities ?? {};
-      const top = Math.max(...Object.values(probs), 0);
-      tier = top >= settings.threshold ? (tierAnswer.choice as Tier) : undefined;
+      // Gate on the CHOSEN label's own probability. A label the classifier did
+      // not report (or a non-numeric / out-of-range value) means no usable
+      // certainty → no tier, exactly like below-threshold (fail open).
+      const prob = tierAnswer.probabilities?.[tierAnswer.choice];
+      tier = typeof prob === "number" && Number.isFinite(prob) && prob >= 0 && prob <= 1 && prob >= settings.threshold
+        ? (tierAnswer.choice as Tier)
+        : undefined;
     }
 
     let effort: string | undefined;
