@@ -1,5 +1,27 @@
 # Changelog
 
+## Unreleased
+
+- **a2a**: new module — the A2A Protocol v1.0 bidirectional peer ported from
+  `@bacnh85/pi-a2a` 0.7.13: 7 outbound tools (`a2a_call` with
+  `async_dispatch`, `a2a_status`, `a2a_discover`, `a2a_list`, `a2a_history`,
+  `a2a_orchestrate`, `a2a_peers`), 8 commands, the opt-in inbound server
+  (`/a2a-server start`, isolated child sessions, transcripts, audit log,
+  anti-loop, per-peer tokens), and local/mDNS/gateway discovery. `bonjour-service`
+  is vendored (flat `vendor/vendored_deps/`, no `node_modules` path) — zero new
+  runtime deps. Settings live on the **Tasks** tab of the central `/config`
+  panel (`A2A` + `A2A peers & discovery` sections); upstream's `/a2a-config`
+  is dropped, and the project `.pi/settings.json` is read only when trusted
+  (security keys stay global-only even then).
+- **a2a fixes found against a live switchboard**: gateway-proxied peers
+  (`gw/<key>/<name>`) are never card-fetched — the proxied card advertises the
+  peer's DIRECT url, which routed dispatches around the gateway and tripped the
+  SSRF guard; `a2a_call`/`a2a_status`/`a2a_orchestrate` now pin to the proxy
+  URL. `a2a_discover` on a configured gateway origin is allowlisted and sends
+  that gateway's token (the proxy 401s an anonymous card fetch).
+  The `/config` add/remove action rows re-prompt with the reason on invalid
+  input instead of returning silently.
+
 ## 0.8.0 — 2026-10-04
 
 - **todo**: new module (OMP port) — phased task tracking: one `todo` tool

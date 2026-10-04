@@ -26,6 +26,8 @@ import subagentModule from "../modules/subagent/index.ts";
 import { subagentConfig } from "../modules/subagent/configPanel.js";
 import planModule from "../modules/plan/index.ts";
 import { planConfig } from "../modules/plan/configPanel.js";
+import a2aModule from "../modules/a2a/index.ts";
+import { a2aConfig } from "../modules/a2a/configPanel.js";
 import todoModule from "../modules/todo/index.ts";
 import steeringModule from "../modules/steering/index.ts";
 import { steeringConfig } from "../modules/steering/configPanel.js";
@@ -122,6 +124,10 @@ export const MODULES: ModuleEntry[] = [
   // (sandbox: read-only) and its before_agent_start must compose BEFORE
   // steering (the last prompt rewriter — see its entry below).
   { name: "plan", category: "Tasks", describe: "Read-only plan mode: /plan toggle, tool gating, write_plan + ask_user_question, plan model/thinking, approval handoff.", load: planModule, config: planConfig, tools: ["write_plan", "ask_user_question"] },
+  // A2A after plan: cross-agent delegation (the remote sibling of subagent).
+  // No before_agent_start → no prompt-rewrite ordering constraint; its
+  // child sessions reuse the host-only session guards in the module.
+  { name: "a2a", category: "Tasks", describe: "A2A Protocol v1.0 peer: call remote agents (a2a_call…), be called by them (opt-in inbound server), local/mDNS/gateway discovery.", load: a2aModule, config: a2aConfig, tools: ["a2a_call", "a2a_status", "a2a_discover", "a2a_list", "a2a_history", "a2a_orchestrate", "a2a_peers"] },
   { name: "todo", category: "Tasks", describe: "Phased task board: the `todo` tool (init/start/done/block/unblock) with session persistence, blockers, and a status-segment progress readout.", load: todoModule, tools: ["todo"] },
   // ── Tools ─────────────────────────────────────────────────────────────
   // Repair first in the section: it wraps the built-in tools; serena/fff ride

@@ -257,6 +257,7 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
     repair: { section: "Repair", icon: "🔧" },
     fff: { section: "FFF search" },
     web: { section: "Web", icon: "🌍" },
+    a2a: { section: "A2A", icon: "📡" },
     rtk: { section: "RTK" },
     config: { section: "Ceulen config", icon: "🧩" },
   };

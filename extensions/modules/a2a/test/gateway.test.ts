@@ -1,0 +1,1449 @@
+/**
+ * Gateway peer discovery — merge, self-filter, overlay routing.
+ *
+ * Directory shape (a2a-switchboard GET /.well-known/agent.json, authed):
+ *   { peers: [{ name, url: "/peer/<name>/", healthy, capabilities, skills }] }
+ */
+
+import { assert } from "./chai.js";
+import * as fs from "node:fs";
+import * as path from "node:path";
+
+import { DEFAULTS } from "./helpers";
+import { makeTempDir } from "./tmp";
+import { GatewayUpstream, backoffDelayMs, isSelfEntry, mergeGatewayPeers } from "../lib/gateway";
+import { resolvePeer, setGatewayPeers, getGatewayPeers, updateGatewayPeers, type Peer } from "../lib/config";
+import { a2aCall, metrics } from "../lib/client";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
+
+const GW = "http://127.0.0.1:9920";
+const TOKEN = "gw-secret-token";
+
+function merge(
+  entries: unknown[],
+  self: { name: string; url: string; autoName?: string } = { name: "pi-s2-9910", url: "http://127.0.0.1:9910" },
+  key = "k1",
+) {
+  return mergeGatewayPeers({
+    gatewayUrl: GW,
+    token: TOKEN,
+    selfName: self.name,
+    selfUrl: self.url,
+    selfAutoName: self.autoName,
+    entries,
+    timeoutMs: 120_000,
+    key,
+  });
+}
+
+function makeResp(body: any, status: number, headers?: Headers): any {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    headers: headers ?? new Headers(),
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  };
+}
+
+describe("gateway peer discovery", () => {
+  describe("mergeGatewayPeers", () => {
+    it("merges peers as gw/<key>/<name> with proxy URL and gateway bearer auth", () => {
+      const out = merge([
+        { name: "pi-s2-9912", url: "/peer/pi-s2-9912/", healthy: true, capabilities: ["web_search"] },
+      ]);
+      assert.deepEqual(Object.keys(out), ["gw/k1/pi-s2-9912"]);
+      const p = out["gw/k1/pi-s2-9912"]!;
+      assert.equal(p.url, "http://127.0.0.1:9920/peer/pi-s2-9912/");
+      assert.deepEqual(p.auth, { type: "bearer", token: TOKEN });
+      assert.deepEqual(p.capabilities, ["web_search"]);
+      assert.isTrue(p.viaGateway);
+    });
+
+    it("defaults the key to 'default' when not provided", () => {
+      const out = mergeGatewayPeers({
+        gatewayUrl: GW,
+        token: TOKEN,
+        selfName: "s",
+        selfUrl: "http://127.0.0.1:9910",
+        entries: [{ name: "p", url: "/peer/p/", healthy: true }],
+        timeoutMs: 120_000,
+      });
+      assert.deepEqual(Object.keys(out), ["gw/default/p"]);
+    });
+
+    it("skips self by registered name", () => {
+      const out = merge([
+        { name: "pi-s2-9910", url: "/peer/pi-s2-9910/", healthy: true }, // self
+        { name: "pi-s2-9912", url: "/peer/pi-s2-9912/", healthy: true },
+      ]);
+      assert.deepEqual(Object.keys(out), ["gw/k1/pi-s2-9912"]);
+    });
+
+    it("skips self by publicUrl port suffix (renamed session, stale auto-named entry)", () => {
+      const out = merge(
+        [
+          { name: "pi-main", url: "/peer/pi-main/", healthy: true }, // self (pinned name)
+          { name: "pi-s2-9910", url: "/peer/pi-s2-9910/", healthy: true }, // our stale auto-name
+          { name: "pi-s2-9912", url: "/peer/pi-s2-9912/", healthy: true },
+        ],
+        { name: "pi-main", url: "http://127.0.0.1:9910", autoName: "pi-s2-9910" },
+      );
+      assert.deepEqual(Object.keys(out), ["gw/k1/pi-s2-9912"]);
+    });
+
+    it("isSelfEntry also matches an absolute publicUrl", () => {
+      assert.isTrue(
+        isSelfEntry(
+          { name: "other", url: "http://10.1.2.3:9910/" },
+          { name: "pi-main", url: "http://10.1.2.3:9910" },
+        ),
+      );
+      assert.isFalse(
+        isSelfEntry(
+          { name: "other", url: "http://10.1.2.3:9911/" },
+          { name: "pi-main", url: "http://10.1.2.3:9910" },
+        ),
+      );
+    });
+
+    it("skips unhealthy peers, keeps unknown (null) health", () => {
+      const out = merge([
+        { name: "dead", url: "/peer/dead/", healthy: false },
+        { name: "unknown", url: "/peer/unknown/", healthy: null },
+        { name: "alive", url: "/peer/alive/" },
+      ]);
+      assert.deepEqual(Object.keys(out).sort(), ["gw/k1/alive", "gw/k1/unknown"]);
+    });
+
+    it("drops absolute/cross-origin urls (bearer token must only reach the gateway)", () => {
+      const out = merge([
+        { name: "evil", url: "http://attacker.example/peer/evil/", healthy: true },
+        { name: "ok", url: "/peer/ok/", healthy: true },
+      ]);
+      assert.deepEqual(Object.keys(out), ["gw/k1/ok"]);
+    });
+
+    it("cross-host same-port peer is NOT filtered (regression: bare -port suffix rule)", () => {
+      const out = merge(
+        [{ name: "other-host-9910", url: "/peer/other-host-9910/", healthy: true }],
+        { name: "pi-main", url: "http://10.0.0.2:9910", autoName: "pi-main-9910" },
+      );
+      assert.deepEqual(Object.keys(out), ["gw/k1/other-host-9910"]);
+    });
+
+    it("own auto-name entry IS filtered by exact match", () => {
+      const out = merge(
+        [{ name: "pi-main-9910", url: "/peer/pi-main-9910/", healthy: true }],
+        { name: "pi-main", url: "http://10.0.0.2:9910", autoName: "pi-main-9910" },
+      );
+      assert.deepEqual(Object.keys(out), []);
+    });
+
+    it("surfaces skill names when capabilities is absent or an object", () => {
+      const out = merge([
+        { name: "a", url: "/peer/a/", healthy: true, capabilities: { streaming: true }, skills: [{ id: "coding", name: "coding" }] },
+        { name: "b", url: "/peer/b/", healthy: true, skills: [{ id: "research" }] },
+      ]);
+      assert.deepEqual(out["gw/k1/a"]!.capabilities, ["coding"]);
+      assert.deepEqual(out["gw/k1/b"]!.capabilities, ["research"]);
+    });
+
+    it("gw-peer timeout comes from callTimeoutMs, not heartbeatSec (regression)", () => {
+      const out = mergeGatewayPeers({
+        gatewayUrl: GW,
+        token: TOKEN,
+        selfName: "s",
+        selfUrl: "http://127.0.0.1:9910",
+        entries: [{ name: "p", url: "/peer/p/", healthy: true }],
+        timeoutMs: 120_000,
+        key: "k1",
+      });
+      assert.equal(out["gw/k1/p"]!.timeout, 120_000);
+    });
+
+    it("drops malformed entries and tolerates a non-array peers field", () => {
+      assert.deepEqual(merge([{ url: "/peer/x/" }, { name: "a/b", url: "/x" }, { name: "no-url" }, null]), {});
+      assert.deepEqual(merge("not-an-array" as any), {});
+    });
+  });
+
+  describe("register backoff (429 / rate-limit)", () => {
+    const savedFetch = globalThis.fetch;
+    afterEach(() => {
+      globalThis.fetch = savedFetch as any;
+    });
+
+    it("backoffDelayMs: exponential growth, 5-min cap, jitter bounds, Retry-After wins when larger", () => {
+      for (let fails = 1; fails <= 4; fails++) {
+        const base = Math.min(300_000, 60_000 * 2 ** (fails - 1));
+        const d = backoffDelayMs(fails, 60_000, null);
+        assert.isAtLeast(d, Math.floor(base * 0.8));
+        assert.isAtMost(d, Math.ceil(base * 1.2));
+      }
+      // Deep failure chain clamps at the 5-min cap (±jitter).
+      assert.isAtMost(backoffDelayMs(50, 60_000, null), Math.ceil(300_000 * 1.2));
+      assert.isAtLeast(backoffDelayMs(50, 60_000, null), Math.floor(300_000 * 0.8));
+      // Retry-After only wins when larger than the jittered exponential (48–72s here).
+      assert.equal(backoffDelayMs(1, 60_000, 90), 90_000);
+      const ignored = backoffDelayMs(1, 60_000, -5); // non-positive Retry-After ignored
+      assert.isAtLeast(ignored, 48_000);
+      assert.isAtMost(ignored, 72_000);
+      // A buggy/hostile Retry-After (10 days) is capped — it must not suppress
+      // re-registration indefinitely.
+      assert.equal(backoffDelayMs(1, 60_000, 86_400), 300_000);
+    });
+
+    it("a failed register schedules a backoff; a later success resets it", async () => {
+      let status = 429;
+      globalThis.fetch = (async (url: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) return makeResp({}, status);
+        return makeResp({ peers: [] }, 200);
+      }) as any;
+      const gw = new GatewayUpstream(
+        { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false },
+        () => ({}),
+        () => {},
+        () => {},
+      );
+      assert.isFalse(await gw.register("http://127.0.0.1:9911"));
+      assert.equal(gw["beatFails"], 1);
+      assert.isTrue(gw["backoffUntil"] > Date.now());
+      assert.isFalse(await gw.register("http://127.0.0.1:9911"));
+      assert.equal(gw["beatFails"], 2);
+      status = 200;
+      assert.isTrue(await gw.register("http://127.0.0.1:9911"));
+      assert.equal(gw["beatFails"], 0);
+      assert.equal(gw["backoffUntil"], 0);
+    });
+
+    it("Retry-After header (seconds) extends the backoff", async () => {
+      globalThis.fetch = (async (url: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) return makeResp({}, 429, new Headers({ "retry-after": "90" }));
+        return makeResp({ peers: [] }, 200);
+      }) as any;
+      const gw = new GatewayUpstream(
+        { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false },
+        () => ({}),
+        () => {},
+        () => {},
+      );
+      assert.isFalse(await gw.register("http://127.0.0.1:9911"));
+      // jittered exponential is 48–72s; the header must push it to ~90s
+      assert.isAtLeast(gw["backoffUntil"], Date.now() + 89_000);
+    });
+
+    it("heartbeat (maybeBeat) skips while backed off, retries exactly once after it lapses", async () => {
+      const status = 429;
+      let registerCalls = 0;
+      globalThis.fetch = (async (url: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          registerCalls += 1;
+          return makeResp({}, status);
+        }
+        return makeResp({ peers: [] }, 200);
+      }) as any;
+      const gw = new GatewayUpstream(
+        { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false },
+        () => ({}),
+        () => {},
+        () => {},
+      );
+      assert.isFalse(await gw.register("http://127.0.0.1:9911")); // registerCalls: 1, backoff armed
+      await gw["maybeBeat"]("http://127.0.0.1:9911"); // inside the backoff window → skipped
+      assert.equal(registerCalls, 1, "beat must not hit /register while backed off");
+      gw["backoffUntil"] = Date.now() - 1; // lapse
+      await gw["maybeBeat"]("http://127.0.0.1:9911");
+      assert.equal(registerCalls, 2, "exactly one retry after the backoff lapses");
+    });
+  });
+
+  describe("GatewayUpstream heartbeat → directory refresh", () => {
+    let originalFetch: typeof globalThis.fetch;
+    let calls: Array<{ method: string; url: string; auth?: string }>;
+    let overlay: Record<string, Peer>;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+      calls = [];
+      overlay = {};
+      globalThis.fetch = (async (url: any, init?: any) => {
+        calls.push({
+          method: init?.method || "GET",
+          url: String(url),
+          auth: init?.headers?.authorization,
+        });
+        const u = String(url);
+        if (u.endsWith("/register")) return makeResp({ status: "updated", caller_token: "agw_peer_ct_1" }, 200);
+        if (u.endsWith("/.well-known/agent.json")) {
+          return makeResp(
+            {
+              peers: [
+                { name: "pi-s2-9912", url: "/peer/pi-s2-9912/", healthy: true },
+                { name: "self-1", url: "/peer/self-1/", healthy: true },
+                { name: "dead", url: "/peer/dead/", healthy: false },
+              ],
+            },
+            200,
+          );
+        }
+        return makeResp({}, 404);
+      }) as any;
+    });
+    afterEach(() => {
+      globalThis.fetch = originalFetch as any;
+      setGatewayPeers({});
+    });
+
+    it("uses the per-peer caller token for gw/ overlay auth", async () => {
+      const gw = new GatewayUpstream(
+        { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1" },
+        () => ({}),
+        () => {},
+        (peers) => (overlay = peers),
+      );
+      const ok = await gw.start("http://127.0.0.1:9911");
+      assert.isTrue(ok);
+      const snapshot = { ...overlay };
+      await gw.stop();
+      const dir = calls.find((c) => c.url.endsWith("/.well-known/agent.json"))!;
+      // Directory fetch still uses the SHARED token (read-only endpoint).
+      assert.equal(dir.auth, `Bearer ${TOKEN}`);
+      // But the overlay peer presents the per-peer CALLER token, so the
+      // gateway attributes calls to this peer's name.
+      assert.equal(snapshot["gw/k1/pi-s2-9912"]!.auth.token, "agw_peer_ct_1");
+    });
+
+    it("falls back to the shared token when /register omits caller_token", async () => {
+      // Older a2a-switchboard gateways don't issue a caller_token — the overlay must
+      // keep working with the shared token (a regression here would 401
+      // every gw/* outbound call).
+      const original = globalThis.fetch;
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) return makeResp({ status: "updated" }, 200); // no caller_token
+        if (u.endsWith("/.well-known/agent.json")) {
+          return makeResp(
+            { peers: [{ name: "pi-s2-9912", url: "/peer/pi-s2-9912/", healthy: true }] },
+            200,
+          );
+        }
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        let fallbackOverlay: Record<string, import("../lib/config").Peer> = {};
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1" },
+          () => ({}),
+          () => {},
+          (peers) => (fallbackOverlay = peers),
+        );
+        const ok = await gw.start("http://127.0.0.1:9911");
+        assert.isTrue(ok);
+        const snapshot = { ...fallbackOverlay };
+        await gw.stop();
+        assert.equal(snapshot["gw/k1/pi-s2-9912"]!.auth.token, TOKEN);
+      } finally {
+        globalThis.fetch = original as any;
+      }
+    });
+
+    it("heartbeats PATCH with the caller_token after the initial POST minted it", async () => {
+      const original = globalThis.fetch;
+      const seen: Array<{ method: string; auth?: string }> = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          const method = init?.method || "GET";
+          seen.push({ method, auth: init?.headers?.authorization });
+          // Method-aware: PATCH = heartbeat update (no mint), POST = mint.
+          if (method === "PATCH") return makeResp({ status: "updated", state: "accepted" }, 200);
+          return makeResp({ status: "updated", state: "accepted", caller_token: "agw_peer_ct_1" }, 200);
+        }
+        if (u.endsWith("/.well-known/agent.json"))
+          return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false },
+          () => ({}),
+          () => {},
+          () => {},
+        );
+        assert.isTrue(await gw.start("http://127.0.0.1:9911")); // mint: POST, shared token
+        assert.isTrue(await gw.register("http://127.0.0.1:9911")); // heartbeat: PATCH, caller_token
+        await gw.stop();
+        assert.equal(seen[0]!.method, "POST");
+        assert.equal(seen[0]!.auth, `Bearer ${TOKEN}`);
+        assert.equal(seen[1]!.method, "PATCH");
+        assert.equal(seen[1]!.auth, "Bearer agw_peer_ct_1");
+        assert.lengthOf(seen, 2); // no redundant POST after a successful PATCH
+      } finally {
+        globalThis.fetch = original as any;
+      }
+    });
+
+    it("PATCH 403 (revoked peer) does NOT fall back to POST", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      fs.mkdirSync(path.join(dir, "a2a_gateways"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "a2a_gateways", "k1.json"), JSON.stringify({ name: "self-1", callerToken: "revoked-ct" }));
+      const original = globalThis.fetch;
+      const requests: Array<{ method: string; url: string }> = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        requests.push({ method: init?.method || "GET", url: String(url).split("?")[0] });
+        if (String(url).endsWith("/register") && init?.method === "PATCH")
+          return makeResp({ error: "revoked" }, 403);
+        return makeResp({ status: "registered", caller_token: "minted-anyway" }, 200);
+      }) as any;
+      try {
+        const logs: string[] = [];
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}),
+          (m) => logs.push(String(m)),
+          () => {},
+        );
+        const ok = await gw.register("http://127.0.0.1:9911");
+        assert.isFalse(ok);
+        // Exactly one request (the PATCH) — no POST fallback for a 403.
+        assert.lengthOf(requests, 1);
+        assert.equal(requests[0]!.method, "PATCH");
+        assert.ok(logs.some((l) => l.includes("register failed: 403")), "failure logged");
+        await gw.stop();
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("PATCH 409 (takeover mid-heartbeat) fails the beat — no rename, no POST", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      fs.mkdirSync(path.join(dir, "a2a_gateways"), { recursive: true });
+      fs.mkdirSync(path.join(dir, "a2a_gateways", "k1"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "a2a_gateways", "k1", "self-1.json"), JSON.stringify({ name: "self-1", callerToken: "live-ct" }));
+      const original = globalThis.fetch;
+      const requests: Array<{ method: string; body?: string }> = [];
+      const logs: string[] = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        requests.push({ method: init?.method || "GET", body: init?.body });
+        if (String(url).endsWith("/register") && init?.method === "PATCH")
+          return makeResp({ error: "peer registered by another identity" }, 409);
+        return makeResp({ status: "registered" }, 200);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}),
+          (m) => logs.push(String(m)),
+          () => {},
+        );
+        const ok = await gw.register("http://127.0.0.1:9911");
+        assert.isFalse(ok);
+        // Exactly one request (the PATCH) with the ORIGINAL name — the unique-
+        // name self-heal must never trigger on a heartbeat 409 (it would split
+        // the gateway entry: old name holds it, new name re-registers).
+        assert.lengthOf(requests, 1);
+        assert.equal(requests[0]!.method, "PATCH");
+        assert.equal(JSON.parse(requests[0]!.body!).name, "self-1");
+        assert.equal(gw.registeredName, "self-1");
+        assert.ok(logs.some((l) => l.includes("register failed: 409")), "failure logged");
+        await gw.stop();
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("register() bails without resurrecting state if stop() lands during body parse", async () => {
+      // Finding #8 (epoch-guard race): stop() during the awaited res.json()
+      // would slip past the post-send guard (epoch unchanged) and refreshPeers
+      // would re-capture the post-stop epoch and refill the overlay. The second
+      // guard must abort before mutating state.
+      let release!: () => void;
+      const deferred = new Promise<any>((res) => { release = () => res({ status: "registered", caller_token: "ct-minted" }); });
+      const original = globalThis.fetch;
+      const onPeersCalls: Array<Record<string, unknown>> = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          if (init?.method === "DELETE") return makeResp({ ok: true }, 200);
+          // 200 whose body only resolves AFTER stop() has run.
+          return { ok: true, status: 200, clone: undefined, json: () => deferred };
+        }
+        if (u.endsWith("/.well-known/agent.json")) return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false },
+          () => ({}),
+          () => {},
+          (peers) => onPeersCalls.push(peers),
+        );
+        const reg = gw.register("http://127.0.0.1:9911"); // in-flight
+        await gw.stop(); // lands while register awaits the deferred body
+        release();
+        const ok = await reg;
+        assert.isFalse(ok, "register must report failure after a mid-parse stop");
+        assert.isTrue(gw["stopped"], "stopped must stay true — no resurrection");
+        // stop() cleared the overlay via onPeers({}); register must NOT refill it.
+        assert.isAbove(onPeersCalls.length, 0, "stop() cleared the overlay");
+        assert.deepEqual(onPeersCalls[onPeersCalls.length - 1], {}, "last onPeers call is the empty overlay");
+      } finally {
+        globalThis.fetch = original as any;
+      }
+    });
+
+    it("409 self-heal renames → token persists under the RENAMED path, next session PATCHes with it", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      const original = globalThis.fetch;
+      const seen: Array<{ method: string; auth?: string; name: string; cardName?: string }> = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          const body = JSON.parse(init?.body);
+          seen.push({ method: init?.method || "POST", auth: init?.headers?.authorization, name: body.name, cardName: body.card?.name });
+          if (body.name === "self-1" && (init?.method || "POST") === "POST" && !seen.some((s) => s.auth === "Bearer ct-new")) return makeResp({ error: "peer registered by another identity" }, 409);
+          if ((init?.method || "POST") === "POST") return makeResp({ status: "registered", caller_token: "ct-new" }, 200);
+          return makeResp({ status: "updated", state: "accepted" }, 200);
+        }
+        if (u.endsWith("/.well-known/agent.json")) return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({ name: "self-1" }), () => {}, () => {},
+        );
+        assert.isTrue(await gw.register("http://127.0.0.1:9911")); // 409 → renamed POST mints
+        const renamed = gw.registeredName;
+        assert.notEqual(renamed, "self-1");
+        // State persisted under the RENAMED name; pre-rename file gone.
+        assert.isFalse(fs.existsSync(path.join(dir, "a2a_gateways", "k1", "self-1.json")));
+        const stateFile = path.join(dir, "a2a_gateways", "k1", `${renamed}.json`);
+        const j = JSON.parse(fs.readFileSync(stateFile, "utf8"));
+        assert.equal(j.name, renamed);
+        assert.equal(j.callerToken, "ct-new");
+        // Config name unchanged → no state under "self-1" → the next session
+        // re-runs the self-heal (deterministic: the stale entry persists). The
+        // important property — the RENAMED token persists and loads — is the
+        // stateFile assertion above, exercised by a same-named instance:
+        const gw3 = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: renamed, heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}), () => {}, () => {},
+        );
+        assert.equal(gw3["callerToken"], "ct-new"); // loaded from the renamed file
+        assert.equal(seen[0]!.name, "self-1");
+        // Card name follows the RENAMED registration (409 rename consistency).
+        const renamedPost = seen.find((s) => s.method === "POST" && s.name === renamed)!;
+        assert.isOk(renamedPost, "renamed POST present");
+        assert.equal(renamedPost.cardName, renamed, "card.name must equal the registered name post-rename");
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("logs directory failure only when the status changes (PATCH 200 + directory 401 × 2 cycles)", async () => {
+      const original = globalThis.fetch;
+      const logs: string[] = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register"))
+          return makeResp({ status: "updated", state: "accepted" }, 200);
+        if (u.endsWith("/.well-known/agent.json")) return makeResp({ error: "unauthorized" }, 401);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false },
+          () => ({}),
+          (m) => logs.push(String(m)),
+          () => {},
+        );
+        assert.isTrue(await gw.register("http://127.0.0.1:9911")); // cycle 1: dir 401 → log
+        assert.isTrue(await gw.register("http://127.0.0.1:9911")); // cycle 2: dir 401 again → silent
+        const lines = logs.filter((l) => l.includes("peer directory refresh failed"));
+        assert.lengthOf(lines, 1); // exactly one line for a repeated identical failure
+        assert.match(lines[0]!, /peer directory refresh failed: 401/);
+        await gw.stop();
+      } finally {
+        globalThis.fetch = original as any;
+      }
+    });
+
+    it("PATCH 405 falls back to POST and sticks to POST afterwards (old switchboard)", async () => {
+      const original = globalThis.fetch;
+      const seen: Array<{ method: string }> = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          const method = init?.method || "GET";
+          seen.push({ method });
+          if (method === "PATCH") return makeResp({ error: "method not allowed" }, 405);
+          return makeResp({ status: "updated", caller_token: "agw_peer_ct_1" }, 200);
+        }
+        if (u.endsWith("/.well-known/agent.json"))
+          return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false },
+          () => ({}),
+          () => {},
+          () => {},
+        );
+        assert.isTrue(await gw.start("http://127.0.0.1:9911")); // POST mints ct
+        assert.isTrue(await gw.register("http://127.0.0.1:9911")); // PATCH 405 → POST fallback, succeeds
+        assert.isTrue(await gw.register("http://127.0.0.1:9911")); // no flapping: straight POST
+        await gw.stop();
+        assert.deepEqual(seen.map((c) => c.method), ["POST", "PATCH", "POST", "POST"]);
+      } finally {
+        globalThis.fetch = original as any;
+      }
+    });
+
+    it("persisted caller_token → fresh GatewayUpstream heartbeats with PATCH immediately", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      fs.mkdirSync(path.join(dir, "a2a_gateways"), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "a2a_gateways", "k1.json"),
+        JSON.stringify({ name: "self-1", callerToken: "persisted-ct" }),
+      );
+      const original = globalThis.fetch;
+      const seen: Array<{ method: string; auth?: string }> = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          seen.push({ method: init?.method || "GET", auth: init?.headers?.authorization });
+          return makeResp({ status: "updated" }, 200);
+        }
+        if (u.endsWith("/.well-known/agent.json"))
+          return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}),
+          () => {},
+          () => {},
+        );
+        assert.isTrue(await gw.start("http://127.0.0.1:9911"));
+        await gw.stop();
+        // Fresh instance loaded the persisted token → very first register is a
+        // PATCH (no mint POST), authed as the caller_token.
+        assert.lengthOf(seen, 1);
+        assert.equal(seen[0]!.method, "PATCH");
+        assert.equal(seen[0]!.auth, "Bearer persisted-ct");
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("PATCH 401 (stale token) → fallback POST re-mints and re-persists", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      fs.mkdirSync(path.join(dir, "a2a_gateways"), { recursive: true });
+      const legacyStateFile = path.join(dir, "a2a_gateways", "k1.json");
+      const stateFile = path.join(dir, "a2a_gateways", "k1", "self-1.json");
+      fs.writeFileSync(legacyStateFile, JSON.stringify({ name: "self-1", callerToken: "stale-ct" }));
+      const original = globalThis.fetch;
+      const seen: Array<{ method: string; auth?: string }> = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          const method = init?.method || "GET";
+          seen.push({ method, auth: init?.headers?.authorization });
+          if (method === "PATCH" && init?.headers?.authorization === "Bearer stale-ct")
+            return makeResp({ error: "bad caller token" }, 401);
+          if (method === "PATCH") return makeResp({ status: "updated" }, 200); // re-minted token is valid
+          return makeResp({ status: "updated", caller_token: "re-minted-ct" }, 200);
+        }
+        if (u.endsWith("/.well-known/agent.json"))
+          return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}),
+          () => {},
+          () => {},
+        );
+        assert.isTrue(await gw.start("http://127.0.0.1:9911")); // PATCH 401 → POST re-mint
+        assert.isTrue(await gw.register("http://127.0.0.1:9911")); // steady-state: PATCH with the re-minted token
+        await gw.stop();
+        assert.deepEqual(
+          seen.map((c) => `${c.method}:${c.auth === `Bearer ${TOKEN}` ? "shared" : c.auth}`),
+          ["PATCH:Bearer stale-ct", "POST:shared", "PATCH:Bearer re-minted-ct"],
+        );
+        // Re-minted token hit the disk — the next restart skips POST.
+        assert.deepEqual(JSON.parse(fs.readFileSync(stateFile, "utf8")), {
+          name: "self-1",
+          callerToken: "re-minted-ct",
+        });
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("rejected caller_token (401, no re-mint) is cleared — overlay falls back to shared token", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      fs.mkdirSync(path.join(dir, "a2a_gateways"), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "a2a_gateways", "k1.json"),
+        JSON.stringify({ name: "self-1", callerToken: "dead-ct" }),
+      );
+      const original = globalThis.fetch;
+      const seen: Array<{ method: string; auth?: string }> = [];
+      let overlay: Record<string, any> = {};
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          seen.push({ method: init?.method || "GET", auth: init?.headers?.authorization });
+          if (init?.method === "PATCH") return makeResp({ error: "bad caller token" }, 401);
+          return makeResp({ status: "updated" }, 200); // old switchboard: no mint
+        }
+        if (u.endsWith("/.well-known/agent.json"))
+          return makeResp({ peers: [{ name: "pi-s2-9912", url: "/peer/pi-s2-9912/", healthy: true }] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}),
+          () => {},
+          (p) => (overlay = p),
+        );
+        assert.isTrue(await gw.start("http://127.0.0.1:9911")); // PATCH 401 → POST shared, no mint
+        assert.isTrue(await gw.register("http://127.0.0.1:9911")); // token still null → plain POST
+        // Dead token must not poison the overlay: gateway peers carry the shared token.
+        assert.equal(overlay["gw/k1/pi-s2-9912"]!.auth.token, TOKEN);
+        assert.deepEqual(
+          seen.map((c) => `${c.method}:${c.auth}`),
+          [
+            "PATCH:Bearer dead-ct",
+            "POST:Bearer " + TOKEN,
+            "POST:Bearer " + TOKEN, // no re-mint → stays POST
+          ],
+        );
+        await gw.stop();
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("PATCH 404 (entry deleted) → POST fallback re-registers in the same beat", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      fs.mkdirSync(path.join(dir, "a2a_gateways"), { recursive: true });
+      fs.writeFileSync(
+        path.join(dir, "a2a_gateways", "k1.json"),
+        JSON.stringify({ name: "self-1", callerToken: "old-ct" }),
+      );
+      const original = globalThis.fetch;
+      const seen: string[] = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          seen.push(init?.method || "GET");
+          if (init?.method === "PATCH") return makeResp({ error: "no such peer" }, 404);
+          return makeResp({ status: "registered", caller_token: "fresh-ct" }, 200);
+        }
+        if (u.endsWith("/.well-known/agent.json")) return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}),
+          () => {},
+          () => {},
+        );
+        assert.isTrue(await gw.start("http://127.0.0.1:9911"));
+        assert.deepEqual(seen, ["PATCH", "POST"]); // 404 fell through, POST re-registered
+        // The a2a_gateways dir was auto-created and the re-minted token persisted.
+        assert.deepEqual(JSON.parse(fs.readFileSync(path.join(dir, "a2a_gateways", "k1", "self-1.json"), "utf8")), {
+          name: "self-1",
+          callerToken: "fresh-ct",
+        });
+        await gw.stop();
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("corrupt or foreign-name state file is ignored — POST mints from scratch", async () => {
+      for (const content of ["not-json{", JSON.stringify({ name: "other", callerToken: "x" })]) {
+        const dir = makeTempDir("pi-a2a-state-");
+        fs.mkdirSync(path.join(dir, "a2a_gateways"), { recursive: true });
+        fs.writeFileSync(path.join(dir, "a2a_gateways", "k1.json"), content);
+        const original = globalThis.fetch;
+        const seen: string[] = [];
+        globalThis.fetch = (async (url: any, init?: any) => {
+          const u = String(url);
+          if (u.endsWith("/register")) {
+            seen.push(`${init?.method || "GET"}:${init?.headers?.authorization}`);
+            return makeResp({ status: "registered", caller_token: "minted-ct" }, 200);
+          }
+          if (u.endsWith("/.well-known/agent.json")) return makeResp({ peers: [] }, 200);
+          return makeResp({}, 404);
+        }) as any;
+        try {
+          const gw = new GatewayUpstream(
+            { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+            () => ({}),
+            () => {},
+            () => {},
+          );
+          assert.isTrue(await gw.start("http://127.0.0.1:9911"));
+          // Ignored state → bootstrap POST with the shared token.
+          assert.deepEqual(seen, [`POST:Bearer ${TOKEN}`]);
+          await gw.stop();
+        } finally {
+          globalThis.fetch = original as any;
+          fs.rmSync(dir, { recursive: true, force: true });
+        }
+      }
+    });
+
+    it("keeps caller tokens for concurrent peer names separate", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      const original = globalThis.fetch;
+      const seen: string[] = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register")) {
+          seen.push(`${init?.method}:${init?.headers?.authorization}`);
+          const name = JSON.parse(init?.body).name;
+          return makeResp({ status: "registered", caller_token: `ct-${name}` }, 200);
+        }
+        if (u.endsWith("/.well-known/agent.json")) return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const cfg = (name: string) => ({ url: GW, token: TOKEN, name, key: "k1", channel: false, piDir: dir });
+        assert.isTrue(await new GatewayUpstream(cfg("self-1"), () => ({}), () => {}, () => {}).register("http://127.0.0.1:9911"));
+        assert.isTrue(await new GatewayUpstream(cfg("self-2"), () => ({}), () => {}, () => {}).register("http://127.0.0.1:9912"));
+        assert.isTrue(await new GatewayUpstream(cfg("self-1"), () => ({}), () => {}, () => {}).register("http://127.0.0.1:9911"));
+        assert.deepEqual(seen, [
+          `POST:Bearer ${TOKEN}`,
+          `POST:Bearer ${TOKEN}`,
+          "PATCH:Bearer ct-self-1",
+        ]);
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("deregisters with its caller token", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      fs.mkdirSync(path.join(dir, "a2a_gateways"), { recursive: true });
+      fs.writeFileSync(path.join(dir, "a2a_gateways", "k1.json"), JSON.stringify({ name: "self-1", callerToken: "ct-self-1" }));
+      const original = globalThis.fetch;
+      let deleteAuth = "";
+      globalThis.fetch = (async (url: any, init?: any) => {
+        if (init?.method === "DELETE") deleteAuth = init.headers?.authorization;
+        if (String(url).endsWith("/.well-known/agent.json")) return makeResp({ peers: [] }, 200);
+        return makeResp({ status: "updated" }, 200);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}), () => {}, () => {},
+        );
+        assert.isTrue(await gw.start("http://127.0.0.1:9911"));
+        await gw.stop();
+        assert.equal(deleteAuth, "Bearer ct-self-1");
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("initial POST 409 (stale name) self-heals with a unique name", async () => {
+      const dir = makeTempDir("pi-a2a-state-");
+      const original = globalThis.fetch;
+      const posts: string[] = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const u = String(url);
+        if (u.endsWith("/register") && (init?.method === "POST" || !init?.method)) {
+          posts.push(JSON.parse(init?.body).name);
+          if (posts.length === 1) return makeResp({ error: "peer registered by another identity" }, 409);
+          return makeResp({ status: "registered", caller_token: "ct-fresh" }, 200);
+        }
+        if (u.endsWith("/.well-known/agent.json")) return makeResp({ peers: [] }, 200);
+        return makeResp({}, 404);
+      }) as any;
+      try {
+        const gw = new GatewayUpstream(
+          { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1", channel: false, piDir: dir },
+          () => ({}), () => {}, () => {},
+        );
+        assert.isTrue(await gw.register("http://127.0.0.1:9911"));
+        assert.lengthOf(posts, 2);
+        assert.notEqual(posts[1]!, posts[0]!);
+        await gw.stop();
+      } finally {
+        globalThis.fetch = original as any;
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+
+    it("fetches the directory after registering and emits the merged overlay", async () => {
+      const gw = new GatewayUpstream(
+        { url: GW, token: TOKEN, name: "self-1", heartbeatSec: 60, key: "k1" },
+        () => ({}),
+        () => {},
+        (peers) => (overlay = peers),
+      );
+      const ok = await gw.start("http://127.0.0.1:9911");
+      assert.isTrue(ok);
+      // Snapshot BEFORE stop — stop() clears the overlay by design.
+      const snapshot = { ...overlay };
+      await gw.stop();
+      const dir = calls.find((c) => c.url.endsWith("/.well-known/agent.json"))!;
+      assert.equal(dir.method, "GET");
+      assert.equal(dir.auth, `Bearer ${TOKEN}`);
+      assert.deepEqual(Object.keys(snapshot), ["gw/k1/pi-s2-9912"]); // self + dead filtered
+      assert.equal(snapshot["gw/k1/pi-s2-9912"]!.url, "http://127.0.0.1:9920/peer/pi-s2-9912/");
+      assert.deepEqual(overlay, {}); // cleared on stop
+    });
+
+    it("clears the overlay on stop and on a failed start", async () => {
+      const gw = new GatewayUpstream(
+        { url: GW, token: TOKEN, name: "self-1" },
+        () => ({}),
+        () => {},
+        (peers) => (overlay = peers),
+      );
+      assert.isTrue(await gw.start("http://127.0.0.1:9911"));
+      assert.isNotEmpty(overlay);
+      await gw.stop();
+      assert.deepEqual(overlay, {});
+
+      // Failed start (gateway refusing registrations) must clear stale state.
+      globalThis.fetch = (async () => makeResp({ error: "unauthorized" }, 401)) as any;
+      assert.isFalse(await gw.start("http://127.0.0.1:9911"));
+      assert.deepEqual(overlay, {});
+    });
+  });
+
+  describe("outbound overlay routing", () => {
+    it("a2a_call('gw/…') works when the gateway is on a LAN/private IP (SSRF guard must not fire)", async () => {
+      const lanPeers = mergeGatewayPeers({
+        gatewayUrl: "http://192.168.1.50:9920",
+        token: TOKEN,
+        selfName: "s",
+        selfUrl: "http://127.0.0.1:9910",
+        entries: [{ name: "p", url: "/peer/p/", healthy: true }],
+        timeoutMs: 120_000,
+        key: "k1",
+      });
+      setGatewayPeers(lanPeers);
+      const of = globalThis.fetch;
+      const seen: string[] = [];
+      globalThis.fetch = (async (u: any) => {
+        seen.push(String(u));
+        return makeResp(
+          { jsonrpc: "2.0", id: 1, result: { message: { role: "ROLE_AGENT", parts: [{ text: "lan ok" }] } } },
+          200,
+        );
+      }) as any;
+      const piDir2 = makeTempDir("pi-a2a-lan-");
+      const out = await a2aCall({ cfg: { ...DEFAULTS(), discovery: { ...(DEFAULTS() as any).discovery, gateway: { url: "http://192.168.1.50:9920", token: TOKEN } } } as any, piDir: piDir2, agent: "gw/k1/p", message: "hi" });
+      globalThis.fetch = of as any;
+      assert.include(out, "lan ok");
+      assert.equal(seen.filter((u) => u.startsWith("http://192.168.1.50:9920/peer/p")).length, 1);
+    });
+
+    let originalFetch: typeof globalThis.fetch;
+    let piDir: string;
+
+    beforeEach(() => {
+      originalFetch = globalThis.fetch;
+      piDir = makeTempDir("pi-a2a-gateway-");
+      metrics.reset();
+    });
+    afterEach(() => {
+      globalThis.fetch = originalFetch as any;
+      setGatewayPeers({});
+    });
+
+    it("overlay slices are independent per gateway key (stop one ≠ clear all)", () => {
+      updateGatewayPeers("work", { "gw/work/a": { url: "http://w/a", auth: { type: "none" }, timeout: 1000, capabilities: [] } });
+      updateGatewayPeers("lab", { "gw/lab/b": { url: "http://l/b", auth: { type: "none" }, timeout: 1000, capabilities: [] } });
+      assert.deepEqual(Object.keys(getGatewayPeers()).sort(), ["gw/lab/b", "gw/work/a"]);
+      // Clearing ONE gateway's slice must not touch the other's peers.
+      updateGatewayPeers("lab", {});
+      assert.deepEqual(Object.keys(getGatewayPeers()), ["gw/work/a"], "other gateway's overlay survives");
+      updateGatewayPeers("work", {});
+      assert.deepEqual(getGatewayPeers(), {}, "all cleared");
+    });
+
+    it("resolvePeer routes gw/<key>/<name> via the overlay; static peers win on collision", () => {
+      setGatewayPeers(
+        merge([{ name: "pi-s2-9912", url: "/peer/pi-s2-9912/", healthy: true }]),
+      );
+      const cfg = DEFAULTS();
+      const p = resolvePeer(cfg, "gw/k1/pi-s2-9912");
+      assert.equal(p?.url, "http://127.0.0.1:9920/peer/pi-s2-9912/");
+      assert.equal(p?.auth.type, "bearer");
+      assert.equal(p?.auth.token, TOKEN);
+
+      cfg.peers["gw/static"] = {
+        url: "http://static",
+        auth: { type: "none" },
+        timeout: 1000,
+        capabilities: [],
+      };
+      setGatewayPeers({ "gw/static": { url: "http://overlay", auth: { type: "none" }, timeout: 1000, capabilities: [] } });
+      assert.equal(resolvePeer(cfg, "gw/static")?.url, "http://static");
+      assert.isNull(resolvePeer(cfg, "gw/unknown"));
+    });
+
+    it("a2a_call('gw/…') posts JSON-RPC straight to the proxy URL with the gateway token", async () => {
+      setGatewayPeers(
+        merge([{ name: "pi-s2-9912", url: "/peer/pi-s2-9912/", healthy: true }]),
+      );
+      const requests: Array<{ method: string; url: string; auth?: string }> = [];
+      globalThis.fetch = (async (url: any, init?: any) => {
+        const h: Record<string, string> = Object.fromEntries(
+          Object.entries(init?.headers ?? {}).map(([k, v]) => [k.toLowerCase(), String(v)]),
+        );
+        requests.push({
+          method: init?.method || "GET",
+          url: String(url),
+          auth: h["authorization"],
+        });
+        return makeResp(
+          { jsonrpc: "2.0", id: 1, result: { message: { role: "ROLE_AGENT", parts: [{ text: "proxied reply" }] } } },
+          200,
+        );
+      }) as any;
+
+      const out = await a2aCall({ cfg: DEFAULTS(), piDir, agent: "gw/k1/pi-s2-9912", message: "hi" });
+
+      // Exactly one request: the JSON-RPC POST pinned to the proxy URL — no
+      // card GET (a proxied card would advertise the peer's direct URL and
+      // bypass the gateway).
+      assert.equal(requests.length, 1);
+      assert.equal(requests[0]!.method, "POST");
+      assert.equal(requests[0]!.url, "http://127.0.0.1:9920/peer/pi-s2-9912");
+      assert.equal(requests[0]!.auth, `Bearer ${TOKEN}`);
+      assert.include(out, "proxied reply");
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Reverse channel client
+// ---------------------------------------------------------------------------
+
+import { ChannelClient } from "../lib/gateway";
+import * as http from "node:http";
+
+describe("reverse channel client", () => {
+  it("dispatches request envelopes to the local server and posts the response", async () => {
+    // local A2A "server" (dispatch target)
+    const localHits: Array<{ method: string; path: string; body?: string }> = [];
+    const local = http.createServer((rq, rs) => {
+      let body = "";
+      rq.on("data", (c) => (body += c));
+      rq.on("end", () => {
+        localHits.push({ method: rq.method!, path: rq.url!, body });
+        rs.writeHead(200, { "content-type": "application/json" });
+        rs.end(JSON.stringify({ echoed: true }));
+      });
+    });
+    await new Promise<void>((r) => local.listen(0, "127.0.0.1", r));
+    const localPort = (local.address() as any).port;
+
+    // fake gateway: /channel SSE that pushes one request, /channel/response records
+    const posted: any[] = [];
+    const gw = http.createServer((rq, rs) => {
+      if (rq.url!.split("?")[0] === "/channel") {
+        rs.writeHead(200, { "content-type": "text/event-stream" });
+        const env = {
+          id: 42,
+          method: "POST",
+          path: "/",
+          headers: { "content-type": "application/json" },
+          body_b64: Buffer.from('{"ping":1}').toString("base64"),
+        };
+        rs.write(`event: request\ndata: ${JSON.stringify(env)}\n\n`);
+        return;
+      }
+      if (rq.url!.split("?")[0].startsWith("/channel/response/")) {
+        let body = "";
+        rq.on("data", (c) => (body += c));
+        rq.on("end", () => {
+          posted.push(JSON.parse(body));
+          rs.writeHead(200); rs.end("ok");
+        });
+        return;
+      }
+      rs.writeHead(404); rs.end();
+    });
+    await new Promise<void>((r) => gw.listen(0, "127.0.0.1", r));
+    const gwPort = (gw.address() as any).port;
+
+    const epoch = { value: 0 };
+    const cc = new ChannelClient(
+      { url: `http://127.0.0.1:${gwPort}`, token: TOKEN },
+      `http://127.0.0.1:${localPort}`,
+      () => {},
+      epoch,
+    );
+    await cc.start();
+    // give dispatch a beat
+    await new Promise((r) => setTimeout(r, 300));
+    cc.stop();
+
+    assert.equal(localHits.length, 1);
+    assert.equal(localHits[0]!.method, "POST");
+    assert.equal(localHits[0]!.body, '{"ping":1}');
+    assert.equal(posted.length, 1);
+    assert.equal(posted[0]!.id, 42);
+    assert.equal(posted[0]!.status, 200);
+    assert.deepEqual(JSON.parse(Buffer.from(posted[0]!.body_b64, "base64").toString()), { echoed: true });
+
+    local.close(); gw.close();
+  });
+
+  it("stop() prevents reconnect resurrection (epoch guard)", async () => {
+    // gateway that accepts /channel then immediately closes the stream
+    const gw = http.createServer((rq, rs) => {
+      if (rq.url!.split("?")[0] === "/channel") {
+        rs.writeHead(200, { "content-type": "text/event-stream" });
+        rs.end(); // immediate close → client would reconnect
+        return;
+      }
+      rs.writeHead(404); rs.end();
+    });
+    await new Promise<void>((r) => gw.listen(0, "127.0.0.1", r));
+    const port = (gw.address() as any).port;
+    let opens = 0;
+    gw.on("request", () => { if (opens >= 0) opens += 1; });
+
+    const epoch = { value: 0 };
+    const cc = new ChannelClient(
+      { url: `http://127.0.0.1:${port}`, token: TOKEN },
+      "http://127.0.0.1:1",
+      () => {},
+      epoch,
+    );
+    const p = cc.start();
+    await new Promise((r) => setTimeout(r, 150));
+    cc.stop();
+    await p;
+    const after = opens;
+    await new Promise((r) => setTimeout(r, 1200));
+    assert.equal(opens, after); // no reconnection attempts after stop
+    gw.close();
+  });
+
+  it("routes the channel-open lifecycle line to onStatus (not raw log)", async () => {
+    const gw = http.createServer((rq, rs) => {
+      if (rq.url!.split("?")[0] === "/channel") {
+        rs.writeHead(200, { "content-type": "text/event-stream" });
+        rs.flushHeaders(); // send headers now; hold the stream open
+        return; // hold the stream open
+      }
+      rs.writeHead(404); rs.end();
+    });
+    await new Promise<void>((r) => gw.listen(0, "127.0.0.1", r));
+    const gwPort = (gw.address() as any).port;
+    const epoch = { value: 0 };
+    const statuses: string[] = [];
+    const logs: string[] = [];
+    const cc = new ChannelClient(
+      { url: `http://127.0.0.1:${gwPort}`, token: TOKEN, name: "pi-s2-9915" },
+      "http://127.0.0.1:1",
+      (m) => logs.push(String(m)),
+      epoch,
+      (m) => statuses.push(String(m)),
+    );
+    await cc.start();
+    await new Promise((r) => setTimeout(r, 150));
+    cc.stop();
+    assert.equal(statuses.length, 1, "channel open surfaced as status");
+    assert.match(statuses[0]!, /channel open: \S+ as pi-s2-9915 \(firewall-safe receive\)/);
+    assert.ok(!logs.some((l) => l.includes("channel open")), "not duplicated in raw log");
+    gw.closeAllConnections?.();
+    gw.close();
+  });
+});
+
+describe("reverse channel hardening", () => {
+  it("drops envelopes with traversal paths", async () => {
+    const hits: string[] = [];
+    const local = http.createServer((rq, rs) => {
+      hits.push(rq.url!);
+      rs.writeHead(200); rs.end("ok");
+    });
+    await new Promise<void>((r) => local.listen(0, "127.0.0.1", r));
+    const port = (local.address() as any).port;
+    const gw = http.createServer((rq, rs) => {
+      if (rq.url!.split("?")[0] === "/channel") {
+        rs.writeHead(200, { "content-type": "text/event-stream" });
+        for (const path of ["../admin", "/../../etc/passwd", "/ok"]) {
+          const env = { id: 7, method: "GET", path, headers: {}, body_b64: "" };
+          rs.write(`event: request\ndata: ${JSON.stringify(env)}\n\n`);
+        }
+        return;
+      }
+      rs.writeHead(404); rs.end();
+    });
+    await new Promise<void>((r) => gw.listen(0, "127.0.0.1", r));
+    const gwPort = (gw.address() as any).port;
+    const epoch = { value: 0 };
+    const cc = new ChannelClient(
+      { url: `http://127.0.0.1:${gwPort}`, token: TOKEN },
+      `http://127.0.0.1:${port}`,
+      () => {},
+      epoch,
+    );
+    await cc.start();
+    await new Promise((r) => setTimeout(r, 300));
+    cc.stop();
+    assert.deepEqual(hits, ["/ok"]); // traversal paths never reached local
+    local.close(); gw.close();
+  });
+
+  it("drops oversized envelopes without decoding", async () => {
+    const hits: string[] = [];
+    const local = http.createServer((rq, rs) => {
+      hits.push(rq.url!);
+      rs.writeHead(200); rs.end("ok");
+    });
+    await new Promise<void>((r) => local.listen(0, "127.0.0.1", r));
+    const port = (local.address() as any).port;
+    const gw = http.createServer((rq, rs) => {
+      if (rq.url!.split("?")[0] === "/channel") {
+        rs.writeHead(200, { "content-type": "text/event-stream" });
+        const env = { id: 8, method: "POST", path: "/", headers: {}, body_b64: "A".repeat(6_000_000) };
+        rs.write(`event: request\ndata: ${JSON.stringify(env)}\n\n`);
+        return;
+      }
+      rs.writeHead(404); rs.end();
+    });
+    await new Promise<void>((r) => gw.listen(0, "127.0.0.1", r));
+    const gwPort = (gw.address() as any).port;
+    const epoch = { value: 0 };
+    const cc = new ChannelClient(
+      { url: `http://127.0.0.1:${gwPort}`, token: TOKEN },
+      `http://127.0.0.1:${port}`,
+      () => {},
+      epoch,
+    );
+    await cc.start();
+    await new Promise((r) => setTimeout(r, 300));
+    cc.stop();
+    assert.deepEqual(hits, []); // oversized never dispatched
+    local.close(); gw.close();
+  });
+
+  it("parses CRLF-delimited SSE frames with comments", async () => {
+    const hits: string[] = [];
+    const local = http.createServer((rq, rs) => {
+      hits.push(rq.url!);
+      rs.writeHead(200); rs.end("ok");
+    });
+    await new Promise<void>((r) => local.listen(0, "127.0.0.1", r));
+    const port = (local.address() as any).port;
+    const gw = http.createServer((rq, rs) => {
+      if (rq.url!.split("?")[0] === "/channel") {
+        rs.writeHead(200, { "content-type": "text/event-stream" });
+        rs.write(": comment line\r\n");
+        rs.write(`event: request\r\ndata: ${JSON.stringify({ id: 9, method: "GET", path: "/crlf", headers: {}, body_b64: "" })}\r\n\r\n`);
+        return;
+      }
+      rs.writeHead(404); rs.end();
+    });
+    await new Promise<void>((r) => gw.listen(0, "127.0.0.1", r));
+    const gwPort = (gw.address() as any).port;
+    const epoch = { value: 0 };
+    const cc = new ChannelClient(
+      { url: `http://127.0.0.1:${gwPort}`, token: TOKEN },
+      `http://127.0.0.1:${port}`,
+      () => {},
+      epoch,
+    );
+    await cc.start();
+    await new Promise((r) => setTimeout(r, 300));
+    cc.stop();
+    assert.deepEqual(hits, ["/crlf"]);
+    local.close(); gw.close();
+  });
+});
+
+describe("gateway diagnostics routing", () => {
+  it("register failure goes to the error log, never the status surface", async () => {
+    const statuses: string[] = [];
+    const errors: string[] = [];
+    const gw = new GatewayUpstream(
+      { url: "http://127.0.0.1:1", token: TOKEN, name: "self-1" }, // port 1: fetch rejects synchronously (bad-port blocklist)
+      () => ({}),
+      (m) => errors.push(String(m)),
+      () => {},
+      (m) => statuses.push(String(m)),
+    );
+    assert.isFalse(await gw.start("http://127.0.0.1:9911"));
+    assert.ok(errors.some((e) => e.includes("register failed")), "failure surfaced as error");
+    assert.equal(statuses.length, 0, "no status line for a failed registration");
+    await gw.stop();
+  });
+
+  it("failed start still arms the retry heartbeat (self-heal without restart)", async () => {
+    const gw = new GatewayUpstream(
+      { url: "http://127.0.0.1:1", token: TOKEN, name: "self-1", channel: false }, // fetch rejects (bad-port blocklist — no connect attempted)
+      () => ({}),
+      () => {},
+      () => {},
+    );
+    try {
+      assert.isFalse(await gw.start("http://127.0.0.1:9911"));
+      assert.ok((gw as unknown as { timer: unknown }).timer, "heartbeat armed despite failed start");
+    } finally {
+      await gw.stop();
+    }
+    assert.equal((gw as unknown as { timer: unknown }).timer, null, "stop() clears the retry heartbeat");
+  });
+
+  it("network-error register logs carry the errno cause", async () => {
+    const errors: string[] = [];
+    const gw = new GatewayUpstream(
+      { url: "http://127.0.0.1:1", token: TOKEN, name: "self-1", channel: false },
+      () => ({}),
+      (m) => errors.push(String(m)),
+      () => {},
+    );
+    assert.isFalse(await gw.start("http://127.0.0.1:9911"));
+    assert.ok(
+      errors.some((e) => /register failed: network error \((.+?)\)/.test(e)),
+      `cause appended to network error: ${errors.join(" | ")}`,
+    );
+    await gw.stop();
+  });
+
+  it("identical register failures log once (change-dedup), like directory refresh", async () => {
+    const errors: string[] = [];
+    const gw = new GatewayUpstream(
+      { url: "http://127.0.0.1:1", token: TOKEN, name: "self-1", channel: false },
+      () => ({}),
+      (m) => errors.push(String(m)),
+      () => {},
+    );
+    await gw.register("http://127.0.0.1:9911");
+    await gw.register("http://127.0.0.1:9911");
+    assert.lengthOf(
+      errors.filter((e) => e.includes("register failed")),
+      1,
+      "repeated identical failure must not repeat per beat",
+    );
+    await gw.stop();
+  });
+
+  it("late self-heal beat registers, notifies onRegistered once, logs no failures", async () => {
+    const errors: string[] = [];
+    const registered: Array<{ name: string; state: string }> = [];
+    const srv = http.createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        res.setHeader("content-type", "application/json");
+        res.end(JSON.stringify({ state: "accepted" }));
+      });
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", r));
+    const port = (srv.address() as { port: number }).port;
+    await new Promise<void>((r) => srv.close(() => r())); // gateway down at session start
+    const gw = new GatewayUpstream(
+      { url: `http://127.0.0.1:${port}`, token: TOKEN, name: "late-1", channel: false },
+      () => ({ name: "late-1" }),
+      (m) => errors.push(String(m)),
+      () => {},
+      undefined,
+      (name, state) => registered.push({ name, state }),
+    );
+    const beat = (gw as unknown as { beat: (u: string) => Promise<void> }).beat;
+    try {
+      assert.isFalse(await gw.start(`http://127.0.0.1:${port}`));
+      await new Promise<void>((r) => srv.listen(port, "127.0.0.1", r)); // gateway up BEFORE the beat (no connect/bind race)
+      await beat.call(gw, `http://127.0.0.1:${port}`);
+      assert.deepEqual(registered, [{ name: "late-1", state: "accepted" }],
+        "first successful beat announces the registration");
+      await beat.call(gw, `http://127.0.0.1:${port}`);
+      assert.lengthOf(registered, 1, "onRegistered fires once (transition only)");
+      assert.lengthOf(
+        errors.filter((e) => e.includes("register failed")),
+        1,
+        "failed start logged once; recovered beats log nothing",
+      );
+    } finally {
+      await gw.stop();
+      await new Promise<void>((r) => srv.close(() => r()));
+    }
+  });
+
+  it("EHOSTUNREACH on darwin hints Local Network privacy, once per cause", async () => {
+    const realPlatform = process.platform;
+    const originalFetch = globalThis.fetch;
+    const errors: string[] = [];
+    let gw1: GatewayUpstream | null = null;
+    let gw2: GatewayUpstream | null = null;
+    try {
+      globalThis.fetch = (async () => {
+        throw Object.assign(new TypeError("fetch failed"), { cause: { code: "EHOSTUNREACH" } });
+      }) as any;
+      Object.defineProperty(process, "platform", { value: "darwin", configurable: true });
+
+      // Phase 1 — darwin: hint appended, dedup keeps it to one line.
+      gw1 = new GatewayUpstream(
+        { url: "http://192.168.1.50:9920", token: TOKEN, name: "self-1", channel: false },
+        () => ({}),
+        (m) => errors.push(String(m)),
+        () => {},
+      );
+      assert.isFalse(await gw1.register("http://127.0.0.1:9911"));
+      assert.isFalse(await gw1.register("http://127.0.0.1:9911"));
+      const failed = errors.filter((e) => e.includes("register failed"));
+      assert.lengthOf(failed, 1, "repeated identical failure must not repeat per beat");
+      assert.include(failed[0]!, "network error (EHOSTUNREACH)");
+      assert.include(failed[0]!, "Local Network");
+      assert.include(failed[0]!, "Privacy & Security");
+      assert.notInclude(failed[0]!, "\n", "hint stays on a single line");
+      assert.isBelow(failed[0]!.length, 320, "line stays length-capped");
+
+      // Phase 2 — non-darwin: EHOSTUNREACH is genuine routing, no hint.
+      errors.length = 0;
+      Object.defineProperty(process, "platform", { value: "linux", configurable: true });
+      gw2 = new GatewayUpstream(
+        { url: "http://192.168.1.50:9920", token: TOKEN, name: "self-2", channel: false },
+        () => ({}),
+        (m) => errors.push(String(m)),
+        () => {},
+      );
+      await gw2.register("http://127.0.0.1:9911");
+      assert.ok(
+        errors.some((e) => e.includes("EHOSTUNREACH") && !e.includes("Local Network")),
+        `no darwin hint on linux: ${errors.join(" | ")}`,
+      );
+    } finally {
+      if (gw1) await gw1.stop();
+      if (gw2) await gw2.stop();
+      Object.defineProperty(process, "platform", { value: realPlatform, configurable: true });
+      globalThis.fetch = originalFetch as any;
+    }
+  });
+});

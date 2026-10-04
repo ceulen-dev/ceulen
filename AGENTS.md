@@ -438,6 +438,61 @@ Per-tool kill-switch: all 11 tools register `defaultActive` from
 live. Standalone `@bacnh85/pi-web` must be removed when this module is enabled
 (the conflict guard refuses the duplicate `web_*` names).
 
+### A2A module (a2a)
+
+Ported from `@bacnh85/pi-a2a` 0.7.13 (see `extensions/modules/a2a/`): the A2A
+Protocol v1.0 bidirectional peer — 7 outbound tools (`a2a_call` with
+`async_dispatch`/`returnImmediately`, `a2a_status`, `a2a_discover`, `a2a_list`,
+`a2a_history`, `a2a_orchestrate` fan-out, `a2a_peers`), 8 commands
+(`/a2a-discover`, `/a2a-agents`, `/a2a-send`, `/a2a-broadcast`, `/a2a-status`,
+`/a2a-server`, `/a2a-peers`, `/a2a-help`), the opt-in inbound server
+(isolated child sessions via `createAgentSession` + `bindExtensions`, child
+transcripts at `<agentDir>/a2a_sessions/`, audit log, anti-loop, per-peer
+tokens, asserted X-A2A-Identity), and discovery (local file registry, mDNS,
+a2a-switchboard gateways incl. PATCH heartbeats). `/a2a-status` also prints
+the config summary (headless disclosure, munin precedent).
+
+**`/a2a-config` is DROPPED** — the central `/config` panel owns A2A settings
+(**Tasks** tab, sections `A2A` 📡 + `A2A peers & discovery`):
+server/identity/UI/discovery rows, per-peer URL rows and per-gateway blocks
+(masked tokens) with add/remove ACTION rows driven through the panel kernel's
+inline prompt (chained prompts verified by bridge.test.ts). Save reuses
+upstream's pure `buildA2ASettingsPatch` + `writeSettingsA2A` (env-sourced
+secrets are never copied to disk unless their exact row was edited; the write
+always targets the GLOBAL agent-dir settings.json — never repo-controlled
+files), applies live via `setConfigOverrides`, and restarts a running inbound
+server through the module bridge (`a2aServerRunning`/`restartA2AServer`
+exports, test seam `__setRestartBridgeForTests`). The save gate is diff-based
+(action rows mutate structure without editing a row key).
+
+**TWO config deviations from upstream** (both web-module precedents):
+(1) the `.env.local` cwd→root walk is DELETED — `loadEnv` reads process.env
+only, since the bundle's trust-gated `env.ts` ingestion IS the env chain
+(untrusted repo `.env` files never load at all — stronger than upstream's
+key-strip); (2) the project `.pi/settings.json` is read ONLY when the project
+is trusted (`isProjectTrusted`), and `sanitizeRepoA2ASettings` still strips
+security-relevant keys from it even when trusted — server.enabled/host/
+tokens/gateway/limits/transcript-retention remain global-only.
+
+**Renames per the conflict rules**: message-renderer customType + status key
+`a2a-inbound` → `ceulen-a2a-inbound` (data paths `<agentDir>/a2a_registry| 
+a2a_sessions|a2a_audit.jsonl|a2a_gateways` and the `a2a.*` settings key +
+`A2A_*` env contract stay unchanged). The `a2a/dispatch` session custom entry
+is data, not a renderer — unchanged.
+
+**Dependencies**: ZERO new runtime deps. Upstream's optional `bonjour-service`
+(mDNS, off by default, dynamic-imported, degrades to the file registry) is
+VENDORED under `extensions/modules/a2a/vendor/vendored_deps/` — flat layout,
+NEVER a `node_modules` path component (npm pack and the repo `.gitignore`
+exclude that name at any depth): bonjour-service 1.4.4 dist + multicast-dns
++ dns-packet + @leichtgewicht/ip-codec + fast-deep-equal(es6) + thunky, all
+pure JS, `vendor/package.json` = `{"type":"commonjs"}` (empty-namespace
+gotcha), ~5 bare requires localized to relative paths (`ponytail:` markers),
+loaded via lazy `createRequire`. Layout guarded by vendor.test.ts.
+
+Standalone `@bacnh85/pi-a2a` must be removed when this module is enabled
+(the conflict guard refuses the duplicate `a2a_*` tool names).
+
 ### Todo module (todo)
 
 Ported from OMP's phased task tracking (see

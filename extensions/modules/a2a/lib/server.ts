@@ -1,0 +1,1436 @@
+/**
+ * A2A inbound server — exposes Pi as an A2A-discoverable agent.
+ *
+ * Pi has no platform-adapter API (unlike Hermes' ctx.register_platform), so
+ * inbound tasks each spawn an ISOLATED agent session via createAgentSession()
+ * (the same proven path pi-subagent uses), run to completion, capture the
+ * reply, and return it as the task result. This is "an agent invocation in
+ * your repo", not "the live TUI session" — the correct, honest boundary for a
+ * coding agent.
+ *
+ * Transport: node:http (stdlib). Security: localhost-default bind, token-gated
+ * remote, outbound redaction, inbound injection filtering, audit log, anti-loop.
+ *
+ * Enabled only when `a2a.server.enabled` is true (default false).
+ */
+
+import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { hostname } from "node:os";
+import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import {
+  PROTOCOL_VERSION,
+  PI_SESSION_EXTENSION_URI,
+  STATE_CANCELED,
+  STATE_COMPLETED,
+  STATE_FAILED,
+  STATE_INPUT_REQUIRED,
+  STATE_REJECTED,
+  STATE_WORKING,
+  buildAgentCard,
+  buildTask,
+  extractText,
+  artifactUpdateEvent,
+  jsonrpcError,
+  jsonrpcResult,
+  newContextId,
+  newTaskId,
+  normalizeRole,
+  sendTaskResponse,
+  statusUpdateEvent,
+  TERMINAL_STATES,
+  uuid,
+  type AgentCard,
+  type AgentSkill,
+  type Message,
+  type Task,
+} from "./protocol";
+import type { A2AConfig } from "./config";
+import { setGatewayRegistrationName, updateGatewayPeers, cleanHostName } from "./config";
+import {
+  AntiLoop,
+  audit,
+  authenticateInfo,
+  IDENTITY_HEADER,
+  isTrustedPeer,
+  LOOPBACK,
+  localhostOnly,
+  maxPingpongTurns,
+  redactOutbound,
+  resolveBindHost,
+  transportName,
+  wrapInbound,
+  type InboundFraming,
+} from "./security";
+import { metrics } from "./client";
+import { childTranscriptDir, sweepChildTranscripts } from "./persistence";
+import { heartbeat, register, unregister, type SessionDescriptor } from "./registry";
+import { startBroadcast, startDiscovery, txtRecord, mdnsPeerKey, type MdnsHandle, type MdnsPeer } from "./mdns";
+import type { InboundActivity } from "./activity";
+import { preview } from "./activity";
+
+// ---------------------------------------------------------------------------
+// Task store (in-memory, bounded — evicts DONE tasks only, never running ones)
+// ---------------------------------------------------------------------------
+
+const MAX_TASKS = 500;
+
+interface StoredTask {
+  task: Task;
+  controller?: AbortController;
+  done: boolean;
+  /** Set by tasks/cancel so the catch path classifies it as CANCELED, not timeout-FAILED. */
+  userCanceled?: boolean;
+  /** Owning authenticated identity (per-identity ownership, #10). */
+  identity: string;
+  subscribeWatchers: Array<(t: Task) => void>;
+}
+
+class TaskStore {
+  private tasks = new Map<string, StoredTask>();
+  private order: string[] = [];
+
+  get(id: string): StoredTask | undefined {
+    return this.tasks.get(id);
+  }
+
+  add(id: string, st: StoredTask): void {
+    this.tasks.set(id, st);
+    this.order.push(id);
+    // Evict oldest DONE tasks only. A running task (done=false) must never be
+    // evicted or store.get(id)! would throw mid-execution. Guard against an
+    // all-running pathological case with a hard cap.
+    let guard = 0;
+    while (this.order.length > MAX_TASKS && guard++ < MAX_TASKS * 2) {
+      const old = this.order[0]!;
+      const candidate = this.tasks.get(old);
+      if (candidate && !candidate.done) {
+        // Running — move to the back so it isn't re-examined every iteration.
+        this.order.push(this.order.shift()!);
+        continue;
+      }
+      this.order.shift();
+      this.tasks.delete(old);
+    }
+  }
+
+  list(): Task[] {
+    return this.order.map((id) => this.tasks.get(id)?.task).filter((t): t is Task => !!t);
+  }
+
+  update(id: string, patch: (t: Task) => void): StoredTask | undefined {
+    const st = this.tasks.get(id);
+    if (!st) return undefined;
+    patch(st.task);
+    st.task.status.timestamp = new Date().toISOString();
+    for (const w of st.subscribeWatchers) {
+      try {
+        w(st.task);
+      } catch {
+        /* watcher best-effort */
+      }
+    }
+    return st;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Non-blocking send detection (A2A v1.0 §3.2.2 SendMessageConfiguration)
+// ---------------------------------------------------------------------------
+
+/** True when the caller asked for an immediate in-progress Task ack instead
+ *  of waiting for the terminal state (submit-and-poll). Accepts the
+ *  snake_case spelling some early clients send. */
+function wantsImmediateReturn(params: any): boolean {
+  const cfg = params?.configuration;
+  if (!cfg || typeof cfg !== "object") return false;
+  return cfg.returnImmediately === true || cfg.return_immediately === true;
+}
+
+// ---------------------------------------------------------------------------
+// Rate limiter (sliding window per identity; prunes stale entries)
+// ---------------------------------------------------------------------------
+
+class RateLimiter {
+  private hits = new Map<string, number[]>();
+  private sweepCounter = 0;
+  private readonly sweepEvery = 64; // periodic prune of stale keys
+  private readonly maxKeys = 10000;
+  constructor(private perMin: number) {}
+
+  check(identity: string): boolean {
+    const now = Date.now();
+    const win = (this.hits.get(identity) ?? []).filter((t) => now - t < 60000);
+    if (win.length === 0) {
+      this.hits.delete(identity);
+    } else {
+      this.hits.set(identity, win);
+    }
+    // Periodic sweep of stale entries so one-off identities don't accumulate.
+    if (++this.sweepCounter >= this.sweepEvery) {
+      this.sweepCounter = 0;
+      for (const [k, v] of this.hits) {
+        if (v.every((t) => now - t >= 60000)) this.hits.delete(k);
+      }
+    }
+    // Hard cap to bound memory under adversarial unique-identity flooding.
+    if (this.hits.size > this.maxKeys) {
+      const firstKey = this.hits.keys().next().value;
+      if (firstKey) this.hits.delete(firstKey);
+    }
+    if (win.length >= this.perMin) return false;
+    win.push(now);
+    this.hits.set(identity, win);
+    return true;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Session runner — the injectable boundary for testing
+// ---------------------------------------------------------------------------
+
+/**
+ * Contract: a normal return asserts the turn finished (or needs input) —
+ * in particular, that the final assistant message carried usable text. A
+ * turn that ends on a length stop with no assistant text produced no usable
+ * reply and MUST throw, so messageSend maps the task to FAILED instead of
+ * completing it with the previous turn's stale text. If the abort signal
+ * fired first, the runner MUST likewise throw — messageSend routes any
+ * normal return after an abort through the failure classification anyway,
+ * and an honest throw carries the real error (timeout vs cancel).
+ */
+export interface SessionRunner {
+  (opts: {
+    message: string;
+    /** A2A task id of this dispatch — the runner keys the persisted child
+     *  session transcript by it (fleet task #252). Absent in tests. */
+    taskId?: string;
+    signal: AbortSignal;
+    onProgress?: (assistantTextDelta: string) => void;
+  }): Promise<{
+    reply: string;
+    inputRequired: boolean;
+    /** Path of the persisted child transcript, when the runner wrote one
+     *  (fleet task #252). Audited at completion AND failure so a dead
+     *  worker's step history is discoverable from the audit log alone. */
+    transcriptPath?: string;
+    /** Assistant turns + tool executions the runner observed — with the
+     *  transcript, answers "how far did it get" in a post-mortem (#256). */
+    stepCount?: number;
+  }>;
+}
+
+// ---------------------------------------------------------------------------
+// A2A server
+// ---------------------------------------------------------------------------
+
+export class A2AServer {
+  private http: Server | null = null;
+  private boundPort: number | null = null;
+  /** True once the listening socket bound a loopback host — the gate for
+   *  honoring X-A2A-Identity asserted names (fleet task #322). Defaults
+   *  false: until the server knows it bound loopback, no header trust. */
+  private loopbackBind = false;
+  private store = new TaskStore();
+  /** Per-session minted inbound tokens (peer name → agw-* token) registered
+   *  as upstream_token with gateways. Kept OUT of cfg.server.peerTokens. */
+  private mintedInboundTokens: Record<string, string> = {};
+  private antiLoop: AntiLoop;
+  private limiter: RateLimiter;
+  private cfg: A2AConfig;
+  private ctx: ExtensionContext | undefined;
+  private cwd: string;
+  private piDir: string;
+  private runner: SessionRunner | undefined;
+  // Two admission pools, both sized cfg.server.maxConcurrent: `running`
+  // counts blocking message/send + message/stream tasks, `detachedRunning`
+  // counts detached (returnImmediately) runs. Detached tasks hold their slot
+  // up to asyncTimeoutSec (default 24h) — a shared counter let 3 hung
+  // detached dispatches 503 ALL blocking senders (self-inflicted outage).
+  private running = 0;
+  private detachedRunning = 0;
+  // Discovery state (0.2.0)
+  private descriptor: SessionDescriptor | null = null;
+  private heartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  private mdnsBroadcast: MdnsHandle | null = null;
+  private mdnsDiscovery: MdnsHandle | null = null;
+  private mdnsPeers: MdnsPeer[] = [];
+  /** One GatewayUpstream per configured gateway (0.6.0), keyed by gateway key. */
+  private gatewayUpstreams = new Map<string, import("./gateway.js").GatewayUpstream>();
+  private pid = process.pid;
+  /** Mirrors the SDK's SlashCommandSource union so a rename upstream breaks
+   * typecheck instead of silently disabling skill discovery. */
+  private api:
+    | {
+        getActiveTools?: () => string[];
+        getCommands?: () => Array<{
+          name: string;
+          description?: string;
+          source: "extension" | "prompt" | "skill";
+        }>;
+      }
+    | undefined;
+  /** Host-TUI activity hook (0.3.0) — fired on task lifecycle events. */
+  private onActivity: ((a: InboundActivity) => void) | undefined;
+  /** Host-TUI status hook — gateway registration result (replaces console.log). */
+  private onStatus: ((msg: string) => void) | undefined;
+  /** Gateway diagnostic hook — upstream/channel failures (replaces console.error). */
+  private onError: ((msg: string) => void) | undefined;
+
+  constructor(opts: {
+    cfg: A2AConfig;
+    ctx?: ExtensionContext;
+    cwd: string;
+    piDir: string;
+    runner?: SessionRunner;
+    api?: {
+      getActiveTools?: () => string[];
+      getCommands?: () => Array<{
+        name: string;
+        description?: string;
+        source: "extension" | "prompt" | "skill";
+      }>;
+    };
+    onActivity?: (a: InboundActivity) => void;
+    /** Called with human-readable status lines (gateway registration) so the
+     * host can surface them as a TUI toast instead of console.log. */
+    onStatus?: (msg: string) => void;
+    /** Gateway diagnostic lines (register failed, channel dropped, …) — kept
+     * OFF the status surface so they never interleave with lifecycle lines. */
+    onError?: (msg: string) => void;
+  }) {
+    this.cfg = opts.cfg;
+    this.ctx = opts.ctx;
+    this.api = opts.api;
+    this.onActivity = opts.onActivity;
+    this.onStatus = opts.onStatus;
+    this.onError = opts.onError ?? console.error;
+    this.cwd = opts.cwd;
+    this.piDir = opts.piDir;
+    this.runner = opts.runner;
+    this.antiLoop = new AntiLoop(maxPingpongTurns(opts.cfg));
+    this.limiter = new RateLimiter(opts.cfg.server.rateLimitPerMin);
+  }
+
+  setRunner(runner: SessionRunner): void {
+    this.runner = runner;
+  }
+
+  /** Public URL the Agent Card advertises. Uses the ACTUAL bound port after
+   * fallback (critical — advertising a configured-but-unbound port breaks
+   * peers' callbacks). */
+  private publicUrl(): string {
+    const explicit = this.cfg.server.publicUrl.trim();
+    if (explicit) return explicit.replace(/\/+$/, "") + "/";
+    const host = resolveBindHost(this.cfg);
+    const port = this.boundPort ?? this.cfg.server.port;
+    return `http://${host}:${port}/`;
+  }
+
+  private buildCard(stripEnrichedMetadata = false): AgentCard {
+    const url = this.publicUrl();
+    const name = this.sessionName();
+    return buildAgentCard({
+      name,
+      url,
+      description: "Pi coding agent — A2A-callable. Runs in the configured workspace.",
+      skills: this.activeSkills(stripEnrichedMetadata),
+      streaming: true,
+      pushNotifications: false,
+      authRequired: !localhostOnly(this.cfg),
+      sessionMetadata: !stripEnrichedMetadata && this.cfg.discovery.enrichCard && this.descriptor
+        ? this.cardMetadata()
+        : undefined,
+    });
+  }
+
+  /** Display name: the pinned agentName wins; the unpinned default gets the
+   *  bound port suffixed (hostname-9912) so same-machine sessions don't all
+   *  collide on one registry/discovery name. Mirrors the gateway name
+   *  convention (`<base>-<port>`). `.local`/`.LAN` mDNS suffixes stripped for
+   *  cleaner names (MBP-Sao.local → mbp-sao). */
+  private baseName(): string {
+    return cleanHostName(hostname());
+  }
+
+  private sessionName(): string {
+    return this.cfg.server.agentName || `${this.baseName()}-${this.boundPort ?? this.cfg.server.port}`;
+  }
+
+  /** Build the A2A-Extensions metadata map from the live session descriptor. */
+  private cardMetadata(): Record<string, unknown> {
+    const d = this.descriptor!;
+    return {
+      pid: d.pid,
+      cwd: d.cwd,
+      model: d.model,
+      tools: d.tools,
+      sessionName: d.sessionName,
+      sessionId: d.sessionId,
+      selfIdentity: d.selfIdentity,
+      agentName: d.agentName,
+      startedAt: d.startedAt,
+      // Extension URI echoed in metadata for peers that read metadata before capabilities.
+      extension: PI_SESSION_EXTENSION_URI,
+    };
+  }
+
+  /** Snapshot the current session identity (cwd/model/tools) into a descriptor. */
+  /** Snapshot the current session identity (cwd/model/tools) into a descriptor. */
+  private buildDescriptor(): SessionDescriptor {
+    const m = this.ctx?.model as any;
+    const model = m
+      ? { provider: String(m.provider ?? ""), id: String(m.id ?? ""), name: m.name ? String(m.name) : undefined }
+      : null;
+    return {
+      pid: this.pid,
+      url: this.publicUrl(),
+      port: this.boundPort ?? this.cfg.server.port,
+      host: resolveBindHost(this.cfg),
+      cwd: this.cwd,
+      model,
+      agentName: this.sessionName(),
+      sessionName: this.ctx ? (this.ctx as any).getSessionName?.() : undefined,
+      sessionId: this.ctx ? (this.ctx as any).sessionManager?.getSessionId?.() : undefined,
+      selfIdentity: this.cfg.selfIdentity || undefined,
+      tools: this.activeTools(),
+      skills: this.activeSkills(),
+      startedAt: this.descriptor?.startedAt ?? new Date().toISOString(),
+      mtime: Date.now(),
+    };
+  }
+
+  /** Best-effort active-tools snapshot (ctx may not expose getActiveTools in all modes). */
+  private activeTools(): string[] {
+    try {
+      if (this.api && typeof this.api.getActiveTools === "function") return this.api.getActiveTools();
+    } catch {
+      /* ignore */
+    }
+    return [];
+  }
+
+  /** Self-discovered skills from the live session: getCommands() lists every
+   * loaded skill as `skill:<name>` (source "skill") straight from the resource
+   * loader (user + project + extension-package skills). Explicit
+   * cfg.server.skills still wins (backward compat). When `anonymous` is set,
+   * discovered skills are withheld (they disclose local SKILL.md content to
+   * unauthenticated callers) — explicitly configured skills stay public, as
+   * they were pre-0.6.3 opt-in. */
+  private activeSkills(anonymous = false): AgentSkill[] {
+    if (this.cfg.server.skills.length) return this.cfg.server.skills;
+    const FALLBACK: AgentSkill[] = [
+      { id: "coding", name: "coding", description: "Read, edit, run, debug, refactor, test" },
+    ];
+    if (anonymous) return FALLBACK;
+    try {
+      const cmds = this.api?.getCommands?.() ?? [];
+      const skills = cmds
+        .filter((c) => c.source === "skill" && c.name.startsWith("skill:"))
+        .map((c) => ({
+          id: c.name.slice("skill:".length),
+          name: c.name.slice("skill:".length),
+          description: (c.description ?? "").slice(0, 1024),
+        }));
+      return skills.length ? skills : FALLBACK;
+    } catch {
+      return FALLBACK;
+    }
+  }
+
+  /** Re-snapshot cwd/model/tools and refresh the registry + card (call on model_select). */
+  refreshDescriptor(): void {
+    if (!this.descriptor || !this.cfg.discovery.local.enabled) return;
+    this.descriptor = this.buildDescriptor();
+    heartbeat(this.descriptor, this.piDir);
+  }
+
+  /** Read-only access to discovered mDNS peers (for a2a_peers). */
+  get discoveredMdnsPeers(): MdnsPeer[] {
+    return this.mdnsPeers;
+  }
+
+  /** Start local-registry declaration + optional mDNS broadcast/discovery. */
+  private async startDiscovery(): Promise<void> {
+    // Build the descriptor unconditionally — it's needed for both local and mDNS.
+    this.descriptor = this.buildDescriptor();
+
+    // Layer 1: local file registry (opt-out).
+    if (this.cfg.discovery.local.enabled) {
+      register(this.descriptor, this.piDir);
+      const intervalMs = Math.max(1, this.cfg.discovery.local.heartbeatSec) * 1000;
+      this.heartbeatTimer = setInterval(() => {
+        if (this.descriptor) heartbeat(this.descriptor, this.piDir);
+      }, intervalMs);
+      this.heartbeatTimer.unref?.(); // don't keep the process alive on exit
+    }
+
+    // Layer 3: mDNS broadcast + discovery (independent of local registry).
+    if (this.cfg.discovery.mdns.enabled && this.descriptor) {
+      const model = this.descriptor.model
+        ? `${this.descriptor.model.provider}/${this.descriptor.model.id}`
+        : "";
+      this.mdnsBroadcast = await startBroadcast({
+        serviceType: this.cfg.discovery.mdns.serviceType,
+        name: this.descriptor.agentName,
+        port: this.descriptor.port,
+        txt: txtRecord({ url: this.descriptor.url, cwd: this.descriptor.cwd, model }),
+      });
+      this.mdnsDiscovery = await startDiscovery({
+        serviceType: this.cfg.discovery.mdns.serviceType,
+        onUp: (peer) => {
+          // Dedupe by URL (or name:host:port composite); keep the freshest.
+          const key = mdnsPeerKey(peer);
+          const i = this.mdnsPeers.findIndex((p) => mdnsPeerKey(p) === key);
+          if (i >= 0) this.mdnsPeers[i] = peer;
+          else this.mdnsPeers.push(peer);
+        },
+        onDown: (gone) => {
+          // Remove the departed peer so the list doesn't grow unbounded.
+          this.mdnsPeers = this.mdnsPeers.filter(
+            (p) => !(p.name === gone.name && p.host === gone.host && p.port === gone.port),
+          );
+        },
+      });
+    }
+  }
+
+  /** Register this session to the upstream a2a-switchboard gateways (discovery.gateway
+   *  + discovery.gateways config). One upstream per enabled entry. */
+  private async startGatewayUpstream(): Promise<void> {
+    const { gatewayEntries } = await import("./config.js");
+    const entries = gatewayEntries(this.cfg).filter((e) => e.entry.enabled !== false);
+    if (entries.length === 0) return;
+    const { GatewayUpstream } = await import("./gateway.js");
+    for (const { key, entry } of entries) {
+      let gw = entry;
+      if (!gw.url || !gw.token) continue;
+      // Unique name per session (name-port) unless explicitly pinned — sessions
+      // on the same machine share config, and one gateway entry per live session
+      // beats last-registration-wins.
+      // Same name derivation as the local session (sessionName) — gateway
+      // registration should not diverge (pinned wins, else host-port).
+      // A per-gateway pinned name (discovery.gateways.<key>.name) still wins.
+      const name = gw.name || this.sessionName();
+      // Dedicated per-session inbound token: when the entry pins no
+      // upstreamToken, mint one per server start and accept it inbound. The
+      // switchboard presents it when proxying TO us — the static sharedToken
+      // then only serves the local mesh, never leaves this machine.
+      // Map key is unique per gateway ENTRY whenever more than one entry
+      // mints (pinned or auto names can still collide across gateways):
+      // count entries that will mint (no explicit upstreamToken), and suffix
+      // -key when >1 — a single minter keeps the stable name identity.
+      const minters = entries.filter((e) => !e.entry.upstreamToken);
+      const inboundId = minters.length > 1 ? `${name}-${key}` : name;
+      if (!gw.upstreamToken) {
+        const minted = `agw-${uuid().replace(/-/g, "").slice(0, 24)}`;
+        // Server-side map, NOT cfg.server.peerTokens: mutating the config
+        // mid-session would flip localhostOnly() (anonymous loopback peers
+        // suddenly 401) and publicUrl()'s bind clamp. authenticate() consults
+        // this map via extraTokens — lookup only, never for the hasTokens
+        // decision.
+        this.mintedInboundTokens[inboundId] = minted;
+        gw = { ...gw, upstreamToken: minted };
+      }
+      const upstream = new GatewayUpstream(
+        {
+          ...gw,
+          name,
+          key,
+          // Persists the minted caller_token (<piDir>/a2a_gateways/<key>.json)
+          // so restarts heartbeat with PATCH instead of re-minting.
+          piDir: this.piDir,
+          // The gateway directory copies capabilities/skills from the registered
+          // card — send the real Agent Card, not the local-registry descriptor.
+          callTimeoutMs: this.cfg.timeouts.send,
+          // Exact-match self-filter for the default auto-name — passed even
+          // when the user pinned a name, so a stale auto-named entry from a
+          // previous run is still filtered.
+          autoName: `${this.baseName()}-${this.boundPort}`,
+        } as import("./gateway.js").GatewayConfig,
+        () => this.buildCard() as unknown as Record<string, unknown>,
+        this.onError,
+        // Peer-directory overlay: refreshed after each heartbeat, cleared on stop.
+        (peers) => updateGatewayPeers(key, peers),
+        // Lifecycle status (channel open, …) → host transcript like the
+        // registration message, not raw console output.
+        (msg) => {
+          if (this.onStatus) {
+            try {
+              this.onStatus(msg);
+            } catch {
+              console.error(msg);
+            }
+          } else {
+            console.error(msg);
+          }
+        },
+        // Fires on the transition to registered — including a late beat that
+        // self-heals after start() returned false (gateway down at session
+        // start). Same surface as a successful start(): publish the
+        // gateway-issued name (a 409 self-heal rename may have changed it —
+        // publishing the pre-rename name would advertise a caller identity
+        // the gateway never registered) and emit the registration line.
+        (registeredName, state) => {
+          setGatewayRegistrationName(registeredName, key);
+          const pending = state === "pending";
+          let host = gw.url;
+          try {
+            host = new URL(gw.url).host;
+          } catch {
+            /* keep raw url */
+          }
+          const msg =
+            `[a2a] registered to a2a-switchboard ${key}@${host} as ${registeredName}` +
+            (pending ? " (pending admin acceptance — not yet listed for peers)" : "");
+          if (this.onStatus) {
+            try {
+              this.onStatus(msg);
+              return;
+            } catch {
+              /* fall back to console */
+            }
+          }
+          console.log(msg);
+        },
+      );
+      this.gatewayUpstreams.set(key, upstream);
+      // The onRegistered callback above announces success (immediately, or on
+      // a later self-healing beat if the first register failed) — nothing to
+      // do with start()'s return value.
+      // Fire-and-forget: upstream.start() → connect() → register can wait on
+      // a 10s network timeout (and reconnect in a loop) when the switchboard
+      // is unreachable. Awaiting it stalls session start (and the first
+      // prompt) for that entire window. The 60s heartbeat self-heals
+      // registration on its own, and the status callback above announces
+      // success/failure — awaiting buys nothing. Rejections are swallowed:
+      // start() never rejects (connect catches internally), but keep the
+      // handler so a future code change can't turn this into an unhandled
+      // rejection.
+      void upstream.start(this.publicUrl()).catch(() => { /* heartbeat retries */ });
+    }
+  }
+
+  private async stopGatewayUpstream(): Promise<void> {
+    if (this.gatewayUpstreams.size === 0) return;
+    const upstreams = [...this.gatewayUpstreams.entries()];
+    this.gatewayUpstreams.clear();
+    // Parallel stop: each upstream's DELETE is bounded (DEREG_TIMEOUT_MS) but
+    // sequential stops made /reload and session_shutdown wait N×timeout.
+    await Promise.all(upstreams.map(([key, upstream]) =>
+      upstream.stop().finally(() => setGatewayRegistrationName(null, key)),
+    ));
+  }
+
+  /** Stop local-registry declaration + mDNS. */
+  private async stopDiscovery(): Promise<void> {
+    if (this.heartbeatTimer) {
+      clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+    }
+    if (this.cfg.discovery.local.enabled) {
+      unregister(this.pid, this.piDir);
+    }
+    if (this.mdnsBroadcast) {
+      await this.mdnsBroadcast.stop();
+      this.mdnsBroadcast = null;
+    }
+    if (this.mdnsDiscovery) {
+      await this.mdnsDiscovery.stop();
+      this.mdnsDiscovery = null;
+    }
+  }
+
+  async start(): Promise<{ host: string; port: number; url: string }> {
+    if (this.http) {
+      return { host: resolveBindHost(this.cfg), port: this.boundPort ?? this.cfg.server.port, url: this.publicUrl() };
+    }
+    // Retention sweep for child transcripts (fleet task #252): they carry
+    // everything a dispatched worker read, so bound their lifetime. Runs
+    // unconditionally (also cleans up after transcripts were later disabled)
+    // and is best-effort — housekeeping must never block the server.
+    try {
+      sweepChildTranscripts(childTranscriptDir(this.piDir), this.cfg.server.childTranscriptRetentionDays);
+    } catch {
+      /* best-effort */
+    }
+    const host = resolveBindHost(this.cfg);
+    this.loopbackBind = LOOPBACK.has(host);
+    const configuredPort = this.cfg.server.port;
+    const fallback = Math.max(0, this.cfg.server.portFallback);
+
+    // Try the configured port, then climb (port+1 … port+fallback), then fall
+    // back to OS-assigned (0). Mirrors vite/webpack-dev-server "port busy → next".
+    const attempts: number[] = [];
+    if (configuredPort > 0) {
+      for (let i = 0; i <= fallback; i++) attempts.push(configuredPort + i);
+    }
+    attempts.push(0); // last resort: OS assigns a free port
+
+    let lastErr: unknown = null;
+    for (const port of attempts) {
+      const srv = createServer((req, res) => this.handle(req, res));
+      try {
+        await new Promise<void>((resolve, reject) => {
+          srv.once("error", reject);
+          srv.listen(port, host, () => {
+            srv.removeListener("error", reject);
+            resolve();
+          });
+        });
+        this.http = srv;
+        this.boundPort = (srv.address() as { port: number })?.port ?? port;
+        await this.startDiscovery();
+        await this.startGatewayUpstream();
+        return { host, port: this.boundPort, url: this.publicUrl() };
+      } catch (e: any) {
+        lastErr = e;
+        // EADDRINUSE → close this half-bound server and try the next port.
+        try {
+          srv.close();
+        } catch {
+          /* ignore */
+        }
+        if (e?.code !== "EADDRINUSE") {
+          // Non-port error (permission, bad host, …) — don't keep climbing.
+          throw e;
+        }
+        // Last attempt (port 0) failing with EADDRINUSE is impossible-ish, but
+        // if the OS rejected everything, surface the last real error.
+      }
+    }
+    throw lastErr instanceof Error
+      ? lastErr
+      : new Error("A2A server: no free port available");
+  }
+
+  async stop(): Promise<void> {
+    if (!this.http) return;
+    // Abort all running tasks so their runners stop promptly.
+    for (const st of this.store.list()) {
+      const s = this.store.get(st.id);
+      if (s?.controller && !s.done) s.controller.abort();
+    }
+    // Stop accepting + force-close lingering connections (SSE streams, idle
+    // keep-alive). closeAllConnections() lands the callback quickly instead of
+    // hanging on open connections.
+    await new Promise<void>((resolve) => {
+      this.http!.close(() => resolve());
+      try {
+        this.http!.closeAllConnections();
+      } catch {
+        /* Node < 18.2 fallback — close() will drain normally */
+      }
+    });
+    this.http = null;
+    this.boundPort = null;
+    await this.stopGatewayUpstream();
+    await this.stopDiscovery();
+  }
+
+  get url(): string {
+    // When stopped, don't advertise a configured-but-unbound port.
+    if (!this.http) return "";
+    return this.publicUrl();
+  }
+
+  /** The ACTUAL port this server bound (differs from cfg.server.port after
+   * fallback). null when not started. */
+  get port(): number | null {
+    return this.boundPort;
+  }
+
+  /** This session's callable name (pinned agentName or auto `<host>-<port>`). */
+  get name(): string {
+    return this.sessionName();
+  }
+
+  /** For tests: how many tasks are currently running. */
+  get runningCount(): number {
+    return this.running;
+  }
+
+  // -------------------------------------------------------------------------
+  // HTTP handling
+  // -------------------------------------------------------------------------
+
+  private isLoopbackHost(host: string | undefined): boolean {
+    if (!host) return false;
+    // Strip port and IPv6 brackets: "127.0.0.1:9910" / "[::1]:9910" / "localhost" / "::1".
+    // Bracketed IPv6 must be split on "]" BEFORE any ":" split — "[::1]:9910".split(":")[0]
+    // would yield "[".
+    let h = host.trim().toLowerCase();
+    if (h.startsWith("[")) {
+      const end = h.indexOf("]");
+      if (end === -1) return false; // malformed bracketed host
+      h = h.slice(1, end);
+    } else if ((h.match(/:/g) || []).length > 1) {
+      // Bare IPv6 (unbracketed, portless) — compare whole host below.
+    } else {
+      h = h.split(":")[0]!; // host:port
+    }
+    return LOOPBACK.has(h);
+  }
+
+  private isLoopbackOrigin(origin: string | undefined): boolean {
+    if (!origin) return true; // no Origin (non-browser client) — fine
+    try {
+      return this.isLoopbackHost(new URL(origin).hostname);
+    } catch {
+      return false; // unparsable Origin — reject (defensive)
+    }
+  }
+
+  private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    try {
+      // DNS-rebinding / CSRF guard (see security review 2026-08-16):
+      // - In localhost-only mode the Host header must be loopback, or an
+      //   attacker domain resolving to 127.0.0.1 still gets rejected.
+      // - A non-loopback Origin means a browser page is driving us — reject
+      //   (browser cross-origin requests can't set custom headers without a
+      //   preflight, so this blocks the drive-by CSRF path).
+      if (localhostOnly(this.cfg) && !this.isLoopbackHost(req.headers.host)) {
+        return this.send(res, 403, { error: "forbidden host" });
+      }
+      if (!this.isLoopbackOrigin(req.headers.origin)) {
+        return this.send(res, 403, { error: "forbidden origin" });
+      }
+      const url = (req.url || "/").split("?")[0]!.replace(/\/+$/, "") || "/";
+      if (req.method === "GET") return this.handleGet(url, req, res);
+      if (req.method === "POST") {
+        // Require a JSON-ish content-type: browser "simple requests" can only
+        // send text/plain, form-urlencoded or multipart without preflight —
+        // rejecting those closes the CSRF body-injection vector. Missing
+        // content-type is tolerated (curl -d without -H sends
+        // application/x-www-form-urlencoded, which we DO reject; a truly bare
+        // POST is parsed and JSON.parse fails harmlessly).
+        const ct = String(req.headers["content-type"] || "").toLowerCase();
+        if (ct && !ct.includes("json")) {
+          return this.send(res, 415, { error: "content-type must be application/json" });
+        }
+        return this.handlePost(req, res);
+      }
+      return this.send(res, 405, { error: "method not allowed" });
+    } catch (e: any) {
+      return this.send(res, 500, { error: "internal", message: e?.message });
+    }
+  }
+
+  /** #9: GET endpoints must authenticate — the enriched card leaks pid/cwd/model
+   * and /metrics leaks operational data. authenticate() returns null only when
+   * a token is REQUIRED and not presented; the plain card still goes out
+   * anonymously so discovery keeps working. /metrics requires auth. */
+  private getIdentity(req: IncomingMessage): string | null {
+    return authenticateInfo({
+      authHeader: req.headers["authorization"],
+      clientIp: (req.socket.remoteAddress || "").replace(/^::ffff:/, ""),
+      peerTokens: this.cfg.server.peerTokens,
+      sharedToken: this.cfg.server.sharedToken,
+      extraTokens: this.mintedInboundTokens,
+      identityHeader: req.headers[IDENTITY_HEADER],
+      loopbackBind: this.loopbackBind,
+    }).identity;
+  }
+
+  private handleGet(url: string, req: IncomingMessage, res: ServerResponse): void {
+    if (url === "/.well-known/agent-card.json" || url === "/.well-known/agent.json") {
+      const identity = this.getIdentity(req);
+      return this.send(res, 200, this.buildCard(identity === null));
+    }
+    if (url === "/health" || url === "/") {
+      return this.send(res, 200, { status: "ok", agent: this.sessionName() });
+    }
+    if (url === "/metrics") {
+      if (this.getIdentity(req) === null) {
+        return this.send(res, 401, { error: "unauthorized" });
+      }
+      return this.send(res, 200, metrics.snapshot());
+    }
+    return this.send(res, 404, { error: "not found" });
+  }
+
+  private async handlePost(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const clientIp = (req.socket.remoteAddress || "").replace(/^::ffff:/, "");
+    const auth = authenticateInfo({
+      authHeader: req.headers["authorization"],
+      clientIp,
+      peerTokens: this.cfg.server.peerTokens,
+      sharedToken: this.cfg.server.sharedToken,
+      extraTokens: this.mintedInboundTokens,
+      identityHeader: req.headers[IDENTITY_HEADER],
+      loopbackBind: this.loopbackBind,
+    });
+    const identity = auth.identity;
+    if (identity === null) {
+      return this.send(res, 401, jsonrpcError(null, -32050, "unauthorized"));
+    }
+    if (!isTrustedPeer(identity, this.cfg)) {
+      return this.send(res, 403, jsonrpcError(null, -32052, "untrusted peer"));
+    }
+    if (!this.limiter.check(identity)) {
+      metrics.rateLimited += 1;
+      return this.send(res, 429, jsonrpcError(null, -32051, "rate limited"));
+    }
+    // Framing context for the inbound wrapper (fleet task #322): how the
+    // caller connected and how its identity was derived.
+    const framing: InboundFraming = {
+      transport: transportName(clientIp),
+      provenance: auth.provenance ?? "address",
+    };
+
+    const body = await this.readBody(req);
+    let rpc: any;
+    try {
+      rpc = JSON.parse(body);
+    } catch {
+      return this.send(res, 200, jsonrpcError(null, -32700, "parse error"));
+    }
+
+    const method = String(rpc.method || "");
+    const params = rpc.params || {};
+    const id = rpc.id ?? null;
+
+    // Normalize method aliases (v1.0 PascalCase ↔ pre-1.0 path).
+    const norm = method.toLowerCase().replace(/[/_.-]/g, "");
+    // v1.0 methods ("SendMessage", "ListTasks", …) speak the v1.0 wire shapes;
+    // the pre-1.0 aliases ("message/send", "tasks/list", …) keep the legacy
+    // shapes old peers were built against.
+    const isV1 = (v1Norm: string): boolean => norm === v1Norm;
+
+    if (norm === "messagesend" || norm === "sendmessage") {
+      // Concurrency cap (blocking pool): reject when too many blocking tasks
+      // are already running. Detached tasks do not compete for this pool.
+      if (this.running >= this.cfg.server.maxConcurrent) {
+        return this.send(
+          res,
+          503,
+          jsonrpcError(id, -32053, `server busy: max ${this.cfg.server.maxConcurrent} concurrent tasks`),
+        );
+      }
+      const r = await this.messageSend(params, identity, undefined, framing);
+      // A2A v1.0: the SendMessage result is the oneof {"task": …} | {"message": …},
+      // never a bare Task; the pre-1.0 alias keeps returning the bare Task.
+      return this.send(res, 200, jsonrpcResult(id, isV1("sendmessage") ? sendTaskResponse(r) : r));
+    }
+    if (norm === "messagestream" || norm === "sendstreamingmessage") {
+      return this.messageStream(params, identity, res, id, isV1("sendstreamingmessage"), framing);
+    }
+    if (norm === "tasksget" || norm === "gettask") {
+      const st = this.store.get(String(params.id ?? ""));
+      if (!st) return this.send(res, 200, jsonrpcError(id, -32001, "task not found"));
+      // Per-identity ownership (#10): a peer may only fetch its own tasks.
+      if (st.identity !== identity) return this.send(res, 200, jsonrpcError(id, -32001, "task not found"));
+      return this.send(res, 200, jsonrpcResult(id, st.task));
+    }
+    if (norm === "taskslist" || norm === "listtasks") {
+      // Per-identity ownership (#10): only the caller's own tasks are listed.
+      const mine = this.store.list().filter((t) => this.store.get(t.id)?.identity === identity);
+      // A2A v1.0: ListTasksResponse carries full Task objects; the pre-1.0
+      // alias keeps the {id, state} stubs it always returned.
+      const tasks = isV1("listtasks") ? mine : mine.map((t) => ({ id: t.id, state: t.status.state }));
+      return this.send(res, 200, jsonrpcResult(id, { tasks }));
+    }
+    if (norm === "taskscancel" || norm === "canceltask") {
+      const st = this.store.get(String(params.id ?? ""));
+      if (!st) return this.send(res, 200, jsonrpcError(id, -32001, "task not found"));
+      // Per-identity ownership (#10): a peer may only cancel its own tasks.
+      if (st.identity !== identity) return this.send(res, 200, jsonrpcError(id, -32001, "task not found"));
+      if (st.done) return this.send(res, 200, jsonrpcError(id, -32002, "task not cancelable"));
+      st.userCanceled = true; // so messageSend's catch classifies as CANCELED, not timeout-FAILED
+      st.controller?.abort();
+      // Set the state ourselves — the catch in messageSend will run async and
+      // we must return CANCELED in THIS response, not the pre-abort WORKING.
+      this.store.update(st.task.id, (t) => {
+        t.status.state = STATE_CANCELED;
+      });
+      // NOTE: do NOT bump metrics here — messageSend's catch handles it once.
+      return this.send(res, 200, jsonrpcResult(id, st.task));
+    }
+    if (norm === "taskssubscribe" || norm === "subscribetotask") {
+      // Resubscribe via SSE — same shape as message/stream.
+      return this.taskSubscribe(params, identity, res, id, isV1("subscribetotask"));
+    }
+    return this.send(res, 200, jsonrpcError(id, -32601, `method not found: ${method}`));
+  }
+
+  private async messageSend(
+    params: any,
+    identity: string,
+    externalSignal?: AbortSignal,
+    framing?: InboundFraming,
+  ): Promise<any> {
+    const msg: Message = params.message ?? params;
+    const inboundText = extractText(params);
+    const contextId = String(params.contextId || msg.contextId || newContextId());
+    const taskId = newTaskId();
+    // A2A v1.0 §3.2.2 SendMessageConfiguration.returnImmediately — the caller
+    // asks for an immediate in-progress Task instead of waiting for the
+    // terminal state (submit-and-poll).
+    const returnImmediately = wantsImmediateReturn(params);
+
+    // Anti-loop: cap per-context turns.
+    if (!this.antiLoop.record(contextId)) {
+      metrics.antiLoopTriggers += 1;
+      const t = buildTask({ id: taskId, contextId, state: STATE_REJECTED });
+      this.store.add(taskId, { task: t, done: true, identity, subscribeWatchers: [] });
+      audit({ piDir: this.piDir, direction: "inbound", identity, taskId, text: "[anti-loop rejected]" });
+      return t;
+    }
+
+    // Create the task (SUBMITTED → WORKING).
+    const task = buildTask({ id: taskId, contextId, state: STATE_WORKING });
+    const controller = new AbortController();
+    const st: StoredTask = { task, controller, done: false, identity, subscribeWatchers: [] };
+    this.store.add(taskId, st);
+    audit({ piDir: this.piDir, direction: "inbound", identity, taskId, text: inboundText });
+    this.onActivity?.({ type: "arrived", taskId, identity, text: inboundText, contextId });
+
+    // If an external abort fires (client disconnect on streams, or tasks/cancel
+    // on a streaming task), propagate it to the runner's controller.
+    if (externalSignal) {
+      const onExternal = () => controller.abort();
+      externalSignal.addEventListener("abort", onExternal, { once: true });
+      controller.signal.addEventListener("abort", () => externalSignal.removeEventListener("abort", onExternal), { once: true });
+    }
+
+    // Admission: promote to the detached pool only while it has capacity.
+    // A full detached pool means the returnImmediately hint is ignored and
+    // the caller waits for the terminal state (A2A v1.0 §3.2.2 lets the
+    // server treat the hint as advisory) — never a 503 while blocking slots
+    // remain, which is what re-checking a SHARED gate here would produce.
+    const detached = returnImmediately && this.detachedRunning < this.cfg.server.maxConcurrent;
+    if (detached) this.detachedRunning += 1;
+    else this.running += 1;
+
+    // Blocking (default): await the run and return the terminal Task.
+    // Non-blocking (returnImmediately): return the in-progress Task as an
+    // ACK right away and let the run continue detached from the HTTP request
+    // — the caller polls GetTask / subscribes / cancels by task id, and the
+    // session is no longer bounded by the caller's reply window (detached
+    // runs are supervised by server.asyncTimeoutSec instead).
+    const execution = this.executeTask(st, identity, inboundText, detached, framing);
+    if (detached) {
+      // The detached run continues after this reply returns; nothing else
+      // will ever await `execution`. executeTask never rejects by contract
+      // (every failure is classified into the task state), but that is
+      // discipline, not a type guarantee — a throw on a path outside its
+      // try/catch (a store update, an activity callback, an OOM) would be an
+      // UNOBSERVED rejection that takes the process down (Node's default).
+      // Observe the promise and contain an unexpected throw: best-effort
+      // mark the task FAILED (redacted) so a poller sees the truth instead
+      // of WORKING forever, and never rethrow — this catch is the last
+      // observer of the promise.
+      execution.catch((e) => {
+        try {
+          if (!st.done) {
+            this.store.update(taskId, (t) => {
+              t.status.state = STATE_FAILED;
+              t.status.message = {
+                role: "ROLE_AGENT",
+                parts: [{ text: redactOutbound(`internal error: ${e?.message ?? String(e)}`), mediaType: "text/plain" }],
+                messageId: newContextId(),
+              };
+            });
+            st.done = true;
+          }
+        } catch {
+          /* containment is best-effort */
+        }
+      });
+      return st.task;
+    }
+    return execution;
+  }
+
+  /**
+   * Run one stored task to completion and update the store. Never rejects —
+   * failures are classified into the task state (FAILED/CANCELED) exactly as
+   * the blocking path has always done. The matching admission-pool counter
+   * (`running` for blocking, `detachedRunning` for detached) is held for the
+   * whole execution.
+   */
+  private async executeTask(
+    st: StoredTask,
+    identity: string,
+    inboundText: string,
+    detached: boolean,
+    framing?: InboundFraming,
+  ): Promise<any> {
+    const taskId = st.task.id;
+    const controller = st.controller!;
+    const startedAt = Date.now();
+    // Supervision timer for this run: reply window (blocking) or async window
+    // (detached). Hoisted so the finally can clear it on EVERY settle path —
+    // a timer left armed after a failed run keeps the process alive long
+    // after the suite/server is done (the runner rejects, no abort fires,
+    // nothing clears it: with the 86400s async default that is a full day).
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    // Local ground truth for "this run was killed by OUR supervision timer",
+    // set in the timer callback BEFORE the abort so it can never disagree
+    // with the timer. The catch path keys the supervision classification on
+    // this flag, never on the abort reason's TEXT — prefix-matching
+    // "reply timeout" would let any future abort site (or runner error) with
+    // that wording masquerade as a supervision kill.
+    let timedOut = false;
+    try {
+      // Blocking runs are bounded by the reply window (the HTTP request is
+      // holding the caller hostage). Detached runs are bounded by the async
+      // window instead. 0 disables the timer for BOTH windows, documented as
+      // "unbounded / caller-supervised": for the async window that is the
+      // deliberate submit-and-poll contract, and for the reply window it
+      // replaces the pre-async-dispatch degenerate reading of
+      // setTimeout(…, 0) — "instant timeout on every task" — which no
+      // working configuration can have depended on.
+      const timeoutSec = detached ? this.cfg.server.asyncTimeoutSec : this.cfg.server.replyTimeoutSec;
+      if (timeoutSec > 0) {
+        timer = setTimeout(() => {
+          timedOut = true;
+          controller.abort(
+            new Error(
+              detached
+                ? `async timeout: exceeded the ${timeoutSec}s detached-task window — session aborted mid-run, result is truncated`
+                : "reply timeout",
+            ),
+          );
+        }, timeoutSec * 1000);
+        // Clear on abort too: a runner that ignores its signal and never
+        // settles must not hold the process alive until the timer fires.
+        controller.signal.addEventListener("abort", () => clearTimeout(timer), { once: true });
+      }
+      const wrapped = wrapInbound(identity, inboundText, framing);
+      const runner = this.requireRunner();
+      const out = await runner({
+        message: wrapped,
+        taskId,
+        signal: controller.signal,
+        onProgress: (line) => this.onActivity?.({ type: "progress", taskId, line }),
+      });
+      if (controller.signal.aborted) {
+        // Defense in depth (#247): a runner may return normally even though
+        // its abort signal fired — the stock runner's prompt promise resolves
+        // on session.abort() rather than rejecting, so without this check a
+        // killed worker came back TASK_STATE_COMPLETED with a truncated reply
+        // artifact. COMPLETED must mean the turn actually finished: route any
+        // post-abort return through the failure classification below
+        // (CANCELED for user cancel, FAILED otherwise).
+        const err =
+          controller.signal.reason instanceof Error
+            ? controller.signal.reason
+            : new Error("task aborted before completion");
+        this.attachTranscript(err, out);
+        throw err;
+      }
+      const finalState = out.inputRequired ? STATE_INPUT_REQUIRED : STATE_COMPLETED;
+      // Outbound redaction: replies cross the trust boundary back to a peer,
+      // so scrub credential-shaped substrings (sk-*, ghp_*, bearer …, emails,
+      // JWTs) before they are stored as artifacts or returned to the caller.
+      const reply = redactOutbound(out.reply ?? "");
+      this.store.update(taskId, (t) => {
+        t.status.state = finalState;
+        t.artifacts = [
+          {
+            artifactId: "reply",
+            name: "reply",
+            parts: [{ text: reply, mediaType: "text/plain" }],
+          },
+        ];
+      });
+      st.done = true;
+      metrics.tasksCompleted += 1;
+      this.auditTranscript(taskId, identity, out.transcriptPath, out.stepCount);
+      this.onActivity?.({
+        type: "completed",
+        taskId,
+        state: finalState,
+        replyPreview: preview(reply),
+        elapsedMs: Date.now() - startedAt,
+      });
+      return st.task; // bare Task as the JSON-RPC result (legacy-compatible)
+    } catch (e: any) {
+      const aborted = controller.signal.aborted;
+      // Distinguish user-initiated cancel (CANCELED) from system timeout/failure (FAILED).
+      const state = aborted && st.userCanceled ? STATE_CANCELED : STATE_FAILED;
+      this.auditTranscript(taskId, identity, (e as any)?.transcriptPath, (e as any)?.stepCount);
+      // A supervision timeout's ground truth is the local `timedOut` flag
+      // (set by OUR timer callback), never the abort reason's TEXT — the
+      // reason carries the descriptive "reply/async timeout: … the Ns window"
+      // message we abort with, and a runner rejecting with its own error
+      // must not be able to spoof that wording into a supervision
+      // classification. Client-disconnect aborts carry a generic AbortError,
+      // and cancels are classified above (userCanceled). timedOut implies
+      // aborted — the flag is set only in the callback that aborts.
+      const reason = controller.signal.reason;
+      const reasonMsg = timedOut && !st.userCanceled && reason instanceof Error ? reason.message : undefined;
+      this.store.update(taskId, (t) => {
+        // Don't clobber a cancel-handler-set CANCELED state with an error message.
+        t.status.state = state;
+        if (state !== STATE_CANCELED) {
+          t.status.message = {
+            role: "ROLE_AGENT",
+            // Redacted: error messages can embed reply text (parse failures,
+            // tool errors quoting the payload) — same outbound trust boundary
+            // as the reply artifact.
+            parts: [{ text: redactOutbound(reasonMsg ?? e?.message ?? String(e)), mediaType: "text/plain" }],
+            messageId: newContextId(),
+          };
+        }
+      });
+      st.done = true;
+      if (state === STATE_CANCELED) {
+        // cancel doesn't count as a failure in completion metrics
+        this.onActivity?.({
+          type: "completed",
+          taskId,
+          state,
+          replyPreview: "(canceled)",
+          elapsedMs: Date.now() - startedAt,
+        });
+      } else {
+        metrics.tasksFailed += 1;
+        this.onActivity?.({
+          type: "failed",
+          taskId,
+          error: e?.message || String(e),
+          elapsedMs: Date.now() - startedAt,
+        });
+      }
+      return st.task;
+    } finally {
+      if (detached) this.detachedRunning -= 1;
+      else this.running -= 1;
+      // The run settled (completed or classified) — the supervision timer's
+      // job is done. Without this, a FAILED run whose runner threw its own
+      // error (no abort → no listener fire) leaked an armed timer that kept
+      // the process alive after the suite finished.
+      clearTimeout(timer);
+    }
+  }
+
+  private messageStream(
+    params: any,
+    identity: string,
+    res: ServerResponse,
+    id: any,
+    v1 = false,
+    framing?: InboundFraming,
+  ): void {
+    // Concurrency cap: same gate as message/send. Streaming has already sent
+    // 200 + headers, so we emit a JSON-RPC error frame and close the stream.
+    if (this.running >= this.cfg.server.maxConcurrent) {
+      res.writeHead(200, {
+        "Content-Type": "text/event-stream",
+        "Cache-Control": "no-cache",
+        Connection: "keep-alive",
+        "A2A-Version": PROTOCOL_VERSION,
+      });
+      res.write(`data: ${JSON.stringify(jsonrpcError(id, -32053, `server busy: max ${this.cfg.server.maxConcurrent} concurrent tasks`))}\n\n`);
+      try {
+        res.end();
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "A2A-Version": PROTOCOL_VERSION,
+    });
+    // Each SSE data line is a JSON-RPC 2.0 response echoing the request id
+    // (A2A v1.0 spec compliance — clients correlate streams by id).
+    const writeSse = (result: any): void => {
+      if (res.destroyed || res.writableEnded) return;
+      try {
+        res.write(`data: ${JSON.stringify(jsonrpcResult(id, result))}\n\n`);
+      } catch {
+        /* res may be destroyed during shutdown */
+      }
+    };
+    const writeErr = (code: number, message: string): void => {
+      if (res.destroyed || res.writableEnded) return;
+      try {
+        res.write(`data: ${JSON.stringify(jsonrpcError(id, code, message))}\n\n`);
+      } catch {
+        /* res may be destroyed during shutdown */
+      }
+    };
+
+    // Abort the underlying task if the client disconnects mid-stream, so the
+    // runner's session stops instead of burning tokens nobody will read.
+    const disconnect = new AbortController();
+    res.on("close", () => disconnect.abort());
+
+    // return_immediately has no effect on streaming operations (A2A v1.0
+    // §3.2.2) — strip it so the stream path keeps its blocking semantics.
+    if (wantsImmediateReturn(params)) {
+      params = {
+        ...params,
+        configuration: { ...(params.configuration ?? {}), returnImmediately: false, return_immediately: false },
+      };
+    }
+
+    this.messageSend(params, identity, disconnect.signal, framing)
+      .then((task) => {
+        if (v1) {
+          // A2A v1.0: TaskArtifactUpdateEvents deliver the content, then the
+          // terminal TaskStatusUpdateEvent closes the interaction — the last
+          // frame carries taskId/contextId/state, so a client reading only the
+          // final event still learns the identifiers.
+          for (const a of task.artifacts ?? []) writeSse(artifactUpdateEvent(task, a));
+          writeSse(statusUpdateEvent(task, true));
+        } else {
+          // Pre-1.0 alias keeps the legacy shapes (whole Task as statusUpdate,
+          // bare artifact as artifactUpdate).
+          writeSse({ statusUpdate: task });
+          if (task.artifacts) {
+            for (const a of task.artifacts) writeSse({ artifactUpdate: a });
+          }
+        }
+      })
+      .catch((e: any) => writeErr(-32603, e?.message || String(e)))
+      .finally(() => {
+        metrics.streamsStarted += 1;
+        try {
+          res.end();
+        } catch {
+          /* ignore */
+        }
+      });
+  }
+
+  private taskSubscribe(params: any, identity: string, res: ServerResponse, id: any, v1 = false): void {
+    const taskId = String(params.id ?? "");
+    const st = this.store.get(taskId);
+    // Ownership check (#10) BEFORE writing the SSE head, so a foreign peer gets
+    // a proper JSON-RPC error instead of a 200 event-stream that hangs.
+    if (!st || st.identity !== identity) {
+      this.send(res, 200, jsonrpcError(id, -32001, "task not found"));
+      res.end();
+      return;
+    }
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      "A2A-Version": PROTOCOL_VERSION,
+    });
+    const writeSse = (result: any): void => {
+      if (res.destroyed || res.writableEnded) return;
+      try {
+        res.write(`data: ${JSON.stringify(jsonrpcResult(id, result))}\n\n`);
+      } catch {
+        /* res may be destroyed during shutdown */
+      }
+    };
+    const writeErr = (code: number, message: string): void => {
+      if (res.destroyed || res.writableEnded) return;
+      try {
+        res.write(`data: ${JSON.stringify(jsonrpcError(id, code, message))}\n\n`);
+      } catch {
+        /* res may be destroyed during shutdown */
+      }
+    };
+    if (!st) {
+      writeErr(-32001, "task not found");
+      res.end();
+      return;
+    }
+    // v1.0: a TaskStatusUpdateEvent {taskId, contextId, status, final}; the
+    // pre-1.0 alias keeps the legacy whole-Task shape. A snapshot of an
+    // already-finished task is the final event of this stream.
+    writeSse(v1 ? statusUpdateEvent(st.task, st.done) : { statusUpdate: st.task });
+    if (st.done) {
+      res.end();
+      return;
+    }
+    const watcher = (t: Task): void =>
+      writeSse(v1 ? statusUpdateEvent(t, TERMINAL_STATES.has(t.status.state)) : { statusUpdate: t });
+    st.subscribeWatchers.push(watcher);
+    const interval = setInterval(() => {
+      if (st.done) {
+        clearInterval(interval);
+        try {
+          res.end();
+        } catch {
+          /* ignore */
+        }
+      }
+    }, 500);
+    res.on("close", () => {
+      clearInterval(interval);
+      st.subscribeWatchers = st.subscribeWatchers.filter((w) => w !== watcher);
+    });
+  }
+
+  /** Stamp transcript forensics (path + step count) onto an error so the
+   *  catch path can audit them — the runner attaches the same fields to the
+   *  errors it throws itself (fleet task #252). */
+  private attachTranscript(err: unknown, out: { transcriptPath?: string; stepCount?: number }): void {
+    if (!out.transcriptPath) return;
+    try {
+      (err as any).transcriptPath = out.transcriptPath;
+      if (out.stepCount !== undefined) (err as any).stepCount = out.stepCount;
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  /** Audit the child transcript's existence at completion/failure so a
+   *  post-mortem can go from audit log (or task id) straight to the step
+   *  history — no guessing where the transcript lives (fleet task #252). */
+  private auditTranscript(
+    taskId: string,
+    identity: string,
+    transcriptPath: string | undefined,
+    stepCount: number | undefined,
+  ): void {
+    if (!transcriptPath) return;
+    audit({
+      piDir: this.piDir,
+      direction: "inbound",
+      identity,
+      taskId,
+      text: `[transcript] ${transcriptPath}${stepCount !== undefined ? ` (${stepCount} steps)` : ""}`,
+      transcriptPath,
+    });
+  }
+
+  private requireRunner(): SessionRunner {
+    if (!this.runner) {
+      throw new Error(
+        "no session runner configured — the inbound server needs a model/registry " +
+          "from the host session to spawn agent sessions. Set a2a.server.enabled after " +
+          "the session is ready, or configure a model.",
+      );
+    }
+    return this.runner;
+  }
+
+  private readBody(req: IncomingMessage): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+      const MAX = 5 * 1024 * 1024; // 5MB cap
+      req.on("data", (c: Buffer) => {
+        size += c.length;
+        if (size > MAX) {
+          req.destroy();
+          reject(new Error("payload too large"));
+          return;
+        }
+        chunks.push(c);
+      });
+      req.on("end", () => resolve(Buffer.concat(chunks).toString("utf-8")));
+      req.on("error", reject);
+    });
+  }
+
+  private send(res: ServerResponse, status: number, body: any): void {
+    const json = JSON.stringify(body);
+    res.writeHead(status, {
+      "Content-Type": "application/json",
+      "A2A-Version": PROTOCOL_VERSION,
+    });
+    res.end(json);
+  }
+}

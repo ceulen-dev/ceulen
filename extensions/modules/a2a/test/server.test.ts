@@ -1,0 +1,1966 @@
+import { assert } from "./chai.js";
+import * as fs from "node:fs";
+import { createServer, request as httpRequest } from "node:http";
+import * as path from "node:path";
+
+import { DEFAULTS } from "./helpers";
+import { makeTempDir } from "./tmp";
+import { A2AServer, type SessionRunner } from "../lib/server";
+import type { A2AConfig } from "../lib/config";
+import { STATE_CANCELED, STATE_COMPLETED, STATE_FAILED, STATE_INPUT_REQUIRED, STATE_REJECTED, STATE_WORKING } from "../lib/protocol";
+import { authenticate } from "../lib/security";
+import { metrics } from "../lib/client";
+import { list as listRegistry } from "../lib/registry";
+import { setGatewayRegistrationName, getGatewayCallerName, gatewayKeyFromUrl } from "../lib/config";
+import { describe, it, before, after, beforeEach, afterEach } from "node:test";
+
+// ---------------------------------------------------------------------------
+// Stub session runner — returns a canned reply without spawning a real agent.
+// ---------------------------------------------------------------------------
+
+function stubRunner(reply = "canned reply"): SessionRunner {
+  return async () => ({ reply, inputRequired: false });
+}
+
+/** Extract the Task from a v1.0 SendMessageResponse {"task": …} result. */
+function sendTask(r: any): any {
+  return r.result?.task;
+}
+
+function tmpDir(): string {
+  return makeTempDir("pi-a2a-server-");
+}
+
+/** Pick an ephemeral free port. */
+async function freePort(): Promise<number> {
+  const { createServer } = await import("node:http");
+  return new Promise((resolve, reject) => {
+    const s = createServer();
+    s.listen(0, "127.0.0.1", () => {
+      const addr = s.address();
+      if (addr && typeof addr === "object") {
+        const p = addr.port;
+        s.close(() => resolve(p));
+      } else {
+        reject(new Error("no port"));
+      }
+    });
+  });
+}
+
+async function startServer(opts: {
+  cfg: A2AConfig;
+  runner?: SessionRunner;
+  piDir?: string;
+  cwd?: string;
+  onActivity?: (a: any) => void;
+  api?: ConstructorParameters<typeof A2AServer>[0]["api"];
+}): Promise<{
+  server: A2AServer;
+  url: string;
+  stop: () => Promise<void>;
+}> {
+  const port = await freePort();
+  const cfg = { ...opts.cfg };
+  cfg.server = { ...cfg.server, port };
+  const piDir = opts.piDir ?? tmpDir();
+  const server = new A2AServer({
+    cfg,
+    cwd: opts.cwd ?? tmpDir(),
+    piDir,
+    runner: opts.runner ?? stubRunner(),
+    api: opts.api,
+    onActivity: opts.onActivity,
+  });
+  const info = await server.start();
+  return { server, url: info.url, stop: () => server.stop() };
+}
+
+async function jsonRpc(url: string, method: string, params: any, headers: Record<string, string> = {}): Promise<any> {
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  return resp.json();
+}
+
+/** Poll tasks/get until the task reaches a terminal state (bounded). */
+async function pollTask(url: string, taskId: string, timeoutMs = 5000): Promise<any> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const r = await jsonRpc(url, "tasks/get", { id: taskId });
+    if (r.error) throw new Error(`tasks/get error: ${JSON.stringify(r.error)}`);
+    const state = r.result?.status?.state;
+    if ([STATE_COMPLETED, STATE_FAILED, STATE_CANCELED, STATE_REJECTED].includes(state)) return r.result;
+    if (Date.now() > deadline) throw new Error(`poll timeout; still ${state}`);
+    await new Promise((res) => setTimeout(res, 50));
+  }
+}
+
+describe("server", () => {
+  beforeEach(() => metrics.reset());
+
+  describe("Agent Card", () => {
+    it("serves a v1.0 card at the canonical path", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS() });
+      try {
+        const resp = await fetch(url + ".well-known/agent-card.json");
+        const card = await resp.json();
+        assert.equal(card.version, "1.0.0");
+        assert.equal(card.supportedInterfaces[0]?.protocolBinding, "JSONRPC");
+        assert.include(card.url, url);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("also serves the legacy agent.json alias", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS() });
+      try {
+        const resp = await fetch(url + ".well-known/agent.json");
+        assert.equal(resp.status, 200);
+        const card = await resp.json();
+        assert.equal(card.version, "1.0.0");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("self-discovers skills from the live session (getCommands) when none configured", async () => {
+      const api = {
+        getCommands: () => [
+          { name: "a2a-config", description: "panel", source: "extension" as const },
+          { name: "skill:notebooklm", description: "Google NotebookLM bridge", source: "skill" as const },
+          { name: "skill:ponytail", description: "Lazy senior dev mode", source: "skill" as const },
+        ],
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), api });
+      try {
+        const card = await (await fetch(url + ".well-known/agent-card.json")).json();
+        assert.deepEqual(
+          card.skills.map((s: any) => s.id),
+          ["notebooklm", "ponytail"],
+        );
+        assert.equal(card.skills[0].description, "Google NotebookLM bridge");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("falls back to the default coding skill when no skills are discoverable", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), api: {} });
+      try {
+        const card = await (await fetch(url + ".well-known/agent-card.json")).json();
+        assert.equal(card.skills.length, 1);
+        assert.equal(card.skills[0].id, "coding");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("explicit server.skills config wins over discovery (backward compat)", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.skills = [{ id: "custom", name: "custom", description: "configured" }];
+      const api = {
+        getCommands: () => [{ name: "skill:notebooklm", description: "discovered", source: "skill" as const }],
+      };
+      const { url, stop } = await startServer({ cfg, api });
+      try {
+        const card = await (await fetch(url + ".well-known/agent-card.json")).json();
+        assert.equal(card.skills.length, 1);
+        assert.equal(card.skills[0].id, "custom");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("falls back to the coding skill when getCommands() throws", async () => {
+      const api = { getCommands: () => { throw new Error("boom"); } };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), api });
+      try {
+        const card = await (await fetch(url + ".well-known/agent-card.json")).json();
+        assert.equal(card.skills.length, 1);
+        assert.equal(card.skills[0].id, "coding");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("caps discovered skill descriptions at 1024 chars", async () => {
+      const api = {
+        getCommands: () => [{ name: "skill:big", description: "x".repeat(2000), source: "skill" as const }],
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), api });
+      try {
+        const card = await (await fetch(url + ".well-known/agent-card.json")).json();
+        assert.equal(card.skills[0].description.length, 1024);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("#9: strips enriched session metadata from the card for anonymous (unauthenticated) callers", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.sharedToken = "test-shared-token";
+      const { url, stop } = await startServer({ cfg });
+      try {
+        // Anonymous (no Authorization header) → plain card, no metadata.
+        const anon = await (await fetch(url + ".well-known/agent-card.json")).json();
+        assert.equal(anon.metadata, undefined);
+        assert.equal(anon.capabilities.extensions, undefined);
+        // Authenticated → enriched card with pi-session metadata.
+        const auth = await (await fetch(url + ".well-known/agent-card.json", {
+          headers: { Authorization: "Bearer test-shared-token" },
+        })).json();
+        assert.notEqual(auth.metadata, undefined);
+        assert.equal(auth.metadata.extension, "https://bacnh85.dev/a2a/extensions/pi-session/v1");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("#9: anonymous card withholds discovered skills (configured skills stay public)", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.sharedToken = "test-shared-token";
+      const api = {
+        getCommands: () => [{ name: "skill:notebooklm", description: "Google NotebookLM bridge", source: "skill" as const }],
+      };
+      const { url, stop } = await startServer({ cfg, api });
+      try {
+        // Anonymous → coding fallback only; local skill names are not disclosed.
+        const anon = await (await fetch(url + ".well-known/agent-card.json")).json();
+        assert.equal(anon.skills.length, 1);
+        assert.equal(anon.skills[0].id, "coding");
+        // Authenticated → full discovered list.
+        const auth = await (await fetch(url + ".well-known/agent-card.json", {
+          headers: { Authorization: "Bearer test-shared-token" },
+        })).json();
+        assert.deepEqual(auth.skills.map((s: any) => s.id), ["notebooklm"]);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("#9: anonymous card still serves explicitly configured skills", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.sharedToken = "test-shared-token";
+      cfg.server.skills = [{ id: "custom", name: "custom", description: "configured" }];
+      const api = {
+        getCommands: () => [{ name: "skill:notebooklm", description: "discovered", source: "skill" as const }],
+      };
+      const { url, stop } = await startServer({ cfg, api });
+      try {
+        // Configured skills are opt-in public (pre-0.6.3 semantics) — served
+        // even to anonymous callers, ahead of the anonymous-withholding guard.
+        const anon = await (await fetch(url + ".well-known/agent-card.json")).json();
+        assert.equal(anon.skills.length, 1);
+        assert.equal(anon.skills[0].id, "custom");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("#9: /metrics requires authentication", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.sharedToken = "test-shared-token";
+      const { url, stop } = await startServer({ cfg });
+      try {
+        const anon = await fetch(url + "metrics");
+        assert.equal(anon.status, 401);
+        const auth = await fetch(url + "metrics", {
+          headers: { Authorization: "Bearer test-shared-token" },
+        });
+        assert.equal(auth.status, 200);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("session discovery (0.2.0)", () => {
+    it("registers itself in the local file registry on start", async () => {
+      const piDir = tmpDir();
+      const cwd = "/test-repo";
+      const { server, stop } = await startServer({ cfg: DEFAULTS(), piDir, cwd });
+      try {
+        // The server uses process.pid as the registry key — which is alive.
+        const entries = listRegistry({ piDir, ttlSec: 60 });
+        const self = entries.find((e) => e.pid === process.pid);
+        assert.isOk(self, "server should have registered its own pid");
+        assert.equal(self!.cwd, cwd);
+        assert.equal(self!.port, server.port);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("defaults agentName to hostname-port so same-machine sessions don't collide", async () => {
+      const piDir = tmpDir();
+      const { server, stop } = await startServer({ cfg: DEFAULTS(), piDir });
+      try {
+        const self = listRegistry({ piDir, ttlSec: 60 }).find((e) => e.pid === process.pid);
+        assert.isOk(self);
+        assert.include(self!.agentName, `-${server.port}`, "unpinned name must carry the bound port");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("keeps a pinned agentName verbatim (no port suffix)", async () => {
+      const piDir = tmpDir();
+      const cfg = DEFAULTS();
+      cfg.server.agentName = "my-pinned";
+      const { stop } = await startServer({ cfg, piDir });
+      try {
+        const self = listRegistry({ piDir, ttlSec: 60 }).find((e) => e.pid === process.pid);
+        assert.isOk(self);
+        assert.equal(self!.agentName, "my-pinned");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("name getter matches the registered local-registry name", async () => {
+      const piDir = tmpDir();
+      const { server, stop } = await startServer({ cfg: DEFAULTS(), piDir });
+      try {
+        const self = listRegistry({ piDir, ttlSec: 60 }).find((e) => e.pid === process.pid);
+        assert.isOk(self);
+        assert.equal(server.name, self!.agentName);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("unregisters from the registry on stop", async () => {
+      const piDir = tmpDir();
+      const { stop } = await startServer({ cfg: DEFAULTS(), piDir });
+      await stop();
+      const entries = listRegistry({ piDir, ttlSec: 60 });
+      const self = entries.find((e) => e.pid === process.pid);
+      assert.isUndefined(self, "registry entry should be removed on stop");
+    });
+
+    it("enriches the Agent Card with session metadata when enrichCard is on", async () => {
+      const cfg = DEFAULTS();
+      const cwd = "/enriched-repo";
+      const { url, stop } = await startServer({ cfg, cwd });
+      try {
+        const resp = await fetch(url + ".well-known/agent-card.json");
+        const card = await resp.json();
+        assert.isDefined(card.capabilities.extensions, "card should declare the extension");
+        assert.isDefined(card.metadata, "card should carry metadata");
+        assert.equal(card.metadata.cwd, cwd);
+        assert.equal(card.metadata.pid, process.pid);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("omits metadata from the card when enrichCard is off", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.enrichCard = false;
+      const { url, stop } = await startServer({ cfg });
+      try {
+        const resp = await fetch(url + ".well-known/agent-card.json");
+        const card = await resp.json();
+        assert.isUndefined(card.metadata);
+        assert.isUndefined(card.capabilities.extensions);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("does NOT write a registry file when local discovery is disabled", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.local.enabled = false;
+      const piDir = tmpDir();
+      const { stop } = await startServer({ cfg, piDir });
+      try {
+        const entries = listRegistry({ piDir, ttlSec: 60 });
+        assert.lengthOf(entries, 0, "no registry file should be written");
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("auth gate", () => {
+    it("passes in localhost-only mode (no token)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.isUndefined(r.error, "no auth error");
+        assert.equal(sendTask(r).status.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("rejects 401 when a token is set but not presented", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.sharedToken = "secret";
+      const { url, stop } = await startServer({ cfg, runner: stubRunner("ok") });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.equal(r.error?.code, -32050, "unauthorized");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("accepts the correct token", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.sharedToken = "secret";
+      const { url, stop } = await startServer({ cfg, runner: stubRunner("ok") });
+      try {
+        const r = await jsonRpc(
+          url,
+          "SendMessage",
+          { message: { role: "ROLE_USER", parts: [{ text: "hi" }] } },
+          { Authorization: "Bearer secret" },
+        );
+        assert.isUndefined(r.error);
+        assert.equal(sendTask(r).status.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("rejects a non-loopback Host in localhost-only mode (DNS-rebinding guard)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        // Node's fetch() forbids the Host header, so use raw http.request —
+        // this is exactly how a DNS-rebinding attack presents itself.
+        const status = await new Promise<number>((resolve, reject) => {
+          const req = httpRequest(url, {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+              Host: "evil.example.com", // attacker domain resolving to 127.0.0.1
+            },
+          }, (res) => {
+            res.resume();
+            resolve(res.statusCode ?? 0);
+          });
+          req.on("error", reject);
+          req.end(JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "SendMessage",
+            params: { message: { role: "ROLE_USER", parts: [{ text: "hi" }] } },
+          }));
+        });
+        assert.equal(status, 403, "non-loopback Host must be rejected");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("rejects a non-loopback Origin (CSRF guard)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Origin: "https://evil.example.com",
+          },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "SendMessage",
+            params: { message: { role: "ROLE_USER", parts: [{ text: "hi" }] } },
+          }),
+        });
+        assert.equal(resp.status, 403, "non-loopback Origin must be rejected");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("rejects browser simple-request content-types (text/plain CSRF body)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "text/plain;charset=UTF-8" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "SendMessage",
+            params: { message: { role: "ROLE_USER", parts: [{ text: "hi" }] } },
+          }),
+        });
+        assert.equal(resp.status, 415, "text/plain must be rejected");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("accepts a bracketed IPv6 loopback Host [::1] (no false-positive 403)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        // Server binds 127.0.0.1; we send a bracketed-IPv6 Host header over that
+        // connection — this exercises the header parser, exactly where the old
+        // split(":")[0] bug lived ([::1]:port → "[" → false 403).
+        const status = await new Promise<number>((resolve, reject) => {
+          const u = new URL(url);
+          const req = httpRequest(
+            {
+              host: "127.0.0.1",
+              port: u.port,
+              method: "POST",
+              path: "/",
+              headers: { "Content-Type": "application/json", Host: `[::1]:${u.port}` },
+            },
+            (res) => {
+              res.resume();
+              resolve(res.statusCode ?? 0);
+            },
+          );
+          req.on("error", reject);
+          req.end(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: { message: { role: "ROLE_USER", parts: [{ text: "hi" }] } } }));
+        });
+        assert.equal(status, 200, "[::1]:port Host must be recognized as loopback, not 403");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("applies the Host gate to GET requests too (agent card via rebinding domain → 403)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        const status = await new Promise<number>((resolve, reject) => {
+          const u = new URL(url);
+          const req = httpRequest(
+            { host: "127.0.0.1", port: u.port, method: "GET", path: "/.well-known/agent-card.json", headers: { Host: "evil.example.com" } },
+            (res) => {
+              res.resume();
+              resolve(res.statusCode ?? 0);
+            },
+          );
+          req.on("error", reject);
+          req.end();
+        });
+        assert.equal(status, 403, "GET with non-loopback Host must be rejected");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("rejects Origin: null (sandboxed iframe) with 403", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Origin: "null" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "SendMessage", params: { message: { role: "ROLE_USER", parts: [{ text: "hi" }] } } }),
+        });
+        assert.equal(resp.status, 403, "Origin: null must be rejected");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("keeps working with application/json + loopback Host/Origin (no regression)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.isUndefined(r.error, "loopback request must still pass");
+        assert.equal(sendTask(r).status.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("outbound reply redaction", () => {
+    it("redacts credential-shaped strings from the reply artifact", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("key is sk-test-abcdEFGH01234567JKLM and ghp_ABCDEFGHIJKLMNOPQRST and mytest@example.com") });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "show secrets" }] },
+        });
+        const text = sendTask(r).artifacts?.[0]?.parts?.[0]?.text ?? "";
+        assert.notInclude(text, "sk-test-abcdEFGH01234567JKLM", "sk-* must be redacted");
+        assert.notInclude(text, "ghp_ABCDEFGHIJKLMNOPQRST", "ghp_* must be redacted");
+        assert.notInclude(text, "mytest@example.com", "email must be redacted");
+        assert.include(text, "[redacted]", "redaction placeholder present");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("leaves plain replies unchanged (no over-redaction)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("hello world") });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        const text = sendTask(r).artifacts?.[0]?.parts?.[0]?.text ?? "";
+        assert.equal(text, "hello world");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("redacts the failure message too (error text can embed reply content)", async () => {
+      // Runner throws an error whose message embeds a credential-shaped string —
+      // the FAILED task's status.message must be scrubbed before tasks/get or
+      // SSE returns it to a peer.
+      const runner: SessionRunner = async () => {
+        throw new Error("tool failed: token sk-abcdEFGHIJKL0123456789 leaked in payload");
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_FAILED);
+        const msg = sendTask(r).status.message?.parts?.[0]?.text ?? "";
+        assert.notInclude(msg, "sk-abcdEFGHIJKL0123456789", "failure message must be redacted");
+        assert.include(msg, "[redacted]", "redaction placeholder present");
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("task lifecycle", () => {
+    it("runs the session and returns a COMPLETED task with the reply artifact", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("the real reply") });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "do something" }] },
+        });
+        const task = sendTask(r);
+        assert.equal(task.status.state, STATE_COMPLETED);
+        assert.deepEqual(task.artifacts?.[0]?.parts?.[0], { text: "the real reply", mediaType: "text/plain" });
+        assert.match(task.id, /^task-/);
+        assert.match(task.contextId, /^ctx-/);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("maps an INPUT_REQUIRED reply", async () => {
+      const runner: SessionRunner = async () => ({ reply: "what exactly?", inputRequired: true });
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_INPUT_REQUIRED);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("accepts the pre-1.0 message/send alias", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("legacy ok") });
+      try {
+        const r = await jsonRpc(url, "message/send", {
+          message: { role: "user", parts: [{ text: "hi", mediaType: "text/plain" }] },
+        });
+        assert.equal(r.result.status.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("tasks/get retrieves a created task, tasks/list lists them", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("x") });
+      try {
+        const send = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        const tid = sendTask(send).id;
+        const got = await jsonRpc(url, "tasks/get", { id: tid });
+        assert.equal(got.result.id, tid);
+        const list = await jsonRpc(url, "tasks/list", {});
+        assert.isAtLeast(list.result.tasks.length, 1);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("tasks/get on an unknown id returns TaskNotFoundError", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS() });
+      try {
+        const r = await jsonRpc(url, "tasks/get", { id: "nope" });
+        assert.equal(r.error?.code, -32001);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("inbound activity (0.3.0)", () => {
+    it("emits arrived → progress → completed for a successful task", async () => {
+      const events: any[] = [];
+      const runner: SessionRunner = async ({ onProgress }) => {
+        onProgress?.("⚙ bash npm test");
+        return { reply: "all good", inputRequired: false };
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner, onActivity: (a) => events.push(a) });
+      try {
+        await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "run tests" }] },
+        });
+        const types = events.map((e) => e.type);
+        assert.deepEqual(types, ["arrived", "progress", "completed"]);
+        assert.equal(events[0]!.identity, "ip:127.0.0.1"); // localhost-only mode
+        assert.match(events[0]!.text, /run tests/);
+        assert.match(events[1]!.line, /npm test/);
+        assert.match(events[2]!.replyPreview, /all good/);
+        assert.equal(events[2]!.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("emits failed with the error when the runner throws", async () => {
+      const events: any[] = [];
+      const runner: SessionRunner = async () => {
+        throw new Error("kaboom");
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner, onActivity: (a) => events.push(a) });
+      try {
+        await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "boom" }] },
+        });
+        const types = events.map((e) => e.type);
+        assert.deepEqual(types, ["arrived", "failed"]);
+        assert.match(events[1]!.error, /kaboom/);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("emits completed (canceled) for a user cancel", async () => {
+      const events: any[] = [];
+      let release!: () => void;
+      const gate = new Promise<void>((r) => (release = r));
+      const runner: SessionRunner = async ({ signal }) => {
+        await new Promise<void>((resolve, reject) => {
+          const onAbort = () => reject(new Error("aborted"));
+          signal.addEventListener("abort", onAbort, { once: true });
+          void gate.then(() => {
+            signal.removeEventListener("abort", onAbort);
+            resolve();
+          });
+        });
+        return { reply: "never", inputRequired: false };
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner, onActivity: (a) => events.push(a) });
+      try {
+        const sendP = jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        // Let the task start, then cancel it.
+        await new Promise((r) => setTimeout(r, 50));
+        const tasks = await jsonRpc(url, "tasks/list", {});
+        const tid = tasks.result.tasks[0]!.id;
+        await jsonRpc(url, "tasks/cancel", { id: tid });
+        await sendP;
+        const types = events.map((e) => e.type);
+        assert.deepEqual(types, ["arrived", "completed"]);
+        assert.equal(events[1]!.state, STATE_CANCELED);
+      } finally {
+        release();
+        await stop();
+      }
+    });
+
+    it("does not crash without an onActivity handler (backward compat)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("ok") });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("anti-loop", () => {
+    it("rejects after the per-context turn cap", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.maxPingpongTurns = 2;
+      const { url, stop } = await startServer({ cfg, runner: stubRunner("ok") });
+      try {
+        // Send twice with the same contextId — allowed.
+        const r1 = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "t1" }], contextId: "ctx-loop" },
+        });
+        assert.equal(sendTask(r1).status.state, STATE_COMPLETED);
+        const r2 = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "t2" }], contextId: "ctx-loop" },
+        });
+        assert.equal(sendTask(r2).status.state, STATE_COMPLETED);
+        // Third — rejected.
+        const r3 = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "t3" }], contextId: "ctx-loop" },
+        });
+        assert.equal(sendTask(r3).status.state, STATE_REJECTED);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("tasks/cancel on a running task", () => {
+    it("cancels a running task and sets STATE_CANCELED", async () => {
+      // A runner that blocks until aborted.
+      const runner: SessionRunner = ({ signal }) =>
+        new Promise((resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      const { server, url, stop } = await startServer({ cfg: DEFAULTS(), runner });
+      try {
+        // Start the task (don't await — it blocks).
+        const sendP = jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "long task" }] },
+        });
+        // Wait for it to register.
+        await new Promise((r) => setTimeout(r, 150));
+        // Cancel it.
+        const list = await jsonRpc(url, "tasks/list", {});
+        const tid = list.result.tasks[0].id;
+        const cancel = await jsonRpc(url, "tasks/cancel", { id: tid });
+        assert.equal(cancel.result.status.state, STATE_CANCELED);
+        // The original send resolves to a CANCELED task too.
+        const send = await sendP;
+        assert.equal(sendTask(send).status.state, STATE_CANCELED);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("returns TaskNotCancelable on a completed task", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("done") });
+      try {
+        const send = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        const tid = sendTask(send).id;
+        const cancel = await jsonRpc(url, "tasks/cancel", { id: tid });
+        assert.equal(cancel.error?.code, -32002);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("#10: tasks are per-identity — another peer cannot get/list/cancel them", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.peerTokens = { alice: "tok-alice", bob: "tok-bob" };
+      const { url, stop } = await startServer({ cfg, runner: stubRunner("secret result") });
+      const aliceH = { Authorization: "Bearer tok-alice" };
+      const bobH = { Authorization: "Bearer tok-bob" };
+      try {
+        const send = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "alice task" }] },
+        }, aliceH);
+        const tid = sendTask(send).id;
+        // Bob cannot fetch Alice's task or see it in his list.
+        const foreignGet = await jsonRpc(url, "tasks/get", { id: tid }, bobH);
+        assert.equal(foreignGet.error?.code, -32001, "foreign tasks/get must fail");
+        const bobList = await jsonRpc(url, "tasks/list", {}, bobH);
+        assert.equal(bobList.result.tasks.length, 0, "tasks/list must only show own tasks");
+        const foreignCancel = await jsonRpc(url, "tasks/cancel", { id: tid }, bobH);
+        assert.equal(foreignCancel.error?.code, -32001, "foreign tasks/cancel must fail");
+        // Alice still can.
+        const ownGet = await jsonRpc(url, "tasks/get", { id: tid }, aliceH);
+        assert.equal(ownGet.result.id, tid);
+        const aliceList = await jsonRpc(url, "tasks/list", {}, aliceH);
+        assert.equal(aliceList.result.tasks.length, 1);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("maxConcurrent enforcement", () => {
+    it("rejects with 503 when concurrency is exceeded", async () => {
+      const runner: SessionRunner = ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      const cfg = DEFAULTS();
+      cfg.server.maxConcurrent = 1;
+      const { server, url, stop } = await startServer({ cfg, runner });
+      try {
+        // Start one blocking task (don't await).
+        // node:test converts a floating fetch's post-stop rejection into an
+        // unhandledRejection (mocha swallowed it) — attach the swallow.
+        jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "block" }] },
+        }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 150));
+        assert.equal(server.runningCount, 1);
+        // Second concurrent task should be rejected.
+        const r2 = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "second" }] },
+        });
+        assert.equal(r2.error?.code, -32053);
+        assert.include(r2.error?.message ?? "", "busy");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("also enforces the cap on message/stream (no bypass)", async () => {
+      const runner: SessionRunner = ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("aborted")));
+        });
+      const cfg = DEFAULTS();
+      cfg.server.maxConcurrent = 1;
+      const { server, url, stop } = await startServer({ cfg, runner });
+      try {
+        // Start one blocking streaming task (don't await).
+        fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "s1",
+            method: "message/stream",
+            params: { message: { role: "ROLE_USER", parts: [{ text: "block" }] } },
+          }),
+        }).catch(() => {});
+        await new Promise((r) => setTimeout(r, 200));
+        assert.equal(server.runningCount, 1);
+        // A second message/stream should receive a busy error frame.
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "s2",
+            method: "message/stream",
+            params: { message: { role: "ROLE_USER", parts: [{ text: "second" }] } },
+          }),
+        });
+        const text = await resp.text();
+        const frames = text.split("\n").filter((l) => l.startsWith("data:")).map((l) => JSON.parse(l.replace(/^data:\s*/, "")));
+        const errFrame = frames.find((f) => f.error);
+        assert.exists(errFrame, "expected a busy error frame");
+        assert.equal(errFrame.error.code, -32053);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("message/stream SSE framing", () => {
+    it("emits JSON-RPC-enveloped SSE frames echoing the request id", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("streamed reply") });
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "sse-1",
+            method: "message/stream",
+            params: { message: { role: "ROLE_USER", parts: [{ text: "hi" }] } },
+          }),
+        });
+        const text = await resp.text();
+        // Parse each data: line.
+        const frames = text
+          .split("\n")
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => JSON.parse(l.replace(/^data:\s*/, "")));
+        assert.isAtLeast(frames.length, 1, "at least one SSE frame");
+        // Every frame must be a JSON-RPC 2.0 response with the echoed id.
+        for (const f of frames) {
+          assert.equal(f.jsonrpc, "2.0");
+          assert.equal(f.id, "sse-1");
+          assert.exists(f.result, "frame must have a result");
+        }
+        // The final statusUpdate must carry the completed task.
+        const statusFrame = frames.find((f) => f.result?.statusUpdate);
+        assert.equal(statusFrame?.result?.statusUpdate?.status?.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("v1.0 wire shapes (PascalCase methods)", () => {
+    /** POST one JSON-RPC frame and return the parsed SSE data frames. */
+    async function sseFrames(url: string, method: string, params: any, id = "sse-v1"): Promise<any[]> {
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ jsonrpc: "2.0", id, method, params }),
+      });
+      const text = await resp.text();
+      return text
+        .split("\n")
+        .filter((l) => l.startsWith("data:"))
+        .map((l) => JSON.parse(l.replace(/^data:\s*/, "")));
+    }
+
+    it("SendMessage returns the oneof {\"task\": …} wrapper, not a bare Task", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("wrapped reply") });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.isUndefined(r.error);
+        // The result must be the oneof wrapper with exactly the task member.
+        assert.exists(r.result?.task, "result must carry {task: …}");
+        assert.notExists(r.result?.message);
+        assert.equal(r.result.task.status.state, STATE_COMPLETED);
+        assert.equal(r.result.task.artifacts?.[0]?.parts?.[0]?.text, "wrapped reply");
+        // …and must not leak Task fields at the top level.
+        assert.isUndefined(r.result.status, "bare Task shape must not bleed through");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("SendStreamingMessage emits TaskArtifactUpdateEvent then a final TaskStatusUpdateEvent", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("stream body") });
+      try {
+        const frames = await sseFrames(url, "SendStreamingMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.isAtLeast(frames.length, 2, "artifact + terminal status events");
+        const artifacts = frames.filter((f) => f.result?.artifactUpdate);
+        const statuses = frames.filter((f) => f.result?.statusUpdate);
+        assert.equal(artifacts.length, 1, "one artifact event");
+        assert.equal(statuses.length, 1, "one terminal status event");
+        // TaskArtifactUpdateEvent: {taskId, contextId, artifact, lastChunk}.
+        const ae = artifacts[0]!.result.artifactUpdate;
+        assert.equal(ae.taskId, statuses[0]!.result.statusUpdate.taskId);
+        assert.equal(ae.contextId, statuses[0]!.result.statusUpdate.contextId);
+        assert.match(ae.taskId, /^task-/);
+        assert.match(ae.contextId, /^ctx-/);
+        assert.equal(ae.artifact?.parts?.[0]?.text, "stream body");
+        assert.equal(ae.lastChunk, true);
+        // TaskStatusUpdateEvent: {taskId, contextId, status, final}.
+        const se = statuses[0]!.result.statusUpdate;
+        assert.equal(se.status?.state, STATE_COMPLETED);
+        assert.equal(se.final, true);
+        // The artifact event precedes the terminal status event (the final
+        // frame carries the terminal state).
+        assert.isBelow(frames.indexOf(artifacts[0]!), frames.indexOf(statuses[0]!));
+        // No event may wrap a whole Task (the pre-1.0 shape).
+        for (const f of frames) {
+          assert.notExists(f.result?.task, "stream events must not be whole Tasks");
+          assert.notExists(f.result?.statusUpdate?.artifacts, "statusUpdate must be an event, not a Task");
+        }
+      } finally {
+        await stop();
+      }
+    });
+
+    it("ListTasks returns full Task objects; tasks/list keeps {id,state} stubs", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("listed") });
+      try {
+        const send = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        const tid = sendTask(send).id;
+        const v1 = await jsonRpc(url, "ListTasks", {});
+        assert.isAtLeast(v1.result?.tasks?.length, 1);
+        const mine = v1.result.tasks.find((t: any) => t.id === tid);
+        assert.exists(mine, "the created task is listed");
+        assert.equal(mine.status.state, STATE_COMPLETED);
+        assert.exists(mine.contextId, "full Task object, not an {id,state} stub");
+        const legacy = await jsonRpc(url, "tasks/list", {});
+        const stub = legacy.result.tasks.find((t: any) => t.id === tid);
+        assert.exists(stub);
+        assert.deepEqual(Object.keys(stub).sort(), ["id", "state"], "legacy alias keeps the stub shape");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("SubscribeToTask emits a v1.0 TaskStatusUpdateEvent snapshot", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("subscribed") });
+      try {
+        const send = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        const tid = sendTask(send).id;
+        const frames = await sseFrames(url, "SubscribeToTask", { id: tid }, "sub-v1");
+        assert.isAtLeast(frames.length, 1);
+        const se = frames[0]!.result?.statusUpdate;
+        assert.exists(se, "snapshot statusUpdate event");
+        assert.equal(se.taskId, tid);
+        assert.match(se.contextId, /^ctx-/);
+        assert.equal(se.status?.state, STATE_COMPLETED);
+        assert.equal(se.final, true, "snapshot of a finished task is the final event");
+        assert.notExists(se.artifacts, "statusUpdate must be an event, not a Task");
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("reply timeout classifies as FAILED (not CANCELED)", () => {
+    it("times out a slow task to STATE_FAILED", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.replyTimeoutSec = 1;
+      const runner: SessionRunner = ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          // Never resolves on its own; waits for abort (timeout), then rejects.
+          signal.addEventListener("abort", () => reject(new Error("timeout")));
+        });
+      const { url, stop } = await startServer({ cfg, runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "slow" }] },
+        });
+assert.equal(sendTask(r).status.state, STATE_FAILED);
+        // Classification comes from the abort reason (the supervision ground
+        // truth), not the runner's own "timeout" rejection above.
+        assert.match(sendTask(r).status.message?.parts?.[0]?.text ?? "", /reply timeout/);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("non-blocking dispatch (SendMessageConfiguration.returnImmediately)", () => {
+    it("acks WORKING immediately and completes in the background (GetTask)", async () => {
+      const runner: SessionRunner = async () => {
+        await new Promise((res) => setTimeout(res, 300));
+        return { reply: "done eventually", inputRequired: false };
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner });
+      try {
+        const t0 = Date.now();
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "long job" }] },
+          configuration: { returnImmediately: true },
+        });
+        const ackMs = Date.now() - t0;
+        // The ack must NOT wait for the 300ms runner — that is the whole point
+        // of non-blocking dispatch (the caller envelope stops bounding the run).
+        assert.isBelow(ackMs, 200, `ack took ${ackMs}ms; runner should still be pending`);
+        assert.equal(sendTask(r).status.state, STATE_WORKING);
+        assert.match(sendTask(r).id, /^task-/);
+        const task = await pollTask(url, sendTask(r).id);
+        assert.equal(task.status.state, STATE_COMPLETED);
+        assert.equal(task.artifacts?.[0]?.parts?.[0]?.text, "done eventually");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("accepts the snake_case return_immediately spelling", async () => {
+      // Delayed runner: with an instant one the run settles before the HTTP
+      // layer serializes the ack, so the ack legitimately carries the terminal
+      // state (the client handles that — fast tasks just return their result).
+      // A pending runner makes the WORKING assertion meaningful: it only holds
+      // if the server truly returned before the run finished.
+      const runner: SessionRunner = async () => {
+        await new Promise((res) => setTimeout(res, 150));
+        return { reply: "snake ok", inputRequired: false };
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+          configuration: { return_immediately: true },
+        });
+        assert.equal(sendTask(r).status.state, STATE_WORKING);
+        const task = await pollTask(url, sendTask(r).id);
+        assert.equal(task.status.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("a detached run is NOT bounded by the reply window", async () => {
+      // Same config that FAILS a blocking task after 1s (see the reply-timeout
+      // suite above): detached, with the async window disabled (0), the run
+      // must outlive the reply window and complete.
+      const cfg = DEFAULTS();
+      cfg.server.replyTimeoutSec = 1;
+      cfg.server.asyncTimeoutSec = 0;
+      const runner: SessionRunner = async () => {
+        await new Promise((res) => setTimeout(res, 1600));
+        return { reply: "survived the reply window", inputRequired: false };
+      };
+      const { url, stop } = await startServer({ cfg, runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "outlive the window" }] },
+          configuration: { returnImmediately: true },
+        });
+        assert.equal(sendTask(r).status.state, STATE_WORKING);
+        const task = await pollTask(url, sendTask(r).id, 6000);
+        assert.equal(task.status.state, STATE_COMPLETED);
+        assert.equal(task.artifacts?.[0]?.parts?.[0]?.text, "survived the reply window");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("server.asyncTimeoutSec bounds a detached run and classifies it FAILED", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.asyncTimeoutSec = 1;
+      // The runner rejects with its OWN error on abort (like a session runner
+      // whose prompt rejects with an SDK error) — the server must still
+      // classify by the abort REASON, which carries the descriptive window
+      // message. If it used the runner's error, a dispatcher could not tell a
+      // supervision kill from a worker crash.
+      const runner: SessionRunner = ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("async window hit")));
+        });
+      const { url, stop } = await startServer({ cfg, runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hang" }] },
+          configuration: { returnImmediately: true },
+        });
+        assert.equal(sendTask(r).status.state, STATE_WORKING);
+        const task = await pollTask(url, sendTask(r).id, 4000);
+        assert.equal(task.status.state, STATE_FAILED);
+        assert.match(task.status.message?.parts?.[0]?.text ?? "", /async timeout.*detached-task window/);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("tasks/cancel cancels a detached run", async () => {
+      const runner: SessionRunner = ({ signal }) =>
+        new Promise((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(new Error("canceled")));
+        });
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "cancel me" }] },
+          configuration: { returnImmediately: true },
+        });
+        assert.equal(sendTask(r).status.state, STATE_WORKING);
+        const c = await jsonRpc(url, "tasks/cancel", { id: sendTask(r).id });
+        assert.equal(c.result.status.state, STATE_CANCELED);
+        const task = await pollTask(url, sendTask(r).id);
+        assert.equal(task.status.state, STATE_CANCELED);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("a detached runner failure is visible via GetTask as FAILED with the message", async () => {
+      const runner: SessionRunner = async () => {
+        throw new Error("worker exploded");
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "will fail" }] },
+          configuration: { returnImmediately: true },
+        });
+        const task = await pollTask(url, sendTask(r).id);
+        assert.equal(task.status.state, STATE_FAILED);
+        assert.match(task.status.message?.parts?.[0]?.text ?? "", /worker exploded/);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("contains an unexpected throw on the detached path (no unhandled rejection; task FAILED)", async () => {
+      // A failing runner + an onActivity sink that throws on the "failed"
+      // event makes executeTask reject AFTER the ack already returned — the
+      // floating-promise path. The detached observer must contain it: the
+      // task still lands FAILED with the runner's message (set before the
+      // sink threw), and the process must not die of an unhandled rejection.
+      const runner: SessionRunner = async () => {
+        // Fail AFTER the ack is serialized, so the rejection genuinely lands
+        // on the detached path (an instantly-throwing runner can lose the
+        // race and mutate the task before the HTTP layer serializes the ack).
+        await new Promise((res) => setTimeout(res, 150));
+        throw new Error("worker exploded");
+      };
+      const onActivity = (a: any) => {
+        if (a.type === "failed") throw new Error("activity sink exploded");
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner, onActivity });
+      // Observe process-level unhandled rejections for the duration of the
+      // scenario: the detached `execution` promise must never surface as one.
+      // (A bare test would not discriminate — mocha installs its own
+      // unhandledRejection handler that swallows detached rejections.)
+      let unhandled: unknown = null;
+      const onUnhandled = (e: unknown) => {
+        unhandled = e ?? new Error("unhandled rejection");
+      };
+      process.on("unhandledRejection", onUnhandled);
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "will fail" }] },
+          configuration: { returnImmediately: true },
+        });
+        assert.equal(sendTask(r).status.state, STATE_WORKING);
+        const task = await pollTask(url, sendTask(r).id);
+        assert.equal(task.status.state, STATE_FAILED);
+        assert.match(task.status.message?.parts?.[0]?.text ?? "", /worker exploded/);
+        // The poll above let the event loop turn; any unhandled rejection
+        // from the detached path has fired by now.
+        assert.isNull(unhandled, `detached path must not produce an unhandled rejection (got: ${String(unhandled)})`);
+      } finally {
+        process.off("unhandledRejection", onUnhandled);
+        await stop();
+      }
+    });
+
+    it("classification is keyed to the supervision timer, not the abort-reason text", async () => {
+      // No supervision timer fires here (replyTimeoutSec is large); the
+      // runner rejects with its own "reply timeout:"-prefixed error. The
+      // task must be FAILED with the runner's message PASSED THROUGH VERBATIM
+      // — supervision wording ("…window") may only ever come from OUR timer,
+      // so a lying runner cannot pose as a supervision kill.
+      const cfg = DEFAULTS();
+      cfg.server.replyTimeoutSec = 60;
+      const runner: SessionRunner = async () => {
+        throw new Error("reply timeout: this text lies");
+      };
+      const { url, stop } = await startServer({ cfg, runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "spoof attempt" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_FAILED);
+        const msg = sendTask(r).status.message?.parts?.[0]?.text ?? "";
+        assert.equal(msg, "reply timeout: this text lies");
+        assert.notInclude(msg, "window");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("replyTimeoutSec 0 means NO reply-window timer (unbounded), not instant timeout", async () => {
+      // Pre-async-dispatch, replyTimeoutSec 0 armed setTimeout(…, 0) = an
+      // instant timeout. The >0 guard redefined 0 to "no timer"; this pins
+      // the documented reading (0 = unbounded, same as asyncTimeoutSec).
+      const cfg = DEFAULTS();
+      cfg.server.replyTimeoutSec = 0;
+      const runner: SessionRunner = async () => {
+        await new Promise((res) => setTimeout(res, 400));
+        return { reply: "outlived a zero window", inputRequired: false };
+      };
+      const { url, stop } = await startServer({ cfg, runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "slow but allowed" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_COMPLETED);
+        assert.equal(sendTask(r).artifacts?.[0]?.parts?.[0]?.text, "outlived a zero window");
+      } finally {
+        await stop();
+      }
+    });
+
+    it("returnImmediately has no effect on message/stream (spec §3.2.2)", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stubRunner("streamed reply") });
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: "sse-async",
+            method: "message/stream",
+            params: {
+              message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+              configuration: { returnImmediately: true },
+            },
+          }),
+        });
+        const text = await resp.text();
+        const frames = text
+          .split("\n")
+          .filter((l) => l.startsWith("data:"))
+          .map((l) => JSON.parse(l.replace(/^data:\s*/, "")));
+        const statusFrame = frames.find((f) => f.result?.statusUpdate);
+        // Streaming keeps its blocking semantics: the final statusUpdate is the
+        // COMPLETED task, not an early WORKING ack.
+        assert.equal(statusFrame?.result?.statusUpdate?.status?.state, STATE_COMPLETED);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("stunted length-stop reply is not COMPLETED", () => {
+    // A context-clamped turn ends with stopReason "length" and no assistant
+    // text (max_tokens squeezed to the remaining context, the model emits
+    // almost nothing). The session runner now throws for such a turn — the
+    // alternative is returning the PREVIOUS turn's text normally, which
+    // takes messageSend's success path: the task completes with a stale
+    // mid-work reply and a dispatcher cannot tell a dead worker from a
+    // finished one. These tests lock the classification the contract
+    // depends on: the throw maps to FAILED with a status message and no
+    // reply artifact.
+    const stuntedRunner: SessionRunner = async () => {
+      throw new Error(
+        "run ended on a length stop with no assistant text — no usable reply was produced (output capped before any content; context-clamped max_tokens?)",
+      );
+    };
+
+    it("maps a length-stop-no-text turn to STATE_FAILED with a status message", async () => {
+      const events: any[] = [];
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stuntedRunner, onActivity: (a) => events.push(a) });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "long task" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_FAILED);
+        const msgText = sendTask(r).status.message?.parts?.[0]?.text ?? "";
+        assert.include(msgText, "no usable reply", "status message explains the stunted turn");
+        assert.isUndefined(sendTask(r).artifacts, "a stunted turn carries no reply artifact");
+        // The host toast must say failed — not "completed (Ns)".
+        assert.deepEqual(events.map((e) => e.type), ["arrived", "failed"]);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("does not count the stunted turn as completed in metrics", async () => {
+      const before = metrics.tasksCompleted;
+      const beforeFailed = metrics.tasksFailed;
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: stuntedRunner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "long task" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_FAILED);
+        assert.equal(metrics.tasksCompleted, before, "stunted turns never increment completions");
+        assert.equal(metrics.tasksFailed, beforeFailed + 1, "stunted turns increment failures");
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("reply-window timer teardown (#257)", () => {
+    it("clears the reply-window watchdog when the runner throws — no leaked 300s timer", async () => {
+      // Regression (#257): a throwing runner skips the success-path
+      // clearTimeout and never aborts the controller, so the 5-minute
+      // reply-window timer stayed armed after the task reported FAILED —
+      // the task was dead but the timer kept the process's event loop alive
+      // for the full window (the test-suite exit-hang). Every exit path must
+      // clear it.
+      const cfg = DEFAULTS(); // replyTimeoutSec: 300 → watchdog delay 300000ms
+      const windowMs = cfg.server.replyTimeoutSec * 1000;
+      const runner: SessionRunner = async () => {
+        throw new Error("boom");
+      };
+      const { url, stop } = await startServer({ cfg, runner });
+      const origSetTimeout = globalThis.setTimeout;
+      const origClearTimeout = globalThis.clearTimeout;
+      let created = 0;
+      const armed = new Set<ReturnType<typeof setTimeout>>();
+      try {
+        (globalThis as any).setTimeout = (fn: any, delay?: number, ...args: any[]) => {
+          const t = origSetTimeout(fn, delay, ...args);
+          if (delay === windowMs) {
+            created += 1;
+            armed.add(t);
+          }
+          return t;
+        };
+        (globalThis as any).clearTimeout = (t: ReturnType<typeof setTimeout>) => {
+          armed.delete(t);
+          return origClearTimeout(t);
+        };
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_FAILED);
+      } finally {
+        (globalThis as any).setTimeout = origSetTimeout;
+        (globalThis as any).clearTimeout = origClearTimeout;
+        await stop();
+      }
+      assert.equal(created, 1, "the reply-window watchdog must be created for the task");
+      assert.equal(armed.size, 0, "reply-window timer must be cleared when the runner throws");
+    });
+  });
+
+  describe("aborted runner returning normally is not COMPLETED (#247)", () => {
+    // The stock session runner resolves its prompt promise on session.abort()
+    // (instead of rejecting) and used to return the truncated reply normally,
+    // which took messageSend's success path: a reply-window kill came back
+    // TASK_STATE_COMPLETED with a partial artifact — indistinguishable from
+    // a finished worker. The server must classify by the abort signal, not
+    // by how the runner happened to return.
+    const partialRunner: SessionRunner = ({ signal }) =>
+      new Promise((resolve) => {
+        // Mimics the stock runner: abort resolves it normally with whatever
+        // partial reply was captured so far.
+        signal.addEventListener(
+          "abort",
+          () => resolve({ reply: "partial work before the window closed", inputRequired: false }),
+          { once: true },
+        );
+      });
+
+    it("maps a reply-window timeout to STATE_FAILED with a timeout status message", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.replyTimeoutSec = 1;
+      const events: any[] = [];
+      const { url, stop } = await startServer({ cfg, runner: partialRunner, onActivity: (a) => events.push(a) });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "long task" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_FAILED);
+        const msgText = sendTask(r).status.message?.parts?.[0]?.text ?? "";
+        assert.include(msgText, "reply timeout", "status message names the timeout");
+        assert.isUndefined(sendTask(r).artifacts, "an aborted task carries no reply artifact");
+        // The host toast must say failed — not "completed (Ns)".
+        assert.deepEqual(events.map((e) => e.type), ["arrived", "failed"]);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("preserves STATE_CANCELED when a canceled runner returns normally", async () => {
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner: partialRunner });
+      try {
+        const sendP = jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "long task" }] },
+        });
+        // Let the task start, then cancel it.
+        await new Promise((r) => setTimeout(r, 50));
+        const tasks = await jsonRpc(url, "tasks/list", {});
+        const tid = tasks.result.tasks[0]!.id;
+        await jsonRpc(url, "tasks/cancel", { id: tid });
+        const send = await sendP;
+        // The success path used to clobber the cancel handler's CANCELED.
+        assert.equal(sendTask(send).status.state, STATE_CANCELED);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("child transcripts (#252)", () => {
+    it("passes the A2A taskId to the runner", async () => {
+      let seenTaskId: string | undefined;
+      const runner: SessionRunner = async ({ taskId }) => {
+        seenTaskId = taskId;
+        return { reply: "ok", inputRequired: false };
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_COMPLETED);
+        assert.equal(seenTaskId, sendTask(r).id, "runner receives the task's own A2A id");
+        assert.match(seenTaskId ?? "", /^task-/);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("audits the transcript path + step count on completion", async () => {
+      const piDir = tmpDir();
+      const runner: SessionRunner = async () => ({
+        reply: "done",
+        inputRequired: false,
+        transcriptPath: "/tmp/a2a_sessions/20260830T000000_task-abc.jsonl",
+        stepCount: 7,
+      });
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner, piDir });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_COMPLETED);
+        const lines = fs
+          .readFileSync(path.join(piDir, "a2a_audit.jsonl"), "utf-8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => JSON.parse(l));
+        const tp = lines.find((l) => l.transcript);
+        assert.ok(tp, "a transcript audit line exists");
+        assert.equal(tp.taskId, sendTask(r).id);
+        assert.equal(tp.transcript, "/tmp/a2a_sessions/20260830T000000_task-abc.jsonl");
+        assert.match(tp.preview, /7 steps/);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("audits the transcript path when the runner throws (killed worker)", async () => {
+      const piDir = tmpDir();
+      const runner: SessionRunner = async () => {
+        const err = new Error("reply timeout: exceeded the 1800s reply window");
+        (err as any).transcriptPath = "/tmp/a2a_sessions/20260830T000000_task-def.jsonl";
+        (err as any).stepCount = 42;
+        throw err;
+      };
+      const { url, stop } = await startServer({ cfg: DEFAULTS(), runner, piDir });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "hi" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_FAILED);
+        const lines = fs
+          .readFileSync(path.join(piDir, "a2a_audit.jsonl"), "utf-8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => JSON.parse(l));
+        const tp = lines.find((l) => l.transcript);
+        assert.ok(tp, "a transcript audit line exists for the failure");
+        assert.match(tp.preview, /42 steps/);
+      } finally {
+        await stop();
+      }
+    });
+
+    it("carries the transcript on the error when an aborted runner returns normally", async () => {
+      // The #247 defense-in-depth path: the runner resolves normally on
+      // abort, and messageSend must reclassify as FAILED — carrying the
+      // transcript forensics onto the classification error.
+      const piDir = tmpDir();
+      const partialRunner: SessionRunner = ({ signal }) =>
+        new Promise((resolve) => {
+          signal.addEventListener(
+            "abort",
+            () =>
+              resolve({
+                reply: "partial",
+                inputRequired: false,
+                transcriptPath: "/tmp/a2a_sessions/20260830T000000_task-ghi.jsonl",
+                stepCount: 3,
+              }),
+            { once: true },
+          );
+        });
+      const cfg = DEFAULTS();
+      cfg.server.replyTimeoutSec = 1;
+      const { url, stop } = await startServer({ cfg, runner: partialRunner, piDir });
+      try {
+        const r = await jsonRpc(url, "SendMessage", {
+          message: { role: "ROLE_USER", parts: [{ text: "long task" }] },
+        });
+        assert.equal(sendTask(r).status.state, STATE_FAILED);
+        const lines = fs
+          .readFileSync(path.join(piDir, "a2a_audit.jsonl"), "utf-8")
+          .split("\n")
+          .filter(Boolean)
+          .map((l) => JSON.parse(l));
+        const tp = lines.find((l) => l.transcript);
+        assert.ok(tp, "transcript audited despite the post-abort normal return");
+        assert.match(tp.preview, /3 steps/);
+      } finally {
+        await stop();
+      }
+    });
+  });
+
+  describe("port fallback (EADDRINUSE → next port)", () => {
+    /** Pre-bind the configured port so the A2A server must fall back. */
+    async function holdPort(port: number): Promise<() => Promise<void>> {
+      const srv = createServer();
+      await new Promise<void>((resolve, reject) => {
+        srv.once("error", reject);
+        srv.listen(port, "127.0.0.1", () => resolve());
+      });
+      return () => new Promise<void>((resolve) => srv.close(() => resolve()));
+    }
+
+    it("binds port+1 when the configured port is busy, and advertises it", async () => {
+      const port = await freePort();
+      const release = await holdPort(port); // 9910-equivalent now busy
+      const cfg = DEFAULTS();
+      cfg.server.port = port;
+      cfg.server.portFallback = 5;
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      try {
+        const info = await server.start();
+        assert.equal(info.port, port + 1, "should have climbed to port+1");
+        assert.equal(server.port, port + 1, "boundPort getter reflects actual");
+        // The Agent Card must advertise the ACTUAL port, not the busy configured one.
+        const cardResp = await fetch(info.url + ".well-known/agent-card.json");
+        const card = await cardResp.json();
+        assert.include(card.supportedInterfaces[0].url, `:${port + 1}`, "card advertises the fallback port");
+      } finally {
+        await server.stop();
+        await release();
+      }
+    });
+
+    it("falls back to OS-assigned port when all explicit ports are busy", async () => {
+      const port = await freePort();
+      const release = await holdPort(port);
+      const cfg = DEFAULTS();
+      cfg.server.port = port;
+      cfg.server.portFallback = 0; // configured port only, then OS-assigned
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      try {
+        const info = await server.start();
+        assert.notEqual(info.port, port, "must NOT use the busy configured port");
+        assert.isAbove(info.port, 0);
+        // Card reflects the OS-assigned port.
+        const cardResp = await fetch(info.url + ".well-known/agent-card.json");
+        const card = await cardResp.json();
+        assert.include(card.supportedInterfaces[0].url, `:${info.port}`);
+      } finally {
+        await server.stop();
+        await release();
+      }
+    });
+
+    it("binds the configured port when free (no fallback)", async () => {
+      const port = await freePort();
+      const cfg = DEFAULTS();
+      cfg.server.port = port;
+      cfg.server.portFallback = 10;
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      try {
+        const info = await server.start();
+        assert.equal(info.port, port, "happy path binds configured port exactly");
+      } finally {
+        await server.stop();
+      }
+    });
+
+    it("explicit port 0 starts on an OS-assigned ephemeral port", async () => {
+      const cfg = DEFAULTS();
+      cfg.server.port = 0; // user explicitly wants ephemeral
+      cfg.server.portFallback = 10;
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      try {
+        const info = await server.start();
+        assert.isAbove(info.port, 0, "must get a real ephemeral port");
+        assert.notEqual(info.port, 0);
+        assert.equal(server.port, info.port, "boundPort getter reflects the ephemeral port");
+        const cardResp = await fetch(info.url + ".well-known/agent-card.json");
+        const card = await cardResp.json();
+        assert.include(card.supportedInterfaces[0].url, `:${info.port}`, "card advertises the ephemeral port");
+      } finally {
+        await server.stop();
+      }
+    });
+
+    it("url getter returns empty after stop (no stale port)", async () => {
+      const cfg = DEFAULTS();
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      await server.start();
+      assert.notEqual(server.url, "");
+      assert.isNotNull(server.port);
+      await server.stop();
+      assert.equal(server.url, "", "stopped server must not advertise a port");
+      assert.isNull(server.port, "stopped server port is null");
+    });
+  });
+
+  describe("gateway registration gating (0.5.0)", () => {
+    let realFetch: typeof fetch;
+    let calls: Array<{ url: string; init?: RequestInit }>;
+
+    beforeEach(() => {
+      realFetch = globalThis.fetch;
+      calls = [];
+      // Stub fetch: record every request; the gateway is never reachable.
+      // Any /register or /channel attempt therefore fails (network error →
+      // register() returns false silently), but we can OBSERVE the attempt.
+      (globalThis as any).fetch = async (url: any, init?: RequestInit) => {
+        calls.push({ url: String(url), init });
+        throw new Error("gateway unreachable (stubbed)");
+      };
+    });
+
+    afterEach(() => {
+      (globalThis as any).fetch = realFetch;
+      setGatewayRegistrationName(null);
+    });
+
+    it("does not register when gateway.enabled is false (no fetch attempt)", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.gateway = { enabled: false, url: "http://127.0.0.1:9920", token: "x" };
+      const port = await freePort();
+      cfg.server = { ...cfg.server, port };
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      await server.start();
+      await server.stop();
+      // The gate must short-circuit BEFORE any network call: no register,
+      // no channel, no directory fetch.
+      assert.equal(calls.length, 0, "disabled gateway must make zero fetch calls");
+    });
+
+    it("attempts registration when gateway.enabled is true", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.gateway = { enabled: true, url: "http://127.0.0.1:9920", token: "x" };
+      const port = await freePort();
+      cfg.server = { ...cfg.server, port };
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      await server.start();
+      // The resolved registration name is NOT published when the gateway is
+      // unreachable — a caller name must not be advertised before a
+      // successful register (X-Gateway-Caller producer side).
+      const key = gatewayKeyFromUrl("http://127.0.0.1:9920");
+      assert.isNull(getGatewayCallerName(key), "no registration name while registration failed");
+      await server.stop();
+      // Registration is attempted (POST /register) even though the gateway is
+      // unreachable. The reverse channel only opens AFTER a successful
+      // register, so with a failing stub there is no /channel call yet — the
+      // enabled:false test above proves the gate itself is what suppresses
+      // every call.
+      const urls = calls.map((c) => c.url);
+      assert.ok(urls.some((u) => u.includes("/register")), "register attempted: " + urls.join(", "));
+    });
+
+    it("an unreachable gateway never blocks server.start() (fire-and-forget, 0.7.13)", async () => {
+      // A never-settling fetch simulates a black-holed switchboard. Pre-0.7.12
+      // start() awaited the register (10s network timeout) and stalled session
+      // start; it must now return immediately and let the heartbeat self-heal.
+      const cfg = DEFAULTS();
+      cfg.discovery.gateway = { enabled: true, url: "http://127.0.0.1:9920", token: "x" };
+      const port = await freePort();
+      cfg.server = { ...cfg.server, port };
+      const realFetch = globalThis.fetch;
+      (globalThis as any).fetch = () => new Promise(() => { /* black hole */ });
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      try {
+        const t0 = Date.now();
+        await server.start();
+        const elapsed = Date.now() - t0;
+        assert.isBelow(elapsed, 5000, "register await would burn 10s+ here");
+      } finally {
+        (globalThis as any).fetch = realFetch;
+        await server.stop(); // bounded by the 1.5s dereg timeout, not the black hole
+      }
+    });
+
+    it("registers to EACH enabled gateway in the gateways map (0.6.0)", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.gateways = {
+        work: { enabled: true, url: "http://127.0.0.1:9920", token: "x" },
+        lab: { enabled: true, url: "http://127.0.0.1:9921", token: "y" },
+        off: { enabled: false, url: "http://127.0.0.1:9922", token: "z" },
+      };
+      const port = await freePort();
+      cfg.server = { ...cfg.server, port };
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      await server.start();
+      await server.stop();
+      const urls = calls.map((c) => c.url);
+      // 2 enabled gateways → 2 POST /register attempts (the DELETE-on-stop
+      // calls carry ?name= and must not count); disabled one skipped.
+      const posts = urls.filter((u) => u.includes("/register") && !u.includes("?name="));
+      assert.equal(posts.length, 2, urls.join(", "));
+      assert.ok(posts.some((u) => u.includes("9920")), "work gateway registered");
+      assert.ok(posts.some((u) => u.includes("9921")), "lab gateway registered");
+      assert.ok(!urls.some((u) => u.includes("9922")), "disabled gateway must not be touched");
+    });
+
+    it("mints a per-session upstream_token and accepts it inbound (no explicit upstreamToken)", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.gateway = { enabled: true, url: "http://127.0.0.1:9920", token: "x" };
+      const port = await freePort();
+      cfg.server = { ...cfg.server, port };
+      const piDir = tmpDir();
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir, runner: stubRunner("ok") });
+      await server.start();
+      // Register body must carry a minted agw-* upstream_token.
+      const post = calls.find((c) => (c.init as any)?.method === "POST");
+      const body = JSON.parse(String(post?.init?.body ?? "{}"));
+      assert.match(String(body.upstream_token), /^agw-/);
+      // The minted token authenticates inbound (extraTokens path) WITHOUT
+      // flipping cfg.server.peerTokens (localhostOnly must stay untouched).
+      const minted = (server as any).mintedInboundTokens[String(body.name)] as string;
+      assert.equal(minted, body.upstream_token);
+      assert.equal(Object.keys(cfg.server.peerTokens).length, 0, "peerTokens config untouched");
+      assert.equal(
+        authenticate({ authHeader: `Bearer ${minted}`, clientIp: "127.0.0.1", peerTokens: {}, sharedToken: "", extraTokens: (server as any).mintedInboundTokens }),
+        String(body.name),
+      );
+      // No-token loopback deployment stays anonymous-friendly: absent bearer
+      // still authenticates as ip: (minted map alone must not require a token).
+      assert.match(
+        String(authenticate({ authHeader: null, clientIp: "127.0.0.1", peerTokens: {}, sharedToken: "", extraTokens: (server as any).mintedInboundTokens })),
+        /^ip:/,
+      );
+      await server.stop();
+    });
+
+    it("two unnamed gateway entries mint DISTINCT tokens, both authenticate inbound", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.gateways = {
+        work: { enabled: true, url: "http://127.0.0.1:9920", token: "x" },
+        lab: { enabled: true, url: "http://127.0.0.1:9921", token: "y" },
+      };
+      const port = await freePort();
+      cfg.server = { ...cfg.server, port };
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      await server.start();
+      // Both entries share the auto-name base-port — tokens must still differ.
+      const posts = calls.filter((c) => (c.init as any)?.method === "POST" && String(c.url).includes("/register"));
+      const tokens = posts.map((c) => JSON.parse(String(c.init?.body ?? "{}")).upstream_token as string);
+      assert.equal(tokens.length, 2);
+      assert.notEqual(tokens[0], tokens[1], "per-gateway tokens must not collide");
+      const minted = (server as any).mintedInboundTokens as Record<string, string>;
+      // Same peer name → last mint wins the name→token identity, but BOTH
+      // tokens authenticate (identity = the name either way).
+      for (const t of tokens) {
+        assert.isString(
+          authenticate({ authHeader: `Bearer ${t}`, clientIp: "10.0.0.9", peerTokens: {}, sharedToken: "", extraTokens: minted }),
+          `token ${t} must authenticate`,
+        );
+      }
+      await server.stop();
+    });
+
+    it("two gateways pinned to the SAME name mint distinct keys — both authenticate", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.gateways = {
+        work: { enabled: true, url: "http://127.0.0.1:9920", token: "x", name: "pi" },
+        lab: { enabled: true, url: "http://127.0.0.1:9921", token: "y", name: "pi" },
+      };
+      const port = await freePort();
+      cfg.server = { ...cfg.server, port };
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      await server.start();
+      const minted = (server as any).mintedInboundTokens as Record<string, string>;
+      const keys = Object.keys(minted);
+      assert.equal(keys.length, 2, "both minting entries retain their token");
+      assert.notEqual(minted[keys[0]!], minted[keys[1]!]);
+      for (const k of keys) {
+        assert.isString(
+          authenticate({ authHeader: `Bearer ${minted[k]}`, clientIp: "10.0.0.9", peerTokens: {}, sharedToken: "", extraTokens: minted }),
+          `token for ${k} must authenticate`,
+        );
+      }
+      await server.stop();
+    });
+
+    it("keeps an explicitly-pinned upstreamToken untouched", async () => {
+      const cfg = DEFAULTS();
+      cfg.discovery.gateway = { enabled: true, url: "http://127.0.0.1:9920", token: "x", upstreamToken: "pinned-tok" };
+      const port = await freePort();
+      cfg.server = { ...cfg.server, port };
+      const server = new A2AServer({ cfg, cwd: tmpDir(), piDir: tmpDir(), runner: stubRunner("ok") });
+      await server.start();
+      const post2 = calls.find((c) => (c.init as any)?.method === "POST");
+      const body = JSON.parse(String(post2?.init?.body ?? "{}"));
+      assert.equal(body.upstream_token, "pinned-tok");
+      await server.stop();
+    });
+  });
+});
