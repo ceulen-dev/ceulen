@@ -152,7 +152,7 @@ export const MODULES: ModuleEntry[] = [
   // (conditional on web_* tools being active) — no prompt-rewrite contract
   // beyond fff's shipped precedent.
   { name: "web", category: "Tools", describe: "Unified web tools: search (SearXNG/Brave/Firecrawl), extract & crawl (JSDOM/Firecrawl/Crawl4AI/agy), screenshot/PDF, CDP browser interaction, Gemini research, image generation, one-off chat.", load: webModule, config: webConfig, tools: [
-    "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status",
+    "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status", "web_a11y",
   ] },
   { name: "rules", category: "Context", describe: "Sticky RULES.md constraints carried in every request + a rulebook of on-demand rules served by rule_get. Nearest-first project walk over user-level.", load: rulesModule, tools: ["rule_get"] },
   // gh after web: same class of external-fetch tooling; fail-open on a missing
@@ -168,7 +168,7 @@ export const MODULES: ModuleEntry[] = [
   // (byte-identical minimal prompt) instead of appending to a prompt that
   // serena/web then append to. Nothing after this entry (rtk, config) touches
   // the prompt — do not move it earlier or add a prompt rewriter after it.
-  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): first-tool hints, reasoning strip, leak cleaning, error recovery hints, DeepSeek guidance + v4-pro minimal-mode anchor.", load: steeringModule, config: steeringConfig },
+  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): first-tool hints, reasoning strip, leak cleaning, error recovery hints, DeepSeek guidance + v4-pro minimal-mode anchor.", load: steeringModule, config: steeringConfig, tools: ["think"] },
   // ── Shell ──────────────────────────────────────────────────────────────
   { name: "rtk", category: "Shell", describe: "Route shell commands through RTK for token savings.", load: rtkModule },
   // ── Plugins ────────────────────────────────────────────────────────────

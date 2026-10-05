@@ -76,6 +76,13 @@ export function buildSteeringGroups(cfg: SteeringSettings): PanelGroup[] {
           defaultValue: false,
           description: "A/B knob: prepend the 'We need…' thinking directive to the bootstrap prompt.",
         }),
+        row("steering.thinkTool", "Think scratchpad tool", "toggle", cfg.thinkTool, (v) => {
+          cfg.thinkTool = Boolean(v);
+        }, {
+          defaultValue: false,
+          warning: "Registers the private think tool at next session start (/reload); ceulen.disabledTools can keep it off.",
+          description: "OMP-parity scratchpad: a think tool whose call renders as one dim marker — planning notes stay out of the visible transcript. Scratchpad only; native reasoning is never suppressed.",
+        }),
       ],
     },
   ];
@@ -90,6 +97,7 @@ const OWNED_KEYS = [
   "steering.stripReasoning",
   "steering.dsAnchor",
   "steering.weNeed",
+  "steering.thinkTool",
 ];
 
 /** steering's ModuleConfig for the central /config panel. Reads the EFFECTIVE

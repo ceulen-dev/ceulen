@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.10.0 — 2026-10-05
+
+- **gh module**: new module — ONE read-only `github` tool over the `gh` CLI
+  (port of oh-my-pi's github tool surface): `repo_view`, `file_read`,
+  `pr_view`, `pr_diff`, the five `search_*` flavors (issues/prs/code/commits/
+  repos, with repo:/org:/user: scope detection + since/until qualifiers), and
+  `run_watch` (lean JSON poller with failed-job log tails; budget
+  `gh.runWatchTimeoutSecs`, default 600s, on /config → Tools → GitHub).
+  Zero npm deps (`node:child_process` spawn, non-interactive env, 5-min
+  deadline, 8-MB output cap, one runner seam); fails open on a missing `gh`
+  binary. Mutating flows (pr_create/checkout/push) deliberately deferred to
+  bash `gh` — plan-mode auto-allow stays valid via READ_ONLY_TOOLS.
+
+- **Read path selectors** (repair module): the wrapped `read` accepts OMP-style
+  suffixes — `:50`, `:50-200`, `:50+150`, `:50-`, `:-60`, comma-joined
+  multi-ranges (`:5-16,960-973`, `:19,59`), `:raw` compounds, and `:conflicts`
+  (one block per unresolved merge conflict). Literal-path-wins resolution (OMP
+  #4618); multi-range/conflicts slice in-memory with `[lines … of N]` headers.
+
+- **think scratchpad tool** (steering module): OMP-parity private scratchpad,
+  opt-in via `steering.thinkTool` (default off; binds at load — autoBg
+  precedent). The call renders as one dim `· think (N chars)` marker so
+  planning notes stay out of the visible transcript while remaining in context
+  for later rounds. OMP's externalThinking reasoning-suppression is NOT ported
+  (providers flag the request shape as abuse; pi's thinking levels are the
+  honest off-switch).
+
+- **web_a11y** (web module, 12th tool): real rendered-page accessibility audit
+  — axe-core 4.13 vendored unmodified (`vendor/axe/`, MPL-2.0, lazy-loaded,
+  zero new deps) injected into local headless Chrome over the existing
+  web_interact CDP lifecycle. Returns OMP-format violation reports (impact,
+  rule, helpUrl, node targets, `… and N more`); `tags`/`rules`/`selector`/
+  `include_incomplete` params; same-origin iframes only (axe walks them
+  in-page). The runtime complement to `ux_audit`'s static CSS checks. In-page
+  failures ride back through the evaluate value (the CDP connection layer
+  drops top-level exceptionDetails).
+
 ## 0.9.0 — 2026-10-04
 
 - **todo HUD**: OMP-parity live UI for the todo module — an above-editor

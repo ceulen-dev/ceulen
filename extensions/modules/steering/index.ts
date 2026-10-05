@@ -81,6 +81,7 @@ import {
   type ErrorInfo,
 } from "./lib/errors.js";
 import { readSteeringSettings, type SteeringSettings } from "./lib/settings.js";
+import { thinkTool } from "./lib/think.js";
 
 // The integrator may import the /config contribution from either file
 // (classifier imports configPanel, composer re-exports from index).
@@ -112,6 +113,11 @@ interface AssistantLike {
 }
 
 export default function steeringModule(pi: ExtensionAPI): void {
+  // OMP-parity scratchpad: registers only when `steering.thinkTool` is on.
+  // Presence binds at LOAD (the /config row carries the reload warning —
+  // repair autoBg precedent); the per-tool kill-switch stays live via
+  // `ceulen.disabledTools` + /config tool rows.
+  if (readSteeringSettings().thinkTool) pi.registerTool(thinkTool() as never);
   let sessionModel: { provider?: string; id?: string } | undefined;
   let activeFamily: ModelFamily | null = null;
   let hasErrorThisTurn = false;

@@ -42,6 +42,8 @@ export interface FakePi {
   messages: Array<{ message: any; options: any }>;
   commands: Record<string, any>;
   notifications: string[];
+  /** Tools the module registered at load (think scratchpad when gated on). */
+  tools: Array<Record<string, unknown>>;
 }
 
 export function createFakePi(activeTools: string[] = ["bash", "read", "edit", "grep", "str_replace_editor"]): FakePi {
@@ -50,9 +52,11 @@ export function createFakePi(activeTools: string[] = ["bash", "read", "edit", "g
   const messages: Array<{ message: any; options: any }> = [];
   const notifications: string[] = [];
   let entries: any[] = [];
+  const tools: Array<Record<string, unknown>> = [];
 
   const pi: any = {
     registerCommand: (name: string, def: any) => { commands[name] = def; },
+    registerTool: (def: any) => { tools.push(def); },
     on: (name: string, fn: Hook) => { (hooks.get(name) ?? hooks.set(name, []).get(name)!).push(fn); },
     getActiveTools: () => activeTools,
     getAllTools: () => activeTools.map((name) => ({ name })),
@@ -89,5 +93,6 @@ export function createFakePi(activeTools: string[] = ["bash", "read", "edit", "g
     messages,
     commands,
     notifications,
+    tools,
   };
 }

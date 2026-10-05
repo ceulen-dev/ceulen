@@ -14,7 +14,8 @@
 //     "strictSerena": false,       // escalate dedicated-tool misses to a block
 //     "stripReasoning": true,      // drop accumulated reasoning_content
 //     "dsAnchor": true,            // deepseek-v4-pro minimal-mode bootstrap
-//     "weNeed": false              // A/B: "We need…" bootstrap directive
+//     "weNeed": false,             // A/B: "We need…" bootstrap directive
+//     "thinkTool": false           // register the OMP-parity think scratchpad
 //   }
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -32,6 +33,8 @@ export interface SteeringSettings {
   stripReasoning: boolean;
   dsAnchor: boolean;
   weNeed: boolean;
+  /** Register the OMP-parity `think` scratchpad tool. Presence binds at load. */
+  thinkTool: boolean;
 }
 
 export const DEFAULT_STEERING_SETTINGS: SteeringSettings = {
@@ -43,6 +46,7 @@ export const DEFAULT_STEERING_SETTINGS: SteeringSettings = {
   stripReasoning: true,
   dsAnchor: true,
   weNeed: false,
+  thinkTool: false,
 };
 
 function agentDir(): string {
@@ -75,7 +79,7 @@ function section(json: Record<string, unknown> | null): Record<string, unknown> 
 /** Merge one settings layer's `steering` keys into out. */
 function mergeLayer(out: SteeringSettings, json: Record<string, unknown> | null): void {
   const s = section(json);
-  for (const key of ["firstToolHints", "selectionGuidance", "superpower", "strictSerena", "stripReasoning", "dsAnchor", "weNeed"] as const) {
+  for (const key of ["firstToolHints", "selectionGuidance", "superpower", "strictSerena", "stripReasoning", "dsAnchor", "weNeed", "thinkTool"] as const) {
     if (typeof s[key] === "boolean") out[key] = s[key] as boolean;
   }
   if (typeof s.superpowerPrompt === "string") out.superpowerPrompt = s.superpowerPrompt.trim();

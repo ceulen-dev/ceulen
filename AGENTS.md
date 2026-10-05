@@ -353,8 +353,14 @@ second system-prompt-rewriting module after it.
 
 Settings: the `steering` section (`firstToolHints`, `selectionGuidance`,
 `superpower`, `superpowerPrompt`, `strictSerena`, `stripReasoning`,
-`dsAnchor`, `weNeed`), read per turn. The steering reminder customType is
-`ceulen-steering`. `/steering` = status (family, flags, cache stats,
+`dsAnchor`, `weNeed`, `thinkTool`), read per turn. `steering.thinkTool`
+(default false) registers the OMP-parity `think` scratchpad tool at load
+(repair autoBg precedent: the /config row warns it takes effect after
+/reload); the tool's call renders as one dim marker so planning notes stay
+out of the visible transcript. OMP's externalThinking reasoning-suppression
+is deliberately NOT ported (providers flag the request shape as abuse; pi's
+thinking levels are the honest off-switch). The steering reminder customType
+is `ceulen-steering`. `/steering` = status (family, flags, cache stats,
 anchor state + trace). The zai-provider payload hooks (fast-mode body,
 throttle, signing) are NOT here — the zai module owns them, gated on provider
 id, not model family.
@@ -393,7 +399,11 @@ unified web tools — `web_search` (SearXNG → Brave → Firecrawl adaptive),
 dialog answers, device-metrics emulation + overflow probe), `web_research`
 (Gemini web ask / Deep Research), `web_image` (Gemini web → ChatGPT web →
 Z.ai GLM-Image → custom endpoint, inline image blocks), `web_chat`
-(ChatGPT web / OpenAI-compatible gateway), `web_status`. Plus the
+(ChatGPT web / OpenAI-compatible gateway), `web_status`, and ceulen's
+addition `web_a11y` — a rendered-page accessibility audit (axe-core 4.13,
+vendored unmodified under `vendor/axe/`, injected via the web_interact CDP
+lifecycle; same-origin iframes only, cross-origin frames are the documented
+ceiling; READ_ONLY in plan mode). Plus the
 conditional `WEB_ROUTING_GUIDANCE` injection (`before_agent_start`, only when
 a `web_*` tool is active — append-only, the fff precedent) and the `web`
 skill via its own `resources_discover` dir (kill-switch gated). No slash
@@ -406,7 +416,9 @@ and `axios` rides along because `gemini-reverse` hard-depends on it (its
 proxy support backs `GEMINI_WEB_PROXY` in the cookie-rotation POST).
 Everything else is VENDORED under `extensions/modules/web/vendor/`
 (`// ponytail: vendored from ...` headers): `@mozilla/readability`,
-`turndown`, `turndown-plugin-gfm` — all pure-JS. The vendored turndown carries
+`turndown`, `turndown-plugin-gfm` — all pure-JS — plus `vendor/axe/`
+(axe-core 4.13.0, MPL-2.0, unmodified minified UMD for `web_a11y`; see that
+dir's README). The vendored turndown carries
 ONE local delta: its `createHTMLParser` falls back to `jsdom`'s `DOMParser`
 instead of the un-vendored `@mixmark-io/domino`. `vendor/package.json`
 (`{"type":"commonjs"}`) keeps the CJS vendor files CJS under the bundle's

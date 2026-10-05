@@ -1,5 +1,6 @@
 // ponytail: ported from @bacnh85/pi-web 0.17.8 extensions/index.ts — the 11
-// unified web tools + the conditional WEB_ROUTING_GUIDANCE injection, wrapped
+// unified web tools PLUS web_a11y (axe-core rendered-page audit, vendored
+// under vendor/axe/), wrapped
 // in ceulen's module conventions: per-tool kill-switch (ceulen.disabledTools →
 // defaultActive:false, /config re-activates live), and the pi-web skill
 // contributed via resources_discover (kill-switch gated, NOT the package.json
@@ -15,6 +16,8 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { readDisabledTools } from "../../lib/tools.js";
+
+import { formatA11ySummary, runA11yAudit } from "./lib/a11y";
 
 import {
   findEnvValue,
@@ -963,6 +966,39 @@ export default function piWebExtension(pi: ExtensionAPI) {
       status.crawl4ai = { ...(status.crawl4ai as Record<string, unknown>), health: c4aiHealth };
 
       return { content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }], details: status };
+    },
+  });
+
+  // ── web_a11y ─────────────────────────────────────────────────
+  pi.registerTool({
+    name: "web_a11y",
+    label: "Web Accessibility Audit",
+    description:
+      "Real rendered-page accessibility audit (axe-core 4.13) in local headless Chrome: contrast, accessible names, roles, keyboard/ARIA violations with node targets. For ANY http://, https://, or file:// URL the local machine can reach — the complement to ux_audit's static CSS checks in the UX loop. One call = one browser lifecycle; axe walks same-origin iframes in-page (cross-origin frames are not audited).",
+    promptSnippet: "Accessibility audit of a rendered page (axe-core)",
+    promptGuidelines: [
+      "Use to VERIFY your own UI builds: ux_audit checks the CSS text, web_a11y checks the RENDERED DOM — run both before declaring a screen done.",
+      "Local headless Chrome drives the audit (web_interact's engine); no daemon fallback.",
+    ],
+    parameters: Type.Object({
+      url: Type.String({ description: "Page to audit (http://, https://, or file://)." }),
+      tags: Type.Optional(Type.Array(Type.String(), { description: "Axe tag filter (wcag2a, wcag2aa, wcag21a, wcag21aa, best-practice…). Omit for axe's default tag set." })),
+      rules: Type.Optional(Type.Array(Type.String(), { description: "Restrict to these axe rule ids (enabled alongside the tag filter)." })),
+      selector: Type.Optional(Type.String({ description: "Audit only the subtree matching this CSS selector." })),
+      include_incomplete: Type.Optional(Type.Boolean({ default: false, description: "Include results that need manual review." })),
+      timeout_ms: Type.Optional(Type.Number({ default: 60000, description: "Budget for navigation + audit (default 60s)." })),
+    }),
+    async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal) {
+      const result = await runA11yAudit({
+        url: params.url as string,
+        tags: params.tags as string[] | undefined,
+        rules: params.rules as string[] | undefined,
+        selector: params.selector as string | undefined,
+        includeIncomplete: params.include_incomplete as boolean | undefined,
+        timeoutMs: params.timeout_ms as number | undefined,
+        signal,
+      });
+      return { content: [{ type: "text" as const, text: formatA11ySummary(result) }], details: result };
     },
   });
 

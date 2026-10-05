@@ -28,6 +28,11 @@ export const READ_ONLY_TOOLS = new Set([
   // GitHub tool — v1 surface is strictly read-only (views, searches, run_watch);
   // mutating ops must never be added without re-checking this tier.
   "github",
+  // OMP-parity scratchpad — no side effects; thoughts stay in the transcript.
+  "think",
+  // Rendered-page accessibility audit — reads the page in a local headless
+  // Chrome, mutates nothing.
+  "web_a11y",
   // NOTE: herdr is deliberately NOT here — its prompt action can drive a
   // write-capable child, so every herdr call takes the confirm tier.
 ]);

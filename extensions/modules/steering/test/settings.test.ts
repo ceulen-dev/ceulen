@@ -54,6 +54,7 @@ describe("readSteeringSettings layering", () => {
       stripReasoning: true,
       dsAnchor: true,
       weNeed: false,
+      thinkTool: false,
     });
   });
 
@@ -134,6 +135,7 @@ describe("/config contribution", () => {
       "steering.stripReasoning",
       "steering.dsAnchor",
       "steering.weNeed",
+      "steering.thinkTool",
     ]);
     const anchor = groups[0].rows.find((r) => r.key === "steering.dsAnchor")!;
     assert.equal(anchor.kind, "toggle");

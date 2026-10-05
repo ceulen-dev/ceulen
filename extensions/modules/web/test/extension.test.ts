@@ -12,7 +12,7 @@ import webExtension from "../index";
 
 const ALL_TOOLS = [
   "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf",
-  "web_interact", "web_research", "web_image", "web_chat", "web_status",
+  "web_interact", "web_research", "web_image", "web_chat", "web_status", "web_a11y",
 ];
 
 function harness(opts: { disabledTools?: string[]; activeTools?: string[] } = {}) {
@@ -71,7 +71,7 @@ describe("web module ceulen contract", () => {
     else process.env.PI_CODING_AGENT_DIR = oldAgentDir;
   });
 
-  it("registers exactly the eleven web_* tools", () => {
+  it("registers exactly the twelve web_* tools", () => {
     const { tools } = harness();
     assert.deepEqual(Object.keys(tools).sort(), [...ALL_TOOLS].sort());
   });

@@ -18,6 +18,7 @@ Use the **11 unified tools** from ceulen's web module for all web-related tasks.
 | `web_screenshot` | Capture page screenshot as PNG | Crawl4AI daemon (public URLs) or local headless Chrome (localhost/LAN/file URLs — auto-detected) |
 | `web_pdf` | Generate page PDF | Crawl4AI daemon (public URLs) or local headless Chrome (localhost/LAN/file URLs — auto-detected) |
 | `web_interact` | Drive a real browser: trusted click/type/press, JS evaluate, wait_for, screenshots | Local headless Chrome via CDP (any http/https/file URL the local machine reaches) |
+| `web_a11y` | Accessibility audit of a RENDERED page (axe-core: contrast, names, roles, keyboard) with node targets | Local headless Chrome via CDP (any http/https/file URL the local machine reaches); complements the CSS-text-only ux_audit |
 | `web_research` | AI-synthesized research with sources | Gemini web tier: ask = grounded answer (guest OK); research = full Deep Research via the pure-Node DR client (live cookie; stale sessions return an honest partial result) |
 | `web_image` | Generate images from a text prompt | Auto chain gemini (web tier, TLS-gated) → chatgpt (`CHATGPT_WEB_AUTH_KEY` / codex login) → Z.ai GLM-Image (`ZAI_API_KEY`; `size` param for aspect, e.g. `960x1728` portrait) → custom OpenAI-images endpoint |
 | `web_chat` | One-off chat completion | ChatGPT web tier is the DEFAULT when a credential is configured (`CHATGPT_WEB_AUTH_KEY` / codex login); gateway (`WEB_CHAT_API_BASE_URL`) is the fallback — non-streaming |
