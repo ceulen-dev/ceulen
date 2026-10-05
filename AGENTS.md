@@ -590,6 +590,64 @@ tool via `READ_ONLY_TOOLS` (plan/lib/plan-tools.ts) — never add a mutating op
 without re-checking that tier. Mutating flows (pr_create/checkout/push) are
 deliberately deferred to bash `gh`.
 
+### Attachments module (attachments)
+
+Ported from `@bacnh85/pi-attachments` 0.3.10 (see `extensions/modules/attachments/`):
+`onTerminalInput` intercepts bracketed path-pastes BEFORE the editor — existing
+files become `[[attach:name]]` tokens plus a 📎 chip widget (key
+`ceulen-attachments`), large text pastes (≥ `pasteCollapseLines`/`pasteCollapseChars`)
+collapse to a paste file + token, and the `input` hook resolves tokens on
+submit (images → real `ImageContent` parts + `📎 path` text; text files → path
+chips, or `<file>` blocks when `inlineTextFiles`). `alt+shift+v` (configurable,
+binds at LOAD — restart to change) pastes clipboard file references. Settings:
+GLOBAL agent-dir `attachments` section (`inlineTextFiles`, `maxInlineBytes`,
+`pasteFileShortcut`, `pasteCollapseLines`, `pasteCollapseChars`), re-read on
+session_start; /config → Files → Attachments 📎 (5 rows). No tools, no
+commands; token removal = delete the token from the prompt (tray prune-syncs
+off `getEditorText`).
+
+### Cron module (cron)
+
+Ported from `@bacnh85/pi-cron` 0.3.10 (see `extensions/modules/cron/`): the
+`cron` tool + `/cron` command manage jobs in `<agentDir>/cron/jobs.json`
+(add/remove/list/run/enable/disable/test/logs/export). A module-scope 30s timer
+(`armTimer` clears across /reload — the upstream double-tick fix) fires due
+jobs as follow-up turns via `sendMessage` customType `ceulen-cron-fire`
+(`triggerTurn: true, deliverAs: "followUp"`). Pinned jobs (`model`/`thinking`)
+spawn headless `pi -p --no-session` children (PI_CRON_DISABLED=1 inside, so
+fired turns can't schedule jobs; HERDR_ENV stripped so herdr panes never
+auto-spawn); unpinned fires are cwd-guarded — a foreign-cwd session marks the
+job FAIL instead of running the prompt against the wrong project. A 30s
+time-window loop guard refuses mutations right after an armed fire.
+`lib/schedule.ts` is a HAND-ROLLED 5-field vixie-cron matcher (ponytail:
+minute-scan nextFire) — upstream shipped cron-parser, but it hard-depends on
+luxon (~4.5MB); local-time semantics only, no TZ/L/#. Settings: GLOBAL `cron`
+section (`enabled`, `tickMs` clamped 5s–10min, `timeoutMs` clamped 1min–24h),
+trusted-project overlay honored at session_start; /config → Tasks → Cron ⏰.
+The `cron` skill ships via the module's own resources_discover.
+
+### Permission module (permission)
+
+Ported from `@bacnh85/pi-permission` 0.2.10, rewritten plain JS → TS (see
+`extensions/modules/permission/`): config-driven allow/ask/deny rules per tool
+(`*`/`?` wildcards, last-match-wins, `external_directory` deny-only boundary,
+doom-loop guard on the 3rd identical call) evaluated in a `tool_call` handler.
+Opt-in and inert: NO `permission` section in settings.json → no opinion. The
+settings reader walks trusted-project `.pi/settings.json` → agent-dir →
+`~/.pi/agents`, first section wins; "Add to permanent allowlist" writes the
+file that already carries the section (global scope when the project is
+untrusted), atomic write, wildcard subjects refused. Flags `--yolo`/`--auto`
+auto-approve asks (deny still enforced); headless ask = fail-closed block.
+CEULEN DELTA — plan-mode deferral: while plan mode is active the handler
+returns undefined (plan's confirm tiers own gating; otherwise both hooks
+prompt on the same call). The state crosses modules via
+`extensions/lib/plan-bridge.ts` (`setPlanActive`/`isPlanActive`, advisor-marker
+pattern); the plan module publishes it inside `updateStatus` (reached after
+EVERY `planModeEnabled` assignment site — keep that invariant if plan's toggle
+paths change). No tools/commands/skills; NO /config contribution factory — the
+synthesized Enable-only section lands on Shell (`Permissions` 🛡); rules are a
+nested blob edited in settings.json by design (OpenCode convention).
+
 ### Read path selectors (repair module)
 
 The repair module's wrapped `read` accepts OMP-style path suffixes:

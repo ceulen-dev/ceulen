@@ -45,6 +45,11 @@ import { webConfig } from "../modules/web/configPanel.ts";
 import ghModule from "../modules/gh/index.ts";
 import { ghConfig } from "../modules/gh/configPanel.js";
 import rulesModule from "../modules/rules/index.ts";
+import attachmentsModule from "../modules/attachments/index.ts";
+import { attachmentsConfig } from "../modules/attachments/configPanel.ts";
+import cronModule from "../modules/cron/index.ts";
+import { cronConfig } from "../modules/cron/configPanel.ts";
+import permissionModule from "../modules/permission/index.ts";
 import configModule from "../modules/config/index.ts";
 
 /** A module's contribution to the central `/config` panel. */
@@ -132,6 +137,9 @@ export const MODULES: ModuleEntry[] = [
   // child sessions reuse the host-only session guards in the module.
   { name: "a2a", category: "Tasks", describe: "A2A Protocol v1.0 peer: call remote agents (a2a_call…), be called by them (opt-in inbound server), local/mDNS/gateway discovery.", load: a2aModule, config: a2aConfig, tools: ["a2a_call", "a2a_status", "a2a_discover", "a2a_list", "a2a_history", "a2a_orchestrate", "a2a_peers"] },
   { name: "todo", category: "Tasks", describe: "Phased task board: the `todo` tool (init/start/done/block/unblock) with session persistence, blockers, an above-editor HUD, and a status-segment progress readout.", load: todoModule, config: todoConfig, tools: ["todo"] },
+  // Cron after todo: scheduled prompts into the live session (the clock-driven
+  // sibling of the task board). No before_agent_start → no ordering constraint.
+  { name: "cron", category: "Tasks", describe: "Scheduled jobs firing prompts into the live session: add/remove/list/run/enable/disable/test/logs/export, headless pinned runs, crontab export.", load: cronModule, config: cronConfig, tools: ["cron"] },
   // ── Tools ─────────────────────────────────────────────────────────────
   // Repair first in the section: it wraps the built-in tools; serena/fff ride
   // on top (no load-order dependency — hooks resolve at call time).
@@ -155,6 +163,9 @@ export const MODULES: ModuleEntry[] = [
     "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status", "web_a11y",
   ] },
   { name: "rules", category: "Context", describe: "Sticky RULES.md constraints carried in every request + a rulebook of on-demand rules served by rule_get. Nearest-first project walk over user-level.", load: rulesModule, tools: ["rule_get"] },
+  // Attachments: paste/drop files become real attachments. No tools/commands —
+  // input hook + widget + shortcut only; no load-order constraint.
+  { name: "attachments", category: "Files", describe: "Real attachments from pasted/dropped files: [[attach:]] tokens + 📎 chips, image ImageContent parts, large-paste collapse, clipboard file paste.", load: attachmentsModule, config: attachmentsConfig },
   // gh after web: same class of external-fetch tooling; fail-open on a missing
   // gh binary (registers nothing until installed). Read-only ops only, so
   // plan mode auto-allows it (plan-tools.ts READ_ONLY_TOOLS).
@@ -171,6 +182,9 @@ export const MODULES: ModuleEntry[] = [
   { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): first-tool hints, reasoning strip, leak cleaning, error recovery hints, DeepSeek guidance + v4-pro minimal-mode anchor.", load: steeringModule, config: steeringConfig, tools: ["think"] },
   // ── Shell ──────────────────────────────────────────────────────────────
   { name: "rtk", category: "Shell", describe: "Route shell commands through RTK for token savings.", load: rtkModule },
+  // Permission after rtk: persistent allow/ask/deny gating. Inert until rules
+  // exist; defers to plan mode via the shared plan-bridge flag (order-free).
+  { name: "permission", category: "Shell", describe: "Persistent allow/ask/deny permission rules per tool (wildcards, external-directory boundary, doom-loop guard) — opt-in via the `permission` settings section; inert until configured.", load: permissionModule },
   // ── Plugins ────────────────────────────────────────────────────────────
   // Config last: it owns /config and reads the contrib map. CORE: the panel is
   // the only in-app way back from a misconfiguration — it can never be the

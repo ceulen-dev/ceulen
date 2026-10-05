@@ -1,0 +1,789 @@
+// permission module — ported from pi-permission 0.2.10's node:test suite
+// (extensions/test/permission.test.js), converted to TS. Plus the ceulen
+// delta tests: plan-mode deferral via the shared plan-bridge flag.
+import assert from "node:assert/strict";
+import test from "node:test";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { join, win32 } from "node:path";
+import { tmpdir } from "node:os";
+
+import permissionModule, {
+  wildcardToRegex,
+  resolveRule,
+  expandHome,
+  readSettingsKey,
+  persistAllowlistRule,
+  isExternal,
+} from "../index.ts";
+import { isPlanActive, setPlanActive } from "../../../lib/plan-bridge.ts";
+
+// ── Extension wiring (tool_call handler) ──────────────────────────────────
+
+interface FakePi {
+  flags: Map<string, boolean>;
+  flagOpts: Record<string, unknown>;
+  getFlag(name: string): unknown;
+  registerFlag(name: string): void;
+  getSetting(name: string): unknown;
+  config: Record<string, unknown>;
+  handlers: Record<string, (event: unknown, ctx: unknown) => Promise<unknown>>;
+  handler: (event: unknown, ctx: unknown) => Promise<unknown>;
+  sessionStart: (event: unknown, ctx: unknown) => Promise<unknown>;
+}
+
+function harness({ rules = {}, flags = {}, getFlagThrows = false }:
+  { rules?: Record<string, unknown> | undefined; flags?: Record<string, boolean>; getFlagThrows?: boolean } = {}): FakePi {
+  const pi = {
+    flags: new Map<string, boolean>(),
+    flagOpts: flags,
+    getFlag(this: FakePi, name: string) {
+      // Regression: after session replacement/reload the SDK's runtime is
+      // stale and getFlag throws — load-time capture must swallow it.
+      if (getFlagThrows) {
+        throw new Error("This extension ctx is stale after session replacement or reload.");
+      }
+      return this.flagOpts[name];
+    },
+    registerFlag(this: FakePi, name: string) {
+      this.flags.set(name, true);
+    },
+    getSetting(name: string) {
+      return name === "permission" ? rules : undefined;
+    },
+    config: {},
+    handlers: {} as Record<string, (event: unknown, ctx: unknown) => Promise<unknown>>,
+    handler: null as unknown as (event: unknown, ctx: unknown) => Promise<unknown>,
+    sessionStart: null as unknown as (event: unknown, ctx: unknown) => Promise<unknown>,
+    on(this: Record<string, unknown>, eventName: string, handler: (event: unknown, ctx: unknown) => Promise<unknown>) {
+      (this.handlers as Record<string, (event: unknown, ctx: unknown) => Promise<unknown>>)[eventName] = handler;
+      this.handler = handler; // keep legacy alias (last-registered) for old tests
+    },
+  } as unknown as FakePi;
+  permissionModule(pi as never);
+  const wires = pi as unknown as Record<string, unknown>;
+  wires.sessionStart = pi.handlers["session_start"];
+  wires.handler = pi.handlers["tool_call"];
+  return pi;
+}
+
+interface TestCtx {
+  hasUI: boolean;
+  cwd: string;
+  home?: string;
+  ppath?: typeof import("node:path").posix | typeof import("node:path").win32;
+  isProjectTrusted?: () => boolean;
+  notifies: { m: string; t: string }[];
+  ui: {
+    notify(m: string, t: string): void;
+    select(title: string, opts: string[]): Promise<string | undefined>;
+  };
+}
+
+function ctx({ hasUI = true, selectChoice = "Allow once", cwd = "/proj", home = "/home/user" }:
+  { hasUI?: boolean; selectChoice?: string | undefined; cwd?: string; home?: string | undefined } = {}): TestCtx {
+  const notifies: { m: string; t: string }[] = [];
+  let selected: string | undefined = selectChoice;
+  return {
+    hasUI,
+    cwd,
+    home,
+    notifies,
+    ui: {
+      notify(m: string, t: string) {
+        notifies.push({ m, t });
+      },
+      async select(_title: string, _opts: string[]) {
+        return selected;
+      },
+    },
+  };
+}
+
+// ── Settings reading ──────────────────────────────────────────────────────
+
+test("readSettingsKey reads .pi/settings.json from cwd (production path)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "perm-settings-"));
+  try {
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ permission: { bash: { "*": "deny" } } }));
+    const key = readSettingsKey(dir, "permission");
+    assert.deepEqual(key, { bash: { "*": "deny" } });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readSettingsKey returns undefined when no settings file", () => {
+  const dir = mkdtempSync(join(tmpdir(), "perm-settings-"));
+  try {
+    assert.equal(readSettingsKey(dir, "permission"), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readSettingsKey treats non-object values as misconfig (undefined)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "perm-settings-"));
+  try {
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    // String value is invalid config — must not be returned.
+    writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ permission: "ask" }));
+    assert.equal(readSettingsKey(dir, "permission"), undefined);
+    // Array value is also invalid.
+    writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ permission: ["bash"] }));
+    assert.equal(readSettingsKey(dir, "permission"), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("readSettingsKey: project=false skips cwd/.pi (trust gate)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "perm-settings-"));
+  try {
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ permission: { "*": "allow" } }));
+    // Untrusted project: cwd/.pi must be ignored entirely.
+    assert.equal(readSettingsKey(dir, "permission", { project: false }), undefined);
+    // Trusted project: cwd/.pi is read (shadowing global, as before).
+    assert.deepEqual(readSettingsKey(dir, "permission", { project: true }), { "*": "allow" });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("untrusted cwd ignores project .pi/settings.json (tool_call trust gate)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "perm-trust-"));
+  try {
+    mkdirSync(join(dir, ".pi"), { recursive: true });
+    // Untrusted repo ships a blanket allow — must be ignored.
+    writeFileSync(join(dir, ".pi", "settings.json"), JSON.stringify({ permission: { "*": "allow" } }));
+    const pi = harness({ rules: { bash: { "*": "ask", "rm *": "deny" } } });
+    const untrusted = ctx({ cwd: dir, selectChoice: "Deny" });
+    untrusted.isProjectTrusted = () => false;
+    const blocked = (await pi.handler({ toolName: "bash", input: { command: "git push" } }, untrusted)) as { block: boolean; reason: string };
+    assert.equal(blocked.block, true, "global ask still fires when project settings are untrusted");
+    assert.match(blocked.reason, /denied by user/);
+    // Same cwd, trusted: the project's blanket allow now shadows global.
+    const trusted = ctx({ cwd: dir });
+    trusted.isProjectTrusted = () => true;
+    assert.equal(await pi.handler({ toolName: "bash", input: { command: "git push" } }, trusted), undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("untrusted cwd: permanent allowlist persists to global scope, never cwd/.pi (0.2.9)", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "perm-untrusted-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "perm-global-"));
+  const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir;
+  try {
+    const pi = harness({ rules: { bash: { "*": "ask" } } });
+    const c = ctx({ cwd, selectChoice: "Add to permanent allowlist" });
+    c.isProjectTrusted = () => false;
+    assert.equal(await pi.handler({ toolName: "bash", input: { command: "git push" } }, c), undefined);
+    // cwd/.pi untouched; rule landed in the global agent dir.
+    assert.equal(existsSync(join(cwd, ".pi", "settings.json")), false, "untrusted repo file not created");
+    const global = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8"));
+    assert.deepEqual(global.permission.bash, { "git push": "allow" });
+    // The persisted rule suppresses the next identical ask (read path is global).
+    const c2 = ctx({ cwd, selectChoice: "Deny" });
+    c2.isProjectTrusted = () => false;
+    assert.equal(await pi.handler({ toolName: "bash", input: { command: "git push" } }, c2), undefined, "no re-prompt");
+  } finally {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+    rmSync(cwd, { recursive: true, force: true });
+    rmSync(agentDir, { recursive: true, force: true });
+  }
+});
+
+test("one-time warning on invalid rule shapes", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask", "git *": "allow" }, external_directory: "/ext" } });
+  const c = ctx();
+  await pi.handler({ toolName: "bash", input: { command: "ls" } }, c);
+  assert.equal(c.notifies.length, 1, "warned once");
+  assert.match(c.notifies[0]!.m, /external_directory must be a rule object/);
+  // One-time: second call stays silent.
+  await pi.handler({ toolName: "bash", input: { command: "ls" } }, c);
+  assert.equal(c.notifies.length, 1, "no repeat warning");
+
+  const pi2 = harness({ rules: { bash: { "*": "ask", "git *": "block" } } });
+  const c2 = ctx();
+  // The warning latch is module-scoped (one extension instance per process):
+  // reset it the way a new session would, then trigger the unknown action.
+  await pi2.sessionStart({}, c2);
+  await pi2.handler({ toolName: "bash", input: { command: "git status" } }, c2);
+  assert.match(c2.notifies[0]!.m, /unknown action "block"/);
+});
+
+test("valid rules never warn", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask", "git *": "allow" } } });
+  const c = ctx();
+  await pi.handler({ toolName: "bash", input: { command: "ls" } }, c);
+  assert.equal(c.notifies.length, 0, "valid rules are silent");
+});
+
+// ── Pattern matching (the non-trivial logic) ──────────────────────────────
+
+test("wildcardToRegex: * matches zero+ chars, ? matches exactly one", () => {
+  const r = wildcardToRegex("git *");
+  assert.equal(r.test("git status"), true);
+  assert.equal(r.test("git"), false, "trailing space required");
+  assert.equal(r.test("gitstatus"), false, "space literal");
+
+  const q = wildcardToRegex("a?c");
+  assert.equal(q.test("abc"), true);
+  assert.equal(q.test("ac"), false, "? requires one char");
+  assert.equal(q.test("abbc"), false);
+});
+
+test("wildcardToRegex: regex specials escaped literally", () => {
+  // `*` crosses `/` (OpenCode semantics), so `src/*.ts` matches nested too.
+  const r = wildcardToRegex("src/*.ts");
+  assert.equal(r.test("src/a/b.ts"), true);
+  assert.equal(r.test("src/x.ts"), true);
+  assert.equal(r.test("test/x.ts"), false);
+
+  const dot = wildcardToRegex("package.json");
+  assert.equal(dot.test("package.json"), true);
+  assert.equal(dot.test("packageXjson"), false, "dot is literal");
+});
+
+test("resolveRule: last matching rule wins", () => {
+  const rules = { "*": "ask", "git *": "allow", "git push *": "deny" };
+  assert.equal(resolveRule(rules, "git status"), "allow");
+  assert.equal(resolveRule(rules, "git push origin main"), "deny");
+  assert.equal(resolveRule(rules, "npm test"), "ask");
+});
+
+test("resolveRule: deny + more specific allow", () => {
+  const rules = { "*": "deny", "src/*.ts": "allow" };
+  assert.equal(resolveRule(rules, "src/a.ts"), "allow");
+  assert.equal(resolveRule(rules, "src/x/a.ts"), "allow");
+  assert.equal(resolveRule(rules, "test/a.ts"), "deny");
+});
+
+test("resolveRule: returns null when no rule matches", () => {
+  assert.equal(resolveRule({ "git *": "allow" }, "npm test"), null);
+  assert.equal(resolveRule(null as never, "x"), null);
+  assert.equal(resolveRule(undefined as never, "x"), null);
+});
+
+test("resolveRule: .env deny pattern (OpenCode default security)", () => {
+  const rules = { "*": "allow", "*.env": "deny", "*.env.*": "deny", "*.env.example": "allow" };
+  assert.equal(resolveRule(rules, "/proj/.env"), "deny");
+  assert.equal(resolveRule(rules, "/proj/.env.local"), "deny");
+  assert.equal(resolveRule(rules, "/proj/.env.example"), "allow");
+  assert.equal(resolveRule(rules, "/proj/src/index.ts"), "allow");
+});
+
+test("expandHome: empty home leaves the pattern unchanged", () => {
+  // Windows / scrubbed env: ctx.home undefined + HOME unset → "". Expanding
+  // used to turn ~/x into /x via join, silently mismatching the rule.
+  assert.equal(expandHome("~/x", ""), "~/x");
+  assert.equal(expandHome("~", ""), "~");
+  assert.equal(expandHome("$HOME/x", ""), "$HOME/x");
+  assert.equal(expandHome("/abs/path", ""), "/abs/path");
+});
+
+// ── win32 containment (upstream regression 0.2.5) ─────────────────────────
+
+test("isExternal: win32-style backslash paths classified correctly", () => {
+  assert.equal(isExternal("C:\\proj\\src\\a.ts", "C:\\proj", win32), false, "inside root, backslash sep");
+  assert.equal(isExternal("src\\a.ts", "C:\\proj", win32), false, "relative backslash path resolves inside");
+  assert.equal(isExternal("C:\\proj", "C:\\proj", win32), false, "root itself is not external");
+  assert.equal(isExternal("..\\other\\s.txt", "C:\\proj", win32), true, "traversal resolves outside");
+  assert.equal(isExternal("C:\\Windows\\system32", "C:\\proj", win32), true, "sibling dir is external");
+  assert.equal(isExternal("D:\\proj\\x", "C:\\proj", win32), true, "different drive is external");
+});
+
+test("isExternal: posix-style forward-slash paths still classified correctly", () => {
+  assert.equal(isExternal("/proj/src/a.ts", "/proj"), false);
+  assert.equal(isExternal("/etc/passwd", "/proj"), true);
+  assert.equal(isExternal("/proj2/file", "/proj"), true, "sibling dir (prefix-string of root) is external");
+});
+
+test("isExternal: dot-dot-prefixed filenames inside the workspace are NOT external", () => {
+  // `path.relative('/proj', '/proj/..env')` returns '..env' — a naive
+  // startsWith('..') check classifies a legal workspace file as external.
+  assert.equal(isExternal("/proj/..env", "/proj"), false, "..env file inside root is internal");
+  assert.equal(isExternal("..env", "/proj"), false, "relative ..env resolves inside");
+  assert.equal(isExternal("../..env", "/proj"), true, "parent-dir ..env is external");
+});
+
+// ── Handler behavior ──────────────────────────────────────────────────────
+
+test("no permission config → allows everything (no opinion)", async () => {
+  const pi = harness({ rules: undefined });
+  const result = await pi.handler({ toolName: "bash", input: { command: "rm -rf /" } }, ctx());
+  assert.equal(result, undefined);
+});
+
+test("explicit deny blocks regardless of yolo", async () => {
+  const pi = harness({
+    rules: { bash: { "*": "ask", "rm *": "deny" } },
+    flags: { yolo: true },
+  });
+  const result = (await pi.handler({ toolName: "bash", input: { command: "rm -rf /tmp" } }, ctx())) as { block: boolean; reason: string };
+  assert.equal(result.block, true);
+  assert.match(result.reason, /denied by permission rule/);
+});
+
+test("ask prompts UI when hasUI; Allow once passes through", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  const result = await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Allow once" }));
+  assert.equal(result, undefined);
+});
+
+test("ask + Deny → block", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  const result = (await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Deny" }))) as { block: boolean; reason: string };
+  assert.equal(result.block, true);
+  assert.match(result.reason, /denied by user/);
+});
+
+test("ask without UI fails closed (block)", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  const result = (await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ hasUI: false }))) as { block: boolean; reason: string };
+  assert.equal(result.block, true);
+  assert.match(result.reason, /requires approval \(no UI\)/);
+});
+
+test("--yolo auto-approves ask but keeps deny", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask", "rm *": "deny" } }, flags: { yolo: true } });
+  assert.equal(await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx()), undefined);
+  const blocked = (await pi.handler({ toolName: "bash", input: { command: "rm x" } }, ctx())) as { block: boolean; reason: string };
+  assert.equal(blocked.block, true);
+  assert.match(blocked.reason, /denied by permission rule/);
+});
+
+test("global * default applies when no tool rule matches", async () => {
+  const pi = harness({ rules: { "*": "ask", bash: { "git *": "allow" } } });
+  // read has no tool rule → falls to * → ask
+  const result = (await pi.handler({ toolName: "read", input: { path: "src/a.ts" } }, ctx({ selectChoice: "Deny" }))) as { block: boolean; reason: string };
+  assert.equal(result.block, true);
+  assert.match(result.reason, /denied by user/);
+  // bash git → allow
+  const allowed = await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx());
+  assert.equal(allowed, undefined);
+});
+
+test("allow rule passes through silently", async () => {
+  const pi = harness({ rules: { bash: { "*": "deny", "git status": "allow" } } });
+  const result = await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx());
+  assert.equal(result, undefined);
+});
+
+// ── Doom-loop guard ───────────────────────────────────────────────────────
+
+test("doom-loop blocks the 3rd identical call", async () => {
+  const pi = harness({ rules: { "*": "allow" } });
+  const call = { toolName: "bash", input: { command: "ls" } };
+  const c = ctx();
+  assert.equal(await pi.handler(call, c), undefined, "1st: allow");
+  assert.equal(await pi.handler(call, c), undefined, "2nd: allow");
+  const blocked = (await pi.handler(call, c)) as { block: boolean; reason: string };
+  assert.equal(blocked.block, true);
+  assert.match(blocked.reason, /doom-loop/);
+  assert.equal(c.notifies.length, 1);
+  assert.match(c.notifies[0]!.m, /Doom-loop blocked/);
+});
+
+test("doom-loop does not trigger on different commands", async () => {
+  const pi = harness({ rules: { "*": "allow" } });
+  const c = ctx();
+  await pi.handler({ toolName: "bash", input: { command: "ls" } }, c);
+  await pi.handler({ toolName: "bash", input: { command: "ls -la" } }, c);
+  const result = await pi.handler({ toolName: "bash", input: { command: "pwd" } }, c);
+  assert.equal(result, undefined, "different command resets loop tracking");
+});
+
+test("denied calls do not count toward doom-loop: deny reason reported every time", async () => {
+  const pi = harness({ rules: { bash: { "rm *": "deny" } } });
+  const call = { toolName: "bash", input: { command: "rm x" } };
+  const c = ctx();
+  for (let i = 1; i <= 3; i++) {
+    const result = (await pi.handler(call, c)) as { block: boolean; reason: string };
+    assert.equal(result.block, true, `${i}th call: blocked`);
+    assert.match(result.reason, /denied by permission rule/, `${i}th call: real deny reason, not doom-loop`);
+  }
+  assert.equal(c.notifies.length, 0, "no doom-loop notification");
+  // a subsequent allowed call still trips the guard (ring works for allowed loops)
+  const allowCall = { toolName: "bash", input: { command: "ls" } };
+  await pi.handler(allowCall, c);
+  await pi.handler(allowCall, c);
+  const doom = (await pi.handler(allowCall, c)) as { reason: string };
+  assert.match(doom.reason, /doom-loop/);
+});
+
+// ── external_directory boundary ───────────────────────────────────────────
+
+test("external_directory: inside-cwd path bypasses the boundary, no rule → allow", async () => {
+  const pi = harness({ rules: { external_directory: { "~/secret/**": "allow" } } });
+  const result = await pi.handler({ toolName: "write", input: { path: "/proj/src/a.ts" } }, ctx());
+  assert.equal(result, undefined, "inside cwd: no external check, no rule → allow");
+});
+
+test("external_directory deny blocks path outside cwd", async () => {
+  const pi = harness({
+    rules: { external_directory: { "*": "deny", "~/projects/**": "allow" } },
+  });
+  const result = (await pi.handler({ toolName: "write", input: { path: "/etc/passwd" } }, ctx())) as { block: boolean; reason: string };
+  assert.equal(result.block, true);
+  assert.match(result.reason, /external_directory/);
+});
+
+test("external_directory deny does NOT block a path equal to the workspace root", async () => {
+  // Regression: isExternal treated path === cwd as external, so a root-path
+  // read (e.g. ls /proj) was blocked by external_directory {"*":"deny"}.
+  const pi = harness({ rules: { external_directory: { "*": "deny" } } });
+  const result = await pi.handler({ toolName: "read", input: { path: "/proj" } }, ctx());
+  assert.equal(result, undefined, "cwd itself is not external → no rule matched → allow");
+});
+
+test("external_directory deny catches `..` traversal (upstream regression 0.2.4)", async () => {
+  // resolve() used a hand-rolled join that left `..` unnormalized: "../x"
+  // became "/proj/../x" and the isExternal prefix check classified it
+  // internal — bypassing the deny gate entirely.
+  const pi = harness({ rules: { external_directory: { "*": "deny" } } });
+  const r1 = (await pi.handler({ toolName: "read", input: { path: "../outside/s.txt" } }, ctx())) as { block: boolean; reason: string };
+  assert.equal(r1.block, true, "../outside/s.txt resolves outside /proj");
+  assert.match(r1.reason, /external_directory/);
+  const r2 = (await pi.handler({ toolName: "read", input: { path: "../../etc/passwd" } }, ctx())) as { block: boolean; reason: string };
+  assert.equal(r2.block, true, "../../etc/passwd resolves outside /proj");
+  assert.match(r2.reason, /external_directory/);
+});
+
+test("external_directory deny catches `~/…` paths (upstream regression 0.2.6)", async () => {
+  // The boundary check ran on the RAW path: `~/ext/file` posix-resolved to
+  // /proj/~/ext/file → classified internal → deny gate never fired, while the
+  // path tool expands ~ to an external file. ~ is now expanded before the
+  // boundary check (same as the rule-matching subject already did).
+  const pi = harness({
+    rules: { external_directory: { "*": "deny", "~/projects/**": "allow" } },
+  });
+  const denied = (await pi.handler({ toolName: "read", input: { path: "~/ext/file" } }, ctx())) as { block?: boolean; reason?: string };
+  assert.equal(denied?.block, true, "~/ext/file expands outside cwd → deny gate fires");
+  assert.match(denied.reason ?? "", /external_directory/);
+  const allowed = await pi.handler({ toolName: "read", input: { path: "~/projects/x" } }, ctx());
+  assert.equal(allowed, undefined, "~/projects/** allow rule still applies");
+});
+
+test("external_directory allow lets tool rules still apply", async () => {
+  // Per OpenCode: external_directory is a gate. Once allowed through, tool rules
+  // still apply. Here path is external but allowed; tool rule denies → deny.
+  const pi = harness({
+    rules: {
+      external_directory: { "~/projects/**": "allow" },
+      read: { "~/projects/secret/**": "deny" },
+    },
+  });
+  const c = ctx();
+  c.home = "/home/user";
+  const result = (await pi.handler({ toolName: "read", input: { path: "/home/user/projects/secret/x" } }, c)) as { block: boolean; reason: string };
+  assert.equal(result.block, true, "external allowed but tool rule denies");
+  assert.match(result.reason, /read/);
+});
+
+// ── Session promotions + permanent allowlist ──────────────────────────────
+
+test("'Allow for this session' actually suppresses subsequent prompts (upstream review: HIGH)", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  const c = ctx({ selectChoice: "Allow for this session" });
+  assert.equal(await pi.handler({ toolName: "bash", input: { command: "git status" } }, c), undefined);
+  const c2 = ctx({ selectChoice: "Deny" });
+  assert.equal(await pi.handler({ toolName: "bash", input: { command: "git status" } }, c2), undefined,
+    "session allow recorded, no second prompt");
+  // A DIFFERENT subject must still prompt (deny).
+  const c3 = ctx({ selectChoice: "Deny" });
+  const r = (await pi.handler({ toolName: "bash", input: { command: "rm x" } }, c3)) as { block: boolean };
+  assert.equal(r.block, true, "different subject still prompts");
+  // Reset for the next test — sessionAllows is module state now.
+  await pi.sessionStart({}, c3);
+});
+
+test("'Allow always this session' promotions survive rules re-read from disk (upstream regression)", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  assert.equal(
+    await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Allow for this session" })),
+    undefined,
+  );
+  // Different rules object instance (as if re-read from disk), same subject.
+  const rules2 = { bash: { "*": "ask" } };
+  (pi as unknown as { getSetting: (n: string) => unknown }).getSetting = (name) => (name === "permission" ? rules2 : undefined);
+  assert.equal(
+    await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Deny" })),
+    undefined,
+    "promotion survives settings re-read",
+  );
+  await pi.sessionStart({}, ctx());
+});
+
+test("'Add to permanent allowlist' persists the rule and allows (upstream regression)", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  const c = ctx({ selectChoice: "Add to permanent allowlist" });
+  const cwd = mkdtempSync(join(tmpdir(), "perm-allowlist-"));
+  const agentDir = mkdtempSync(join(tmpdir(), "perm-allowlist-global-"));
+  const savedAgentDir = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = agentDir; // isolate: never touch the real global settings.json
+  try {
+    c.cwd = cwd; // persistAllowlistRule writes <cwd>/.pi/settings.json
+    c.isProjectTrusted = () => true; // trusted project → project scope is read/written
+    assert.equal(await pi.handler({ toolName: "bash", input: { command: "npm test" } }, c), undefined);
+    const written = JSON.parse(readFileSync(join(cwd, ".pi", "settings.json"), "utf8"));
+    assert.deepEqual(written.permission.bash, { "npm test": "allow" });
+    assert.equal(c.notifies.length, 1, "notify fired once");
+    assert.match(c.notifies[0]!.m, /Permission rule added/);
+    // Second call: session-promoted too — no prompt, no deny.
+    const c2 = ctx({ selectChoice: "Deny" });
+    c2.cwd = cwd;
+    assert.equal(await pi.handler({ toolName: "bash", input: { command: "npm test" } }, c2), undefined);
+  } finally {
+    if (savedAgentDir === undefined) delete process.env.PI_CODING_AGENT_DIR;
+    else process.env.PI_CODING_AGENT_DIR = savedAgentDir;
+    rmSync(agentDir, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+  await pi.sessionStart({}, c);
+});
+
+test("persistAllowlistRule: whole-tool string rule preserved as '*'", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "perm-allowlist2-"));
+  try {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "settings.json"), JSON.stringify({ permission: { read: "ask" }, theme: "dark" }));
+    const r = persistAllowlistRule("read", "src/a.ts", { cwd });
+    assert.equal(r.error, undefined);
+    const written = JSON.parse(readFileSync(join(cwd, ".pi", "settings.json"), "utf8"));
+    assert.deepEqual(written.permission.read, { "*": "ask", "src/a.ts": "allow" });
+    assert.equal(written.theme, "dark", "other keys preserved");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("persistAllowlistRule: prefers the settings.json that already has permission config", () => {
+  const home = mkdtempSync(join(tmpdir(), "perm-home-"));
+  const cwd = mkdtempSync(join(tmpdir(), "perm-cwd-"));
+  try {
+    mkdirSync(join(home, ".pi"), { recursive: true });
+    writeFileSync(join(home, ".pi", "settings.json"), JSON.stringify({ permission: { bash: { "*": "ask" } } }));
+    const r = persistAllowlistRule("bash", "npm test", { cwd }, [join(cwd, ".pi"), join(home, ".pi")]);
+    assert.equal(r.error, undefined);
+    assert.equal(r.file, join(home, ".pi", "settings.json"), "wrote where permission config lives");
+    assert.ok(!existsSync(join(cwd, ".pi", "settings.json")), "no stray file in cwd");
+  } finally {
+    rmSync(home, { recursive: true, force: true });
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("dismissed ask dialog (Esc → undefined) fails closed", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  const c = ctx({});
+  c.ui.select = async () => undefined; // dismissed
+  const r = (await pi.handler({ toolName: "bash", input: { command: "git status" } }, c)) as { block: boolean; reason: string };
+  assert.equal(r.block, true, "dismissed dialog blocks");
+  assert.match(r.reason, /denied by user/);
+});
+
+test("session promotion never overrides an explicit deny (upstream review: HIGH)", async () => {
+  const pi = harness({ rules: { bash: { "git status": "ask" } } });
+  assert.equal(
+    await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Allow for this session" })),
+    undefined,
+  );
+  // ...then settings are re-read from disk with the same subject denied.
+  (pi as unknown as { getSetting: (n: string) => unknown }).getSetting = (name) => (name === "permission" ? { bash: { "git status": "deny" } } : undefined);
+  const r1 = (await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Allow once" }))) as { block?: boolean; reason?: string };
+  assert.ok(r1?.block, "tool-level deny wins over session promotion");
+  assert.match(r1.reason ?? "", /denied by permission rule/);
+  // Global deny also wins.
+  (pi as unknown as { getSetting: (n: string) => unknown }).getSetting = (name) => (name === "permission" ? { "*": "deny" } : undefined);
+  const r2 = (await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Allow once" }))) as { block?: boolean };
+  assert.ok(r2?.block, "global deny wins over session promotion");
+  await pi.sessionStart({}, ctx());
+});
+
+test("wildcard-bearing subjects are refused by the permanent allowlist (upstream review: MED)", () => {
+  const r = persistAllowlistRule("bash", "git add *", { cwd: "/tmp" }, ["/nonexistent-dir-xyz"]);
+  assert.ok(r.error, "glob subject refused");
+  assert.match(r.error ?? "", /wildcard/);
+});
+
+test("persistAllowlistRule refuses to overwrite unparseable settings.json (upstream review: MED)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "perm-corrupt-"));
+  try {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(join(cwd, ".pi", "settings.json"), "{bad json");
+    const before = readFileSync(join(cwd, ".pi", "settings.json"), "utf8");
+    const r = persistAllowlistRule("bash", "npm test", { cwd });
+    assert.ok(r.error, "corrupt file → error");
+    assert.match(r.error ?? "", /not valid JSON/);
+    assert.equal(readFileSync(join(cwd, ".pi", "settings.json"), "utf8"), before, "file untouched");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("persistAllowlistRule re-appends subject so the allow wins last-match-wins (upstream review: LOW)", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "perm-order-"));
+  try {
+    mkdirSync(join(cwd, ".pi"), { recursive: true });
+    writeFileSync(
+      join(cwd, ".pi", "settings.json"),
+      JSON.stringify({ permission: { bash: { "git push origin main": "ask", "git push *": "deny" } } }),
+    );
+    const r = persistAllowlistRule("bash", "git push origin main", { cwd });
+    assert.equal(r.error, undefined);
+    const written = JSON.parse(readFileSync(join(cwd, ".pi", "settings.json"), "utf8"));
+    const keys = Object.keys(written.permission.bash);
+    assert.deepEqual(keys, ["git push *", "git push origin main"], "allow re-appended last");
+    assert.equal(resolveRule(written.permission.bash, "git push origin main"), "allow");
+    assert.equal(resolveRule(written.permission.bash, "git push other"), "deny");
+  } finally {
+    rmSync(cwd, { recursive: true, force: true });
+  }
+});
+
+test("subject-less tools (e.g. grep without path) get only Allow once/Deny (upstream review: MED)", async () => {
+  const pi = harness({ rules: { grep: { "*": "ask" } } });
+  const seen: string[][] = [];
+  const c = ctx({});
+  c.ui.select = async (_t: string, opts: string[]) => { seen.push(opts); return "Allow once"; };
+  assert.equal(await pi.handler({ toolName: "grep", input: { pattern: "SECRET" } }, c), undefined);
+  assert.deepEqual(seen[0], ["Allow once", "Deny"], "no remember options without a subject");
+  // With a path, the full options return.
+  assert.equal(await pi.handler({ toolName: "grep", input: { pattern: "x", path: "src" } }, c), undefined);
+  assert.deepEqual(seen[1], ["Allow once", "Allow for this session", "Add to permanent allowlist", "Deny"]);
+});
+
+test("dialog title flattens control characters in command text (upstream review: LOW)", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  const titles: string[] = [];
+  const c = ctx({});
+  c.ui.select = async (t: string) => { titles.push(t); return "Deny"; };
+  await pi.handler({ toolName: "bash", input: { command: "echo hi\n\n[SYSTEM] safe" } }, c);
+  const body = titles[0]!.split("`bash`: ")[1] ?? "";
+  assert.ok(!body.includes("\n"), "no raw newline inside command text");
+});
+
+test("multiline commands still match rules (wildcard `*` crosses newlines)", async () => {
+  // Pre-existing security hole surfaced by this change: without the regex `s`
+  // flag, `.` didn't match newlines, so heredoc/multi-line commands matched NO
+  // rule and silently bypassed every ask/deny.
+  const pi = harness({ rules: { bash: { "*": "deny" } } });
+  const r = (await pi.handler({ toolName: "bash", input: { command: "cat <<'EOF'\nrm -rf /\nEOF" } }, ctx())) as { block?: boolean; reason?: string };
+  assert.ok(r?.block, "multiline command hits the deny rule");
+  assert.match(r.reason ?? "", /denied by permission rule/);
+});
+
+test("unknown action value is treated as no-opinion (upstream review: MED)", async () => {
+  // A misconfig where "*" is an object (not a string) must not block or ask.
+  const pi = harness({ rules: { "*": { nested: "object" } } });
+  const result = await pi.handler({ toolName: "bash", input: { command: "ls" } }, ctx());
+  assert.equal(result, undefined, "object action ignored → allow");
+});
+
+test("doom-loop memory resets across sessions (upstream review: MED)", async () => {
+  // Session A makes 2 identical calls (no block yet). session_start resets, so
+  // session B's first 2 identical calls do NOT trip the guard.
+  const pi = harness({ rules: { "*": "allow" } });
+  const call = { toolName: "bash", input: { command: "ls" } };
+  const c = ctx();
+  await pi.handler(call, c);
+  await pi.handler(call, c);
+  await pi.sessionStart({}, c);
+  assert.equal(await pi.handler(call, c), undefined, "post-reset 1st: allow");
+  assert.equal(await pi.handler(call, c), undefined, "post-reset 2nd: allow");
+});
+
+test("stale runner (getFlag throws at load) never crashes handlers (upstream regression)", async () => {
+  const pi = harness({ rules: { bash: "*" }, getFlagThrows: true }); // string rule → "ask"
+  const c = ctx({ selectChoice: "Allow once" });
+  const call = { toolName: "bash", input: { command: "ls" } };
+  const result = await pi.handler(call, c);
+  assert.equal(result, undefined, "ask → Allow once → allow");
+  const second = await pi.handler(call, c);
+  assert.equal(second, undefined, "second call handled identically");
+});
+
+// ── Scoped path-rule normalization (upstream 2026-09-26 nightly) ──────────
+
+test("scoped write allow cannot be bypassed with ../ traversal", async () => {
+  const pi = harness({ rules: { write: { "*": "deny", "src/*": "allow" } } });
+  const result = (await pi.handler({ toolName: "write", input: { path: "src/../../outside.txt" } }, ctx())) as { block?: boolean; reason?: string };
+  assert.ok(result?.block, "src/../../outside.txt must NOT match src/*");
+  assert.match(result?.reason ?? "", /denied by permission rule/);
+});
+
+test("absolute path still matches a relative scoped deny", async () => {
+  const pi = harness({ rules: { read: { "*": "allow", "private/*": "deny" } } });
+  // ctx().cwd = /proj → /proj/private/key.pem normalizes to private/key.pem.
+  const result = (await pi.handler({ toolName: "read", input: { path: "/proj/private/key.pem" } }, ctx())) as { block?: boolean; reason?: string };
+  assert.ok(result?.block, "/proj/private/key.pem must match private/* deny");
+  assert.match(result?.reason ?? "", /denied by permission rule/);
+});
+
+test("legitimate in-scope path still allowed under scoped rules", async () => {
+  const pi = harness({ rules: { write: { "*": "deny", "src/*": "allow" } } });
+  const result = await pi.handler({ toolName: "write", input: { path: "src/a.ts" } }, ctx());
+  assert.equal(result, undefined, "src/a.ts stays allowed");
+});
+
+test("win32 drive-letter absolute pattern matches the absolute subject (deny fires)", async () => {
+  // Regression (0.2.7 review): `pat.startsWith("/")` only recognized posix
+  // absolutes — a `C:\private\*` deny was matched against the RELATIVE subject
+  // and never fired on Windows.
+  const pi = harness({ rules: { read: { "*": "allow", "C:\\private\\*": "deny" } } });
+  const c = ctx({ cwd: "C:\\proj" });
+  (c as TestCtx).ppath = win32;
+  const result = (await pi.handler({ toolName: "read", input: { path: "C:\\private\\key.pem" } }, c)) as { block?: boolean };
+  assert.ok(result?.block, "win32 drive-letter deny must fire on the absolute subject");
+});
+
+// ── ceulen delta: plan-mode deferral via the shared plan-bridge flag ──────
+
+test("plan mode active → permission has NO opinion (no prompt, no block)", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask", "rm *": "deny" } } });
+  const prev = isPlanActive();
+  try {
+    setPlanActive(true);
+    // Even an explicit DENY is deferred — plan mode owns gating while on.
+    assert.equal(await pi.handler({ toolName: "bash", input: { command: "rm x" } }, ctx()), undefined);
+    assert.equal(await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Deny" })), undefined);
+    // The doom-loop ring must not consume deferred calls either.
+    await pi.sessionStart({}, ctx());
+  } finally {
+    setPlanActive(prev);
+  }
+});
+
+test("plan mode off again → permission resumes gating", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask" } } });
+  const prev = isPlanActive();
+  try {
+    setPlanActive(true);
+    assert.equal(await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx()), undefined);
+    setPlanActive(false);
+    const r = (await pi.handler({ toolName: "bash", input: { command: "git status" } }, ctx({ selectChoice: "Deny" }))) as { block: boolean; reason: string };
+    assert.equal(r.block, true, "gating resumes the moment plan mode exits");
+    await pi.sessionStart({}, ctx());
+  } finally {
+    setPlanActive(prev);
+  }
+});
+
+test("plan-bridge flag round-trips", () => {
+  const prev = isPlanActive();
+  try {
+    assert.equal(typeof isPlanActive(), "boolean");
+    setPlanActive(true);
+    assert.equal(isPlanActive(), true);
+    setPlanActive(false);
+    assert.equal(isPlanActive(), false);
+  } finally {
+    setPlanActive(prev);
+  }
+});

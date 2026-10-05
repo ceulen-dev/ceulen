@@ -57,6 +57,7 @@ import { readDisabledTools } from "../../lib/tools.js";
 // frontmatter (user + project + bundled). discoverAgents is a pure fs loader,
 // independent of whether the subagent module itself is enabled.
 import { discoverAgents } from "../subagent/lib/agents.js";
+import { setPlanActive } from "../../lib/plan-bridge.ts";
 
 export const PLAN_STATUS_KEY = "ceulen-plan";
 export const PLAN_ENTRY_TYPE = "ceulen-plan";
@@ -203,6 +204,10 @@ export default function planModule(pi: ExtensionAPI): void {
 
   function updateStatus(ctx: ExtensionContext): void {
     ctx.ui.setStatus(PLAN_STATUS_KEY, planModeEnabled ? ctx.ui.theme.fg("accent", "Plan mode") : undefined);
+    // Publish for the permission module (plan-bridge) — updateStatus runs after
+    // EVERY planModeEnabled assignment site, so this one line covers toggle,
+    // session restore, startup flag, and exit-for-execution.
+    setPlanActive(planModeEnabled);
   }
 
   /** Restore branch-scoped state (session_start / session_tree). */
