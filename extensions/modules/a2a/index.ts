@@ -13,7 +13,7 @@
  */
 
 import { homedir } from "node:os";
-import { chmodSync, realpathSync } from "node:fs";
+import { chmodSync } from "node:fs";
 import { join } from "node:path";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -547,7 +547,9 @@ export default function a2aExtension(pi: ExtensionAPI): void {
   // resources_discover — NOT via the package.json pi.skills manifest — so the
   // kill-switch gates it too (web module pattern).
   pi.on("resources_discover", () => {
-    return { skillPaths: [join(realpathSync(skillsRoot()), "a2a")] };
+    // skillsRoot() is already a native absolute path (fileURLToPath) — no
+    // realpath needed; a throw here would kill the whole module load.
+    return { skillPaths: [join(skillsRoot(), "a2a")] };
   });
 
   pi.registerTool({

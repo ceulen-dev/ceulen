@@ -166,7 +166,9 @@ export default function piWebExtension(pi: ExtensionAPI) {
   // package.json `pi.skills` manifest — so the kill-switch gates it too:
   // disabled module ⇒ factory never runs ⇒ no web skill registered.
   pi.on("resources_discover", () => ({
-    skillPaths: [path.join(fs.realpathSync(skillsRoot()), "web")],
+    // skillsRoot() is already a native absolute path (fileURLToPath) — no
+    // realpath needed; a throw here would kill the whole module load.
+    skillPaths: [path.join(skillsRoot(), "web")],
   }));
 
   // Per-tool kill-switch (ceulen.disabledTools): listed tools register

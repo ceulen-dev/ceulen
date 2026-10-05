@@ -571,7 +571,9 @@ export default function muninExtension(pi: ExtensionAPI) {
   // package.json `pi.skills` manifest — so the kill-switch gates it too:
   // disabled module ⇒ factory never runs ⇒ no munin skill registered.
   pi.on("resources_discover", () => ({
-    skillPaths: [path.join(fs.realpathSync(skillsRoot()), "munin")],
+    // skillsRoot() is already a native absolute path (fileURLToPath) — no
+    // realpath needed; a throw here would kill the whole module load.
+    skillPaths: [path.join(skillsRoot(), "munin")],
   }));
 
   // Per-tool kill-switch (ceulen.disabledTools): listed tools register
