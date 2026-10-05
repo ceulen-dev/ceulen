@@ -17,6 +17,13 @@ jobs:
         with:
           node-version: 24
           registry-url: https://registry.npmjs.org
+      # Publish gate: the release event fires on whatever main points at —
+      # verify the tagged tree BEFORE it reaches npm (advisor catch: publish.yml
+      # previously shipped on `npm publish` alone).
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm pack --dry-run
       - run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_API_KEY }}
