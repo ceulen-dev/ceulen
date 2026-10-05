@@ -1516,51 +1516,105 @@ export function formatCtxPercent(tokens: number, contextWindow: number): string 
 
 /** Waffle-chart glyphs, matching OMP's vocabulary. */
 const WAFFLE_FILLED = "⛁";
+const WAFFLE_MESSAGES = "⛃";
 const WAFFLE_FREE = "⛶";
 const WAFFLE_BUFFER = "⛝";
 
-/** OMP's signature waffle grid: `rows × cols` cells over the window, painted in
- *  slice order (used categories → free → autocompact buffer).
- *
- *  Cells are allocated by share of the window, with a **minimum of one cell per
- *  slice worth ≥0.5%** — deliberate visibility scaling, the same choice OMP
- *  makes (their 2%-used grid still lights up a third of the cells). Any
- *  shortfall or overflow is absorbed by the largest slice, so the grid always
- *  fills exactly `rows × cols` cells. */
-export function ctxWaffle(
-  slices: { tokens: number; glyph: string }[],
+/** OMP grid geometry: 20×10 = 200 space-joined cells beside the legend. */
+export const CTX_GRID_COLS = 20;
+export const CTX_GRID_ROWS = 10;
+const CTX_GUTTER = "   ";
+
+/** One planned cell: glyph + the ThemeColor (or "strong") to paint it with. */
+export interface CtxCell {
+  glyph: string;
+  color: "accent" | "warning" | "success" | "userMessageText" | "customMessageLabel" | "dim";
+}
+
+/** OMP's category→color map (all tokens exist in pi's ThemeColor). */
+const CTX_CATEGORY_STYLE: Record<string, { glyph: string; color: CtxCell["color"] }> = {
+  "System prompt": { glyph: WAFFLE_FILLED, color: "accent" },
+  "System tools": { glyph: WAFFLE_FILLED, color: "warning" },
+  "System context": { glyph: WAFFLE_FILLED, color: "customMessageLabel" },
+  Skills: { glyph: WAFFLE_FILLED, color: "success" },
+  Messages: { glyph: WAFFLE_MESSAGES, color: "userMessageText" },
+  "Free space": { glyph: WAFFLE_FREE, color: "dim" },
+  "Autocompact buffer": { glyph: WAFFLE_BUFFER, color: "warning" },
+};
+
+/** OMP's cell planner over the disjoint categories: cells are allocated by
+ *  share of the window, every nonzero category keeps at least one visible cell
+ *  (visibility scaling — OMP's ratioCells has no lower share gate). Overflow
+ *  trims from the largest category first, never below one cell; the remainder
+ *  is painted free, then the autocompact buffer hatches the tail. Always
+ *  exactly cols × rows cells. */
+export function planCtxCells(
+  categories: { label: string; tokens: number }[],
   contextWindow: number,
-  cols = 10,
-  rows = 4,
-): string[] {
+  cols = CTX_GRID_COLS,
+  rows = CTX_GRID_ROWS,
+): CtxCell[] {
   const cells = cols * rows;
-  if (!(contextWindow > 0)) return Array.from({ length: rows }, () => WAFFLE_FREE.repeat(cols));
-  const MIN_SHARE = 0.005;
-  const alloc = slices.map((s) => {
-    const tokens = Math.max(0, s.tokens);
-    if (tokens <= 0) return 0;
-    const share = tokens / contextWindow;
-    return share < MIN_SHARE ? 1 : Math.max(1, Math.round(share * cells));
-  });
-  // Overflow swallows from the largest slice first (never below one cell).
-  let total = alloc.reduce((a, b) => a + b, 0);
-  while (total > cells) {
-    const biggest = alloc.indexOf(Math.max(...alloc));
-    if (alloc[biggest] <= 1) break;
-    alloc[biggest] -= 1;
-    total -= 1;
+  if (!(contextWindow > 0)) {
+    return Array.from({ length: cells }, () => ({ glyph: WAFFLE_FREE, color: "dim" as const }));
   }
-  // Underflow pads the LARGEST slice — with a well-formed breakdown that is free
-  // space. Never the last slice: that would inflate the autocompact buffer (a
-  // fixed reserve) whenever a category figure is underestimated.
-  if (total < cells && alloc.length > 0) {
-    const biggest = alloc.indexOf(Math.max(...alloc));
-    alloc[biggest] += cells - total;
+  const tokensPerCell = contextWindow / cells;
+  const count = (tokens: number) => (tokens > 0 ? Math.max(1, Math.round(tokens / tokensPerCell)) : 0);
+  const planned = categories.map((c) => ({ style: CTX_CATEGORY_STYLE[c.label] ?? { glyph: WAFFLE_FILLED, color: "accent" as const }, n: count(c.tokens) }));
+  let used = planned.reduce((a, p) => a + p.n, 0);
+  if (used > cells) {
+    // Trim from the largest allocations first, preserving visibility for small ones.
+    const order = [...planned].sort((a, b) => b.n - a.n);
+    let overflow = used - cells;
+    for (const p of order) {
+      while (overflow > 0 && p.n > 1) {
+        p.n -= 1;
+        overflow -= 1;
+      }
+    }
+    used = planned.reduce((a, p) => a + p.n, 0);
   }
-  const glyphs = alloc.flatMap((count, i) => Array.from({ length: count }, () => slices[i].glyph));
-  const out: string[] = [];
-  for (let r = 0; r < rows; r++) out.push(glyphs.slice(r * cols, (r + 1) * cols).join(""));
-  return out;
+  const freeCount = Math.max(0, cells - used);
+  const out: CtxCell[] = [];
+  for (const p of planned) for (let i = 0; i < p.n; i++) out.push({ glyph: p.style.glyph, color: p.style.color });
+  for (let i = 0; i < freeCount; i++) out.push({ glyph: WAFFLE_FREE, color: "dim" });
+  while (out.length < cells) out.push({ glyph: WAFFLE_FREE, color: "dim" });
+  return out.slice(0, cells);
+}
+
+/** Styled legend runs (OMP's LegendPart shape): `s` is a ThemeColor, "strong"
+ *  (bold), or undefined (plain). Plain data — the renderer applies the live
+ *  theme at display time. */
+export type CtxLegendPart = { t: string; s?: CtxCell["color"] | "muted" | "strong" };
+
+/** Legend lines for the /context panel, mirroring OMP's buildLegendParts:
+ *  model header, totals, then the per-category block and free/buffer rows. */
+export function buildCtxLegend(b: ContextBreakdown): CtxLegendPart[][] {
+  const k = formatCtxTokens;
+  const pct = (n: number) => formatCtxPercent(n, b.contextWindow);
+  const windowLabel = b.contextWindow > 0 ? k(b.contextWindow) : "?";
+  const lines: CtxLegendPart[][] = [];
+  if (b.modelName) lines.push([{ t: b.modelName, s: "strong" }, ...(b.contextWindow > 0 ? [{ t: ` (${windowLabel} context)`, s: "dim" as const }] : [])]);
+  if (b.modelLabel) lines.push([{ t: `${b.modelLabel.split("/").pop()}${b.contextWindow > 0 ? `[${windowLabel}]` : ""}`, s: "muted" as const }]);
+  const used = b.usedTokens ?? b.systemPrompt.total + b.tools.total + b.messages.total;
+  lines.push([
+    { t: k(used), s: "strong" },
+    { t: `/${windowLabel} tokens`, s: "dim" },
+    { t: ` (${formatCtxPercent(used, b.contextWindow)})`, s: "muted" as const },
+  ]);
+  lines.push([]);
+  lines.push([{ t: "Estimated usage by category", s: "muted" as const }]);
+  for (const c of b.categories) {
+    const style = CTX_CATEGORY_STYLE[c.label];
+    lines.push([
+      { t: c.glyph, s: style?.color ?? "accent" },
+      { t: ` ${c.label}: ` },
+      { t: k(c.tokens), s: "strong" },
+      { t: c.tokens === 1 ? " token " : " tokens ", s: "dim" },
+      { t: `(${pct(c.tokens)})`, s: "dim" },
+    ]);
+  }
+  return lines;
 }
 
 /** Token cost of one tool as the prompt carries it: description + JSON
@@ -1758,7 +1812,7 @@ export function computeContextBreakdown(input: ContextBreakdownInput): ContextBr
     { label: "System tools", tokens: toolsTotal, glyph: "⛁" },
     { label: "System context", tokens: contextTokens, glyph: "⛁" },
     { label: "Skills", tokens: skillsTokens, glyph: "⛁" },
-    { label: "Messages", tokens: messagesRow, glyph: WAFFLE_FILLED },
+    { label: "Messages", tokens: messagesRow, glyph: WAFFLE_MESSAGES },
     { label: "Free space", tokens: freeSpace, glyph: WAFFLE_FREE },
     // The reserve is the LAST slice of the window (pi compacts at
     // `tokens > window - reserve`), so it renders after free space.
@@ -1789,9 +1843,10 @@ export function computeContextBreakdown(input: ContextBreakdownInput): ContextBr
   };
 }
 
-/** Render the /context panel in OMP's layout: waffle grid + model info to its
- *  right, then a disjoint "Estimated usage by category" block, then detail
- *  lists and pruning recommendations. */
+/** Render the /context panel in OMP's layout: 20×10 cell grid paired with the
+ *  legend beside it (3-space gutter), then detail lists and pruning
+ *  recommendations. Returns plain lines for the transcript fallback; the
+ *  structured grid+legend for the themed renderer rides in `details`. */
 export function renderContextPanel(b: ContextBreakdown): string[] {
   const k = formatCtxTokens;
   const pct = (n: number) => ` (${formatCtxPercent(n, b.contextWindow)})`;
@@ -1806,28 +1861,34 @@ export function renderContextPanel(b: ContextBreakdown): string[] {
   }
   const used = b.usedTokens ?? b.systemPrompt.total + b.tools.total + b.messages.total;
 
-  // ── Header: waffle on the left (10 cols), model + totals on the right ──
-  // Painted in window order: used categories → free → autocompact buffer.
-  const waffleSlices = b.categories.map((c) => ({ tokens: c.tokens, glyph: c.glyph }));
-  const grid = ctxWaffle(waffleSlices, b.contextWindow, 10, 4);
-  const right = [
-    b.modelName ? `${b.modelName}${b.contextWindow > 0 ? ` (${k(b.contextWindow)} context)` : ""}` : undefined,
-    // OMP shows the bare model id with the window bracketed: `glm-5.3[1m]`.
-    b.modelLabel ? `${b.modelLabel.split("/").pop()}${b.contextWindow > 0 ? `[${k(b.contextWindow)}]` : ""}` : undefined,
-    `${k(used)}/${k(b.contextWindow)} tokens (${formatCtxPercent(used, b.contextWindow)})`,
-    "Estimated usage by category",
-  ];
-  for (let r = 0; r < grid.length; r++) {
-    const rightText = right[r];
-    lines.push(rightText ? `${grid[r]}  ${rightText}` : grid[r]);
+  // ── Header: 20×10 cell grid on the left, legend on the right ──
+  const cells = planCtxCells(b.categories, b.contextWindow);
+  const gridRows: string[] = [];
+  for (let r = 0; r < CTX_GRID_ROWS; r++) {
+    gridRows.push(cells.slice(r * CTX_GRID_COLS, (r + 1) * CTX_GRID_COLS).map((c) => c.glyph).join(" "));
   }
-  for (const extra of right.slice(grid.length)) if (extra) lines.push("            " + extra);
+  // Legend lines share the per-category color map; build them as plain text here.
+  const legend: string[] = [];
+  if (b.modelName) legend.push(`${b.modelName}${b.contextWindow > 0 ? ` (${k(b.contextWindow)} context)` : ""}`);
+  // OMP shows the bare model id with the window bracketed: `glm-5.3[1m]`.
+  if (b.modelLabel) legend.push(`${b.modelLabel.split("/").pop()}${b.contextWindow > 0 ? `[${k(b.contextWindow)}]` : ""}`);
+  legend.push(`${k(used)}/${k(b.contextWindow)} tokens (${formatCtxPercent(used, b.contextWindow)})`);
+  legend.push("");
+  legend.push("Estimated usage by category");
+  for (const c of b.categories) {
+    legend.push(`${c.glyph} ${c.label}: ${k(c.tokens)} token${c.tokens === 1 ? "" : "s"}${pct(c.tokens)}`);
+  }
+
+  const bodyLines = Math.max(CTX_GRID_ROWS, legend.length);
+  const blankGrid = " ".repeat(gridRows[0]?.length ?? 0);
+  for (let r = 0; r < bodyLines; r++) {
+    const g = r < gridRows.length ? gridRows[r] : blankGrid;
+    const l = legend[r] ?? "";
+    lines.push(l.length > 0 ? `${g}${CTX_GUTTER}${l}` : g);
+  }
   lines.push("");
 
-  // ── Disjoint category block (glyph-prefixed, OMP style) ──
-  for (const c of b.categories) {
-    lines.push(` ${c.glyph} ${c.label}: ${k(c.tokens)} token${c.tokens === 1 ? "" : "s"}${pct(c.tokens)}`);
-  }
+  // The autocompact row lives in the legend; a disabled compaction still needs its note.
   if (b.compactionDisabled) lines.push(" ⛶ Autocompact buffer: disabled (compaction.enabled=false)");
 
   // ── Detail: system-prompt sections, top tools, per-package attribution ──
@@ -1980,21 +2041,76 @@ export default function (pi: ExtensionAPI) {
 
   // Transcript renderer for /context: pi renders this inline in the scrollback
   // (above the editor), like OMP's panel, instead of a dismissable overlay. The
-  // renderer receives the live theme, so the category glyphs keep their colors
-  // and the panel stays visible while you keep working.
+  // renderer receives the live theme, so grid cells and legend runs keep their
+  // category colors and the panel stays visible while you keep working.
+  // v2 details carry the structured grid + legend as PLAIN data (colors applied
+  // here, at render time — the theme can change between send and render);
+  // legacy entries stored `details.lines` keep the glyph-tint path.
   // Optional-call guard: matches pi-a2a/pi-subagent/pi-advisor, and keeps older
   // SDK builds (and minimal test harnesses) loadable.
-  pi.registerMessageRenderer?.<{ lines: string[] }>(MESSAGE_TYPE_CONTEXT, (message, _opts, theme) => {
+  pi.registerMessageRenderer?.<{ grid?: CtxCell[][]; legend?: CtxLegendPart[][]; lines?: string[] }>(MESSAGE_TYPE_CONTEXT, (message, _opts, theme) => {
     try {
       const fg = theme?.fg ? (c: string, s: string) => theme.fg(c as never, s) : (s: string) => s;
-      const body = (message.details as { lines?: string[] } | undefined)?.lines
-        ?? (typeof message.content === "string" ? message.content.split("\n") : []);
+      const bold = theme?.bold ? (s: string) => theme.bold(s) : (s: string) => s;
+      const details = message.details as { grid?: CtxCell[][]; legend?: CtxLegendPart[][]; lines?: string[] } | undefined;
+      const ANSI_RE = /\u001b\[[0-9;]*m/g;
+      const visibleWidth = (s: string) => [...s.replace(ANSI_RE, "")].length;
       const clamp = (line: string, width: number) => {
-        if (width <= 0 || [...line].length <= width) return line;
+        if (width <= 0 || visibleWidth(line) <= width) return line;
         // Ellipsis rather than a mid-word slice — this is a display clamp, not data loss.
-        const chars = [...line];
-        return chars.length <= width ? line : chars.slice(0, Math.max(0, width - 1)).join("") + "…";
+        const chars = [...line.replace(ANSI_RE, "")];
+        return chars.slice(0, Math.max(0, width - 1)).join("") + "…";
       };
+      if (details?.grid && details?.legend) {
+        // v2: assemble rows as spans (plain text + style), clamp by VISIBLE
+        // width, and only then paint — the ANSI form's codepoint count is
+        // ~12× the visible width and would shred the grid at real widths.
+        // Cells join with a space like OMP's grid (20 cells → 39 columns).
+        const gridSpans = details.grid.map((row) =>
+          row.flatMap((c, i) => {
+            const cell = { t: c.glyph, s: c.color as string };
+            return i === 0 ? [cell] : [{ t: " ", s: "" }, cell];
+          }),
+        );
+        const blankSpans = details.grid[0]?.length
+          ? Array.from({ length: details.grid[0].length * 2 - 1 }, () => ({ t: " ", s: "" }))
+          : [];
+        const bodyLines = Math.max(details.grid.length, details.legend.length);
+        return {
+          render: (width: number) =>
+            Array.from({ length: bodyLines }, (_, r) => {
+              const g = r < gridSpans.length ? gridSpans[r] : blankSpans;
+              const l = details.legend![r] ?? [];
+              // Gutter (3 spaces) rides only when a legend line follows.
+              const gutter: Array<{ t: string; s: string }> = l.length > 0 ? [{ t: CTX_GUTTER, s: "" }] : [];
+              const spans = [...g, ...gutter, ...l.map((p) => ({ t: p.t, s: (p.s ?? "") as string }))];
+              // Emit spans up to the VISIBLE budget; ellipsize the span that
+              // crosses it. Painting happens per span, so escape codes never
+              // inflate the measure.
+              let budget = Math.max(0, width);
+              let out = "";
+              let lastStyle: string | undefined;
+              for (const sp of spans) {
+                if (budget <= 0) break;
+                let t = sp.t;
+                if (visibleWidth(t) > budget) {
+                  t = [...t].slice(0, Math.max(0, budget - 1)).join("") + "…";
+                }
+                if (sp.s !== lastStyle) {
+                  lastStyle = sp.s;
+                  out += sp.s === "strong" ? bold(t) : sp.s ? fg(sp.s as never, t) : t;
+                } else {
+                  out += t;
+                }
+                budget -= visibleWidth(t);
+              }
+              return out;
+            }),
+          invalidate: () => {},
+        };
+      }
+      const body = details?.lines
+        ?? (typeof message.content === "string" ? message.content.split("\n") : []);
       return {
         render: (width: number) => body.map((l) => clamp(l, width)).map((line) => {
           // Tint the category glyph; keep the numeric body plain for contrast.
@@ -2017,10 +2133,16 @@ export default function (pi: ExtensionAPI) {
       // contexts (ExtensionCommandContext) do not expose them.
       const b = computeContextBreakdown({ ctx, allTools: pi.getAllTools(), activeTools: pi.getActiveTools(), model: ctx.model as ContextBreakdownInput["model"], settings: readCompactionSettings() });
       const lines = renderContextPanel(b);
+      // Structured v2 details: grid cells + legend runs as plain data — the
+      // transcript renderer applies the live theme (which may differ at replay).
+      const legend = buildCtxLegend(b);
+      const grid: CtxCell[][] = [];
+      const cells = planCtxCells(b.categories, b.contextWindow);
+      for (let r = 0; r < cells.length; r += CTX_GRID_COLS) grid.push(cells.slice(r, r + CTX_GRID_COLS));
       // display:true → shown in the transcript (above the editor, like OMP).
       // `content` is the plain-text fallback for renderer-less builds and
-      // non-TUI modes; `details.lines` feeds the themed transcript renderer.
-      pi.sendMessage({ customType: MESSAGE_TYPE_CONTEXT, content: lines.join("\n"), display: true, details: { lines } });
+      // non-TUI modes; `details` feeds the themed transcript renderer.
+      pi.sendMessage({ customType: MESSAGE_TYPE_CONTEXT, content: lines.join("\n"), display: true, details: { grid, legend, lines } });
     },
   });
 
