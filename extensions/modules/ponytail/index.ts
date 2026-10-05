@@ -28,6 +28,7 @@ import {
 } from "./lib/config.js";
 import { row, type PanelGroup } from "../../lib/panel.js";
 import type { ModuleConfig } from "../../lib/registry.js";
+import { skillsRoot } from "../../lib/skill-path.js";
 import { filterSkillBodyForMode, getPonytailInstructions } from "./lib/instructions.js";
 import { getSubagentInstructions, shouldInjectSubagentInstructions } from "./lib/subagent.js";
 
@@ -173,9 +174,8 @@ export default function ponytailExtension(pi: ExtensionAPI) {
   // registered. Only THIS module's dirs (not the skills/ root — the ux module
   // owns its own entries there; a whole-dir path would leak ux skills past the
   // ux kill-switch whenever ponytail is enabled).
-  const skillsRoot = new URL("../../../skills/", import.meta.url).pathname;
   pi.on("resources_discover", () => ({
-    skillPaths: ["ponytail", "ponytail-audit", "ponytail-debt", "ponytail-gain", "ponytail-help", "ponytail-review"].map((n) => path.join(skillsRoot, n)),
+    skillPaths: ["ponytail", "ponytail-audit", "ponytail-debt", "ponytail-gain", "ponytail-help", "ponytail-review"].map((n) => path.join(skillsRoot(), n)),
   }));
 
   let currentMode: PonytailMode = DEFAULT_MODE;

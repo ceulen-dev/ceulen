@@ -36,6 +36,7 @@ import {
 } from "./lib/helpers.js";
 import { withRetry } from "./lib/retry.js";
 import { readDisabledTools } from "../../lib/tools.js";
+import { skillsRoot } from "../../lib/skill-path.js";
 
 // Shared schemas — per-call overrides (params win over env/settings).
 const projectParam = Type.Optional(
@@ -569,9 +570,8 @@ export default function muninExtension(pi: ExtensionAPI) {
   // dir) and is contributed through resources_discover — NOT via the
   // package.json `pi.skills` manifest — so the kill-switch gates it too:
   // disabled module ⇒ factory never runs ⇒ no munin skill registered.
-  const skillsRoot = new URL("../../../skills/", import.meta.url).pathname;
   pi.on("resources_discover", () => ({
-    skillPaths: [path.join(fs.realpathSync(skillsRoot), "munin")],
+    skillPaths: [path.join(fs.realpathSync(skillsRoot()), "munin")],
   }));
 
   // Per-tool kill-switch (ceulen.disabledTools): listed tools register

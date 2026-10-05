@@ -39,6 +39,7 @@ import {
   HARD_TIMEOUT_MS,
   truncateParallelOutput,
 } from "./security.ts";
+import { randomUUID } from "node:crypto";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -462,7 +463,7 @@ export async function applyWorktreePatch3way(
   exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
 ): Promise<{ ok: boolean; stderr: string }> {
   const run = applyChain.then(async (): Promise<{ ok: boolean; stderr: string }> => {
-    const tmp = path.join(os.tmpdir(), `pi-subagent-apply-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}.patch`);
+    const tmp = path.join(os.tmpdir(), `pi-subagent-apply-${randomUUID()}.patch`);
     try {
       // git apply interprets paths relative to cwd — write the diff to a file
       // and apply at the repo root. captureWorktreeDiff trims trailing
@@ -470,7 +471,8 @@ export async function applyWorktreePatch3way(
       // restore it (CRLF-aware: trimming "...\r\n" must not downgrade the
       // final line ending to LF).
       const patchText = diff.endsWith("\n") ? diff : `${diff}${diff.includes("\r\n") ? "\r\n" : "\n"}`;
-      await fs.writeFile(tmp, patchText, "utf8");
+      // wx: never follow a pre-planted symlink at this path (shared /tmp).
+      await fs.writeFile(tmp, patchText, { encoding: "utf8", flag: "wx" });
       const res = await runGit(repoRoot, ["apply", "--3way", tmp], exec);
       return { ok: res.ok, stderr: (res.stderr || res.stdout).trim() };
     } catch (error) {

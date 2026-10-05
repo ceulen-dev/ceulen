@@ -16,6 +16,7 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
 import { readDisabledTools } from "../../lib/tools.js";
+import { skillsRoot } from "../../lib/skill-path.js";
 
 import { formatA11ySummary, runA11yAudit } from "./lib/a11y";
 
@@ -164,9 +165,8 @@ export default function piWebExtension(pi: ExtensionAPI) {
   // dir) and is contributed through resources_discover — NOT via the
   // package.json `pi.skills` manifest — so the kill-switch gates it too:
   // disabled module ⇒ factory never runs ⇒ no web skill registered.
-  const skillsRoot = new URL("../../../skills/", import.meta.url).pathname;
   pi.on("resources_discover", () => ({
-    skillPaths: [path.join(fs.realpathSync(skillsRoot), "web")],
+    skillPaths: [path.join(fs.realpathSync(skillsRoot()), "web")],
   }));
 
   // Per-tool kill-switch (ceulen.disabledTools): listed tools register

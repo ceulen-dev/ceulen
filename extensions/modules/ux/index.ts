@@ -29,6 +29,7 @@ import {
 import { getUxInstructions } from "./lib/instructions.js";
 import { row, type PanelGroup } from "../../lib/panel.js";
 import { readDisabledTools } from "../../lib/tools.js";
+import { skillsRoot } from "../../lib/skill-path.js";
 import type { ModuleConfig } from "../../lib/registry.js";
 
 export const readDefaultMode = getDefaultMode;
@@ -278,9 +279,8 @@ export default function uxExtension(pi: ExtensionAPI) {
   // package.json `pi.skills` manifest — so the kill-switch gates them too:
   // disabled module ⇒ factory never runs ⇒ no ux-* skills registered. Only
   // THIS module's dirs: the shared skills/ root belongs to ponytail's handler.
-  const skillsRoot = new URL("../../../skills/", import.meta.url).pathname;
   pi.on("resources_discover", () => ({
-    skillPaths: ["ux-design", "ux-capture", "ux-presets", "ux-routing"].map((n) => path.join(skillsRoot, n)),
+    skillPaths: ["ux-design", "ux-capture", "ux-presets", "ux-routing"].map((n) => path.join(skillsRoot(), n)),
   }));
 
   let currentMode: UxMode = DEFAULT_MODE;

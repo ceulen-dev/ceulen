@@ -145,7 +145,7 @@ export function buildScreenshotArgs(opts: ScreenshotArgsOpts): string[] {
     "--hide-scrollbars",
     `--window-size=${opts.width},${height}`,
     ...(opts.reducedMotion ? ["--force-prefers-reduced-motion"] : []),
-    ...(opts.waitForSec ? [`--virtual-time-budget=${Math.round(opts.waitForSec * 1000)}`] : []),
+    ...(opts.waitForSec ? [`--virtual-time-budget=${Math.max(0, Math.round(opts.waitForSec * 1000))}`] : []),
     `--screenshot=${opts.outPath}`,
     opts.url,
   ];

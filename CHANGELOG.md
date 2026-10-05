@@ -2,6 +2,24 @@
 
 ## Unreleased
 
+## 0.10.1 — 2026-10-07
+
+- **Windows fix**: extension load crashed with `ENOENT ... lstat 'D:\C:'` —
+  the resources_discover skill path was built with `new URL(...).pathname`,
+  which on Windows yields `/C:/...` (leading slash before the drive letter);
+  realpathSync resolved it against the current drive. The bug existed in FIVE
+  modules (web, munin, a2a, ponytail, ux). One shared helper
+  `extensions/lib/skill-path.ts` (`fileURLToPath`) now serves all call sites,
+  with a regression test.
+
+- **Security & robustness review** (12 files): three settings writers (a2a
+  `writeSettingsA2A`, repair settings, a2a session registry) now write
+  `mode: 0o600` like every sibling writer — the files carry API keys/tokens;
+  router `refreshModels` no longer throws on null entries in a hand-edited
+  models-store.json; web `--virtual-time-budget` clamped non-negative;
+  subagent worktree patch temp file gets a randomUUID name + exclusive
+  (`wx`) write (shared-/tmp symlink hardening; cleanup already existed).
+
 - **composer**: status layer aligned with OMP's actual rendering (source-level
   study of `packages/tui/src/components/composer/*` + `status-line/component.ts`):
   band/box embed OMP's POWERLINE row — bg-filled left group

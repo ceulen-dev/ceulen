@@ -768,7 +768,7 @@ export function writeSettingsA2A(opts: {
 
   // Atomic write: temp file + rename.
   const tmp = target + ".tmp";
-  writeFileSync(tmp, JSON.stringify(json, null, 2) + "\n", "utf-8");
+  writeFileSync(tmp, JSON.stringify(json, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
   renameSync(tmp, target);
   return target;
 }

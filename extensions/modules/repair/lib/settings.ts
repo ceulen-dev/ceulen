@@ -108,7 +108,7 @@ export function writeRepairSection(patch: Partial<RepairSettings>): string {
   settings.repair = repair;
   mkdirSync(path.dirname(file), { recursive: true });
   const tmp = file + ".tmp";
-  writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n");
+  writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
   renameSync(tmp, file);
   return file;
 }

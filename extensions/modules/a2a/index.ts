@@ -41,6 +41,7 @@ import { Container, Text } from "@earendil-works/pi-tui";
 // (configPanel.ts). ceulen deltas: ceulen-a2a-inbound customType/status key,
 // per-tool kill-switch wrap, resources_discover skill, restart bridge export.
 import { readDisabledTools } from "../../lib/tools.js";
+import { skillsRoot } from "../../lib/skill-path.js";
 
 // ---------------------------------------------------------------------------
 // Module state
@@ -546,8 +547,7 @@ export default function a2aExtension(pi: ExtensionAPI): void {
   // resources_discover — NOT via the package.json pi.skills manifest — so the
   // kill-switch gates it too (web module pattern).
   pi.on("resources_discover", () => {
-    const skillsRoot = new URL("../../../skills/", import.meta.url).pathname;
-    return { skillPaths: [join(realpathSync(skillsRoot), "a2a")] };
+    return { skillPaths: [join(realpathSync(skillsRoot()), "a2a")] };
   });
 
   pi.registerTool({

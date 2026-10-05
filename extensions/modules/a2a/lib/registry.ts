@@ -62,7 +62,7 @@ export function register(desc: SessionDescriptor, piDir: string): void {
   try {
     const p = fileFor(piDir, desc.pid);
     mkdirSync(dir(piDir), { recursive: true });
-    writeFileSync(p, JSON.stringify(desc, null, 2), { encoding: "utf-8" });
+    writeFileSync(p, JSON.stringify(desc, null, 2), { encoding: "utf-8", mode: 0o600 });
   } catch {
     /* best-effort */
   }

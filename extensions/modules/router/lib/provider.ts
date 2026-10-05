@@ -120,15 +120,19 @@ export function registerProvider(pi: ExtensionAPI, settings: RouterSettings): vo
         // stale persisted flags self-heal — /v1/models vision metadata lies
         // in both directions (see client.ts VISION_OVERRIDES/VISION_DOWNGRADES)
         // and old caches froze it verbatim.
-        return stored.map((m) =>
-          (m as { type?: string }).type === "classifier"
-            ? m
-            : applyReasoning(
-                // Array.isArray guards legacy/malformed store entries (treated as text-only).
-                { ...m, input: resolveVision(m.id, Array.isArray(m.input) && m.input.includes("image")) ? ["text", "image"] : ["text"] } as PiModel,
-                settings.enableReasoning,
-              ),
-        ) as unknown as ProviderModelConfig[];
+        // Non-object entries (null in a hand-edited/corrupted store) are
+        // dropped — a null here used to throw TypeError and break startup.
+        return stored
+          .filter((m): m is NonNullable<typeof m> => m !== null && typeof m === "object")
+          .map((m) =>
+            (m as { type?: string }).type === "classifier"
+              ? m
+              : applyReasoning(
+                  // Array.isArray guards legacy/malformed store entries (treated as text-only).
+                  { ...m, input: resolveVision(m.id, Array.isArray(m.input) && m.input.includes("image")) ? ["text", "image"] : ["text"] } as PiModel,
+                  settings.enableReasoning,
+                ),
+          ) as unknown as ProviderModelConfig[];
       }
 
       const cred = context.credential as { type?: string; key?: string } | undefined;
