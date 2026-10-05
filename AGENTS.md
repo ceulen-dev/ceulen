@@ -561,6 +561,40 @@ so it must precede the last rewriter). Rule files are cached by mtime (the
 ponytail config pattern) — edits apply without /reload; `/rules` = status,
 `/rules reload` = drop the cache.
 
+### GitHub module (gh)
+
+Ported from oh-my-pi's github tool surface (see `extensions/modules/gh/`): ONE
+`github` tool over the `gh` CLI — zero npm deps, `node:child_process` spawn with
+the non-interactive env (GIT_TERMINAL_PROMPT=0, GH_PROMPT_DISABLED=1), a 5-min
+deadline, and an 8-MB output cap (`lib/gh-cli.ts`, the single runner seam every
+op goes through — tests inject a fake). Read-only ops only: `repo_view`,
+`file_read`, `pr_view`, `pr_diff`, the five `search_*` flavors (issues/prs/
+code/commits/repos, with repo:/org:/user: scope detection and since/until date
+qualifiers), and `run_watch` (lean JSON poller, failed-job log tails, budget
+`gh.runWatchTimeoutSecs` default 600s on the /config Tools → GitHub row).
+Registration is FAIL-OPEN on a missing `gh` binary (no tool; the Enable row
+stays reachable). Read-only scope is load-bearing: plan mode auto-allows the
+tool via `READ_ONLY_TOOLS` (plan/lib/plan-tools.ts) — never add a mutating op
+without re-checking that tier. Mutating flows (pr_create/checkout/push) are
+deliberately deferred to bash `gh`.
+
+### Read path selectors (repair module)
+
+The repair module's wrapped `read` accepts OMP-style path suffixes:
+`:50` (from line 50), `:50-200` (inclusive), `:50+150` (count), `:50-`
+(open-ended), `:-60` (last 60 lines), comma-joined ranges/lines
+(`:5-16,960-973`, `:19,59`), `:raw` compounds, and `:conflicts` (one block per
+unresolved merge conflict). Parser: `lib/read-selector.ts` (ported from oh-my-pi
+read-selector.ts + the line-ranges grammar). Resolution order is the OMP issue
+#4618 lesson: a LITERAL path that exists on disk always wins — the selector is
+only peeled when the raw path does not exist and the remainder parses.
+Single ranges translate to the built-in's offset/limit; multi-range and
+conflicts slice in-memory with `[lines … of N]` headers (pi's read output has
+no line-number prefixes). `:img` is dropped (pi read doesn't render SVGs).
+Always-on (deterministic, like read-notice decontamination); the selector
+grammar is appended to the wrapped read's description, which binds at load
+(autoBg precedent — next session).
+
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 
 - The bundle entry wraps each module's `pi` in `guarded()` (extensions/index.ts, one shared ownership map for the whole load loop): a name claimed by a DIFFERENT module throws at load; same-module re-claims pass (router re-registers its provider at runtime — that's the supported update path). Contract tests: `extensions/modules/router/test/guard.test.ts`.

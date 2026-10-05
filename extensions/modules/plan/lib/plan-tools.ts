@@ -25,6 +25,9 @@ export const READ_ONLY_TOOLS = new Set([
   "ux_audit",
   // Decision model: typed questions about caller-supplied state, no side effects.
   "classify",
+  // GitHub tool — v1 surface is strictly read-only (views, searches, run_watch);
+  // mutating ops must never be added without re-checking this tier.
+  "github",
   // NOTE: herdr is deliberately NOT here — its prompt action can drive a
   // write-capable child, so every herdr call takes the confirm tier.
 ]);

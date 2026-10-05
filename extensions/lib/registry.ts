@@ -42,6 +42,8 @@ import muninModule from "../modules/munin/index.ts";
 import { muninConfig } from "../modules/munin/configPanel.ts";
 import webModule from "../modules/web/index.ts";
 import { webConfig } from "../modules/web/configPanel.ts";
+import ghModule from "../modules/gh/index.ts";
+import { ghConfig } from "../modules/gh/configPanel.js";
 import rulesModule from "../modules/rules/index.ts";
 import configModule from "../modules/config/index.ts";
 
@@ -153,6 +155,10 @@ export const MODULES: ModuleEntry[] = [
     "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status",
   ] },
   { name: "rules", category: "Context", describe: "Sticky RULES.md constraints carried in every request + a rulebook of on-demand rules served by rule_get. Nearest-first project walk over user-level.", load: rulesModule, tools: ["rule_get"] },
+  // gh after web: same class of external-fetch tooling; fail-open on a missing
+  // gh binary (registers nothing until installed). Read-only ops only, so
+  // plan mode auto-allows it (plan-tools.ts READ_ONLY_TOOLS).
+  { name: "gh", category: "Tools", describe: "GitHub tool over the gh CLI: repo/file/PR views, PR diff, five search flavors, Actions run_watch. Read-only; mutating flows stay on bash gh.", load: ghModule, config: ghConfig, tools: ["github"] },
   // Steering LAST of the prompt rewriters, i.e. after EVERY before_agent_start
   // composer (ponytail/plan/subagent/munin/advisor/ux/fff/serena/web/rules) and
   // before the config module (load order is load-bearing even though its

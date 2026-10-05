@@ -16,7 +16,7 @@ function normalizedTarget(value: unknown): string {
 
 /** True when the value looks like an indexable source file (extension match). */
 export function looksLikeCodePath(value: unknown): boolean {
-  return /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts|py|go|rs|java|kt|kts|scala|rb|php|cs|cpp|cc|cxx|c|h|hpp|swift|sh|bash|zsh|fish|lua|r|jl|ex|exs|erl|hrl|clj|cljs|fs|fsx|ml|mli|dart|vue|svelte)$/i.test(normalizedTarget(value));
+  return /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts|py|go|rs|java|kt|kts|scala|rb|php|cs|cpp|cc|cxx|c|h|hpp|swift|sh|bash|zsh|fish|lua|r|jl|ex|exs|erl|hrl|clj|cljs|fs|fsx|ml|mli|dart|vue|svelte)$/i.test(normalizedTarget(value).replace(/:\d.*$/, ""));
 }
 
 /** Returns a human reason when a bash command is destructively dangerous. */

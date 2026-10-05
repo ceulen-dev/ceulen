@@ -57,6 +57,112 @@ import { checkDangerousCommand, isRecord, looksLikeCodePath } from "./lib/guards
 import { repairToolArguments, type RepairKind } from "./lib/input-repair.js";
 import { applyPatchToFiles, parsePatch, PatchParseError } from "./lib/patch.js";
 import { readRepairSettings } from "./lib/settings.js";
+import {
+  extractConflictBlocks,
+  isMultiRange,
+  peelPathSelector,
+  resolveTailSelector,
+  selToOffsetLimit,
+  type ParsedSelector,
+} from "./lib/read-selector.js";
+
+// ── Read path selectors (OMP grammar — see lib/read-selector.ts) ──
+
+/** Non-enumerable stash marker so host schema validation never sees it. */
+function stashSelector(args: Record<string, unknown>, selector: ParsedSelector): void {
+  Object.defineProperty(args, "__mtSelector", { value: selector, enumerable: false, configurable: true });
+}
+
+/**
+ * Peel `path:selector` (execute-time — needs ctx.cwd for the existence
+ * probes). A literal path that exists ALWAYS wins (OMP issue #4618) — the
+ * selector is peeled only when the raw path is missing and the suffix parses.
+ * Single-range selectors translate straight to offset/limit; tail / multi-
+ * range / conflicts / raw return a stash for readWithSelector (they need the
+ * file's bytes or line count).
+ */
+function applyReadSelector(args: Record<string, unknown>, cwd: string): unknown {
+  if (!isRecord(args) || typeof args.path !== "string") return args;
+  const raw = args.path;
+  const colonIdx = raw.lastIndexOf(":");
+  if (colonIdx <= 0) return args;
+  if (existsSync(resolvePath(cwd, raw))) return args; // literal wins
+  let peeled: { stem: string; selector?: ParsedSelector };
+  try {
+    peeled = peelPathSelector(raw);
+  } catch (err) {
+    throw new Error(err instanceof Error ? err.message : String(err));
+  }
+  if (!peeled.selector || !existsSync(resolvePath(cwd, peeled.stem))) return args;
+  const out: Record<string, unknown> = { ...args, path: peeled.stem };
+  const sel = peeled.selector;
+  if (sel.kind === "lines" && !isMultiRange(sel)) {
+    // Single range → the built-in's own offset/limit machinery.
+    const { offset, limit } = selToOffsetLimit(sel);
+    if (offset !== undefined) out.offset = offset;
+    if (limit !== undefined) out.limit = limit;
+    if (sel.raw !== true) return out;
+  }
+  stashSelector(out, sel);
+  return out;
+}
+
+/** In-memory slice for multi-range / raw / conflicts selectors. */
+async function readWithSelector(
+  stem: string,
+  cwd: string,
+  selector: ParsedSelector,
+  paramsOffset: number | undefined,
+  paramsLimit: number | undefined,
+): Promise<{ content: Array<{ type: "text"; text: string }>; details?: unknown }> {
+  const buf = await readFile(resolvePath(cwd, stem));
+  const text = buf.toString("utf-8");
+  const lines = text.split("\n");
+  // A trailing newline is a terminator, not a 101st line — drop the phantom
+  // empty tail element so totals and :-N tails match editor line numbers.
+  if (lines.length > 1 && lines[lines.length - 1] === "") lines.pop();
+  const total = lines.length;
+  let sel: Exclude<ParsedSelector, { kind: "tail" }>;
+  try {
+    sel = resolveTailSelector(selector, total);
+  } catch (err) {
+    throw new Error(err instanceof Error ? err.message : String(err));
+  }
+
+  if (sel.kind === "conflicts") {
+    const blocks = extractConflictBlocks(lines);
+    if (blocks.length === 0) return { content: [{ type: "text", text: `No merge conflicts in ${stem}.` }] };
+    const body = blocks.map((b) => b.join("\n")).join("\n");
+    return {
+      content: [{ type: "text", text: `[${blocks.length} conflict block(s) in ${stem}]\n${body}` }],
+    };
+  }
+
+  if (sel.kind === "lines" && isMultiRange(sel)) {
+    const parts: string[] = [];
+    for (const range of sel.ranges) {
+      const end = Math.min(range.endLine ?? total, total);
+      const slice = lines.slice(range.startLine - 1, end);
+      parts.push(`── lines ${range.startLine}-${end} of ${total} ──\n${slice.join("\n")}`);
+    }
+    const shown = sel.ranges.reduce((acc, r) => acc + (Math.min(r.endLine ?? total, total) - r.startLine + 1), 0);
+    return {
+      content: [{ type: "text", text: `[lines ${sel.ranges.map((r) => `${r.startLine}-${r.endLine ?? total}`).join(", ")} of ${total} total — ${shown} lines shown]\n\n${parts.join("\n\n")}` }],
+    };
+  }
+
+  // Single range (explicit or a resolved :-N tail) or :raw — pi's read is
+  // already unprefixed, so slice here from the resolved range; params
+  // offset/limit only fill in when the selector carried none (:raw + args).
+  const range = sel.kind === "lines" ? sel.ranges[0] : undefined;
+  const offset = range?.startLine ?? paramsOffset ?? 1;
+  const limit = range ? (range.endLine !== undefined ? range.endLine - range.startLine + 1 : undefined) : paramsLimit;
+  const end = limit !== undefined ? offset + limit - 1 : total;
+  const slice = lines.slice(offset - 1, Math.min(end, total));
+  return {
+    content: [{ type: "text", text: `[lines ${offset}-${Math.min(end, total)} of ${total}]\n${slice.join("\n")}` }],
+  };
+}
 
 // ── Wrapper helpers (ported from upstream extensions/index.ts) ──
 
@@ -130,6 +236,12 @@ export function wrapToolDefinition(
 ): any {
   return {
     ...base,
+    // The selector grammar sits in the wrapped read's description, which binds
+    // per wrapped instance (cache-safe: byte-stable for the session).
+    description:
+      base.name === "read"
+        ? `${base.description}\n\nPath suffixes: file.ts:50 starts at line 50; :50-200 inclusive; :50+150 counts lines; :50- to EOF; :-60 last 60 lines; commas join ranges (:5-16,960-973) or single lines (:19,59); :conflicts lists merge-conflict blocks; :raw compounds with a range. A literal path that exists always wins over selector parsing.`
+        : base.description,
     prepareArguments(args: unknown) {
       let prepared = base.prepareArguments ? base.prepareArguments(args as never) : args;
       if (shouldRepair()) {
@@ -150,6 +262,30 @@ export function wrapToolDefinition(
       const freshDef = factory(cwd);
       const readNote = base.name === "read" && isRecord(params) ? params.__mtReadNote : undefined;
       if (isRecord(params)) delete params.__mtReadNote;
+      const selector: ParsedSelector | undefined =
+        base.name === "read" && isRecord(params) ? (params.__mtSelector as ParsedSelector | undefined) : undefined;
+      if (isRecord(params)) delete params.__mtSelector;
+
+      // Selector peel (execute-time: needs ctx.cwd for the literal-wins probe).
+      if (base.name === "read" && !selector && isRecord(params) && typeof params.path === "string" && params.path.includes(":")) {
+        params = applyReadSelector(params, cwd);
+      }
+      const peeledSelector: ParsedSelector | undefined =
+        base.name === "read" && isRecord(params) ? (params.__mtSelector as ParsedSelector | undefined) : undefined;
+      if (isRecord(params)) delete params.__mtSelector;
+
+      // Selector slice path: multi-range / tail / conflicts / raw need the
+      // file's bytes, which the built-in read can't hand back pre-slice.
+      if (base.name === "read" && (selector ?? peeledSelector) && isRecord(params) && typeof params.path === "string") {
+        const result = await readWithSelector(
+          params.path,
+          cwd,
+          (selector ?? peeledSelector)!,
+          typeof params.offset === "number" ? params.offset : undefined,
+          typeof params.limit === "number" ? params.limit : undefined,
+        );
+        return { ...result, details: base.name === "read" ? undefined : result.details };
+      }
 
       if (base.name !== "edit") {
         try {
@@ -261,6 +397,8 @@ export default function repairModule(pi: ExtensionAPI) {
 
   // ── Wrapped built-ins, registered ONCE each ──
   const toolFactories: Record<string, (cwd: string) => any> = {
+    // The selector grammar sits in the wrapped read's description, which binds
+    // ONCE at load (cache-safe request head — autoBg precedent).
     read: createReadToolDefinition,
     write: createWriteToolDefinition,
     edit: createEditToolDefinition,
