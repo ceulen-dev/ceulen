@@ -119,28 +119,28 @@ describe("composed screen through the real TUI renderer", () => {
     assert.ok(compose(editor("rail")).out.includes("▎"), "rail glyph");
   });
 
-  it("band carries the stock status on screen: icons on every segment, context right-justified", () => {
+  it("band carries the stock status on screen: icons on every segment, gauge with the context figure", () => {
     // At the default 60 cols the band keeps brand+model+dir and sheds the rest
     // whole; the widest capture exercises every segment at once. Line 1 (right-
     // justified, OMP placement) sits above the band when present: rate · stats
     // · usage on one row.
-    const narrowBand = (l: string) => l.includes("π ·");
-    const narrow = compose(editor("band")).lines.find(narrowBand)!;
-    assert.ok(narrow.includes("π · GLM-5.3"), narrow);
+    const isBand = (l: string) => l.includes("π >") || l.includes("π ·");
+    const narrow = compose(editor("band")).lines.find(isBand)!;
+    assert.ok(narrow.includes("π > ⬢ GLM-5.3"), narrow);
     assert.ok(narrow.includes("📁 ~/dev/ceulen"), narrow);
-    assert.ok(narrow.includes("12.0%/1.0M"), `context figure never clipped: ${narrow}`);
+    assert.ok(narrow.includes("12%") && narrow.includes("─1M"), `gauge carries the context figure: ${narrow}`);
     assert.ok(!narrow.includes("…"), "whole segments only, no half-cut segment");
 
     const wide = compose(editor("band"), 120);
-    const wideBand = wide.lines.find((l) => l.includes("π ·"))!;
+    const wideBand = wide.lines.find(isBand)!;
     const usageLine = wide.lines.find((l) => l.includes("⚡ 46 tok/s"))!;
     assert.ok(usageLine.includes("↑1.9M ↓377k R69M") && usageLine.includes("R:59%"), `rate · stats · usage on line 1: ${usageLine}`);
     assert.ok(!wideBand.includes("⚡"), `line 1 sits above the band: ${wide.lines.join("\n")}`);
     assert.ok(wideBand.includes("⑂ main *3 +1 ?2"), wideBand);
-    assert.ok(wideBand.includes("12.0%/1.0M"), wideBand); // right-justification asserted purely in shapes.test
+    assert.ok(wideBand.includes("12%") && wideBand.includes("─1M"), wideBand); // gauge-embedded labels
 
-    const claude = compose(editor("claude"), 120).lines.find((l) => l.includes("GLM-5.3"))!;
-    assert.ok(claude.includes("⑂ main") && claude.includes("12.0%/1.0M"), claude);
+    const claudeBar = compose(editor("claude"), 120).lines.find((l) => l.includes("GLM-5.3"))!;
+    assert.ok(claudeBar.includes("⑂ main") && claudeBar.includes("◫ 12.0%/1M"), claudeBar);
   });
 
   it("composes at narrow widths without eating closing chrome", () => {
@@ -203,6 +203,7 @@ describe("composed screen through the real TUI renderer", () => {
       dim: (s: string) => s,
       warn: (s: string) => s,
       error: (s: string) => s,
+      success: (s: string) => s,
       fill: (s: string) => s,
       inverse: (s: string) => s,
     };

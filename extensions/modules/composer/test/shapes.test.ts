@@ -11,10 +11,11 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  bottomBar,
   composeStatus,
   contentWidth,
   DEFAULT_SHAPE,
-  formatCompact,
+  formatNumberTokens,
   ICONS,
   parseGitStats,
   gutterWidth,
@@ -29,6 +30,8 @@ import {
   shapeById,
   statusSegments,
   surfacePainter,
+  type BandData,
+  type ShapeCtx,
   type ShapeTheme,
 } from "../lib/shapes.ts";
 
@@ -62,6 +65,24 @@ describe("composer shape vocabulary (OMP parity)", () => {
     assert.equal(isShapeId("rail"), true);
     assert.equal(isShapeId("nope"), false);
     assert.equal(isShapeId(42), false);
+  });
+
+  it("carries OMP's per-shape statusAttachment map (bottomBar + gap)", () => {
+    // OMP: band/box embed (no bar); claude/rule bar=left (title on the rule);
+    // pi/borderless/field/rail bar=full; ONLY rule/field/rail carry the gap
+    // spacer (borderless is bottomBarGap:false — flush under the prompt row).
+    const map = (id: string) => {
+      const s = shapeById(id);
+      return [s.bottomBar, s.barGap === true];
+    };
+    assert.deepEqual(map("band"), ["none", false]);
+    assert.deepEqual(map("box"), ["none", false]);
+    assert.deepEqual(map("claude"), ["left", false]);
+    assert.deepEqual(map("rule"), ["left", true]);
+    assert.deepEqual(map("pi"), ["full", false]);
+    assert.deepEqual(map("borderless"), ["full", false], "OMP borderless: no gap");
+    assert.deepEqual(map("field"), ["full", true]);
+    assert.deepEqual(map("rail"), ["full", true]);
   });
 });
 
@@ -121,18 +142,18 @@ describe("chrome rendering through the shared builders", () => {
       assert.ok(box[0]!.endsWith("╮"), `box top closes at ${w}: ${box[0]}`);
       assert.ok(box[box.length - 1]!.endsWith("─╯"), `box bottom closes at ${w}: ${box[box.length - 1]}`);
       const claude = previewShape("claude", w, th, { model: "M" }).map(plain);
-      assert.equal(claude.length, 3, `claude keeps both rules at ${w}`);
+      assert.ok(claude.length >= 2, `claude keeps both rules at ${w}`);
       for (const l of claude) assert.equal(visibleWidth(l), w, `claude row width at ${w}`);
     }
   });
 
   it("status-bearing shapes show the live status line; band reserves a blank row when empty", () => {
     const box = previewShape("box", 40, th, { model: "GLM-5.3", cwd: "ceulen", pct: 42 }).map(plain);
-    assert.ok(box[0]!.includes("GLM-5.3") && box[0]!.includes("ceulen") && box[0]!.includes("42.0%"), box[0]);
+    assert.ok(box[0]!.includes("GLM-5.3") && box[0]!.includes("ceulen") && box[0]!.includes("42%"), box[0]);
     const bandEmpty = previewShape("band", 40, th).map(plain);
-    assert.equal(bandEmpty[0]!.trim(), "", "band row reserved (blank) without data");
+    assert.ok(bandEmpty.every((l) => !l.includes("π")), "no status rows without data (the layout never shifts)");
     const bandFull = previewShape("band", 40, th, { model: "M" }).map(plain);
-    assert.ok(bandFull[0]!.includes("╭─") && bandFull[0]!.includes("M"), bandFull[0]);
+    assert.ok(bandFull[0]!.trimStart().startsWith("π") && bandFull[0]!.includes("M"), bandFull[0]);
   });
 
   it("rules carry pi's scroll indicator when lines are hidden", () => {
@@ -191,12 +212,13 @@ describe("git branch read (.git/HEAD)", () => {
 });
 
 describe("status line + surface fill", () => {
-  it("statusSegments splits OMP's stock groups: identity left, context window right", () => {
-    const s = statusSegments({ model: "M", provider: "router", thinkingLevel: "max", cwd: "~/dev/ceulen", branch: "main", rate: 46, pct: 42.6, window: 1_000_000 }, th);
-    assert.equal(plain(s.left), "π · (router) M (max) · 📁 ~/dev/ceulen · ⑂ main");
-    assert.equal(plain(s.right), "42.6%/1.0M");
+  it("statusSegments splits OMP's stock groups: identity left, session title right", () => {
+    const s = statusSegments({ model: "M", thinkingLevel: "max", cwd: "~/dev/ceulen", branch: "main", rate: 46, pct: 42.6, window: 1_000_000, sessionName: "fix" }, th);
+    assert.equal(plain(s.left), "π > ⬢ M · max > 📁 ~/dev/ceulen > ⑂ main");
+    assert.equal(plain(s.right), "fix");
     // Every segment carries its icon (OMP's glyph set).
     assert.ok(plain(s.left).startsWith("π "), "brand leads the group");
+    assert.ok(plain(s.left).includes("⬢ M"), "model icon");
     assert.ok(plain(s.left).includes("📁 ~/dev/ceulen"), "folder icon on the dir");
     assert.ok(plain(s.left).includes("⑂ main"), "branch icon on the git segment");
     // Generation rate is NOT a band segment — it renders right-justified on
@@ -214,7 +236,7 @@ describe("status line + surface fill", () => {
     assert.ok(plain(rateLine({ stats: "↑1k ↓500" }, th, 40)).startsWith("↑1k ↓500"), "stats alone sits left");
     assert.ok(plain(rateLine({ usage: "(router) R:59%/2H3M" }, th, 40)).startsWith("(router) R:59%/2H3M"), "usage alone sits left");
     // Usage tone steps (error/warn) with the tightest window.
-    const toneTheme: ShapeTheme = { ...th, warn: (t) => `W(${t})`, error: (t) => `E(${t})` };
+    const toneTheme: ShapeTheme = { ...th, warn: (t: string) => `W(${t})`, error: (t: string) => `E(${t})` };
     assert.ok(plain(rateLine({ usage: "R:9%/1M", usageTone: "error" }, toneTheme, 40)).startsWith("E(R:9%/1M)"), "error tone paints");
     // Over-budget: the LEFT group sheds whole trailing segments (usage first,
     // then stats); the rate yields only when the left group is gone.
@@ -228,26 +250,23 @@ describe("status line + surface fill", () => {
     assert.equal(plain(rateLine({ rate: 46, stats: "↑1.9M ↓377k" }, th, 10)), "⚡ 46 tok/s", `rate is the last thing standing: ${plain(rateLine({ rate: 46, stats: "↑1.9M ↓377k" }, th, 10))}`);
     // Blanks drop out — never wrong, just shorter. The brand only leads a
     // group that exists, so an empty session keeps the band blank.
-    assert.equal(plain(statusSegments({ model: "M" }, th).left), "π · M");
+    assert.equal(plain(statusSegments({ model: "M" }, th).left), "π > ⬢ M");
     assert.equal(statusSegments({}, th).left, "", "no data → no brand");
     assert.equal(statusSegments(undefined, th).left, "");
     assert.equal(statusSegments(undefined, th).right, "");
-    assert.equal(plain(statusSegments({ model: " ", cwd: "x" }, th).left), "π · 📁 x", "blank segments skipped");
+    assert.equal(plain(statusSegments({ model: " ", cwd: "x" }, th).left), "π > 📁 x", "blank segments skipped");
     // Branch without a cwd still renders; detached renders as-is.
-    assert.equal(plain(statusSegments({ branch: "detached" }, th).left), "π · ⑂ detached");
+    assert.equal(plain(statusSegments({ branch: "detached" }, th).left), "π > ⑂ detached");
+    // No session title → empty right group.
+    assert.equal(statusSegments({ model: "M" }, th).right, "");
     // Spinner takes the brand slot while a turn runs.
-    assert.equal(plain(statusSegments({ model: "M" }, th, "⟳").left), "⟳ · M");
+    assert.equal(plain(statusSegments({ model: "M" }, th, "⟳").left), "⟳ > ⬢ M");
   });
 
-  it("model segment: (provider) prefix skips when the name carries it; off/blank level dropped", () => {
-    // Direct provider whose display name already starts with provider/ — no double prefix.
-    assert.equal(plain(statusSegments({ model: "zai/glm-5.3", provider: "zai" }, th).left), "π · zai/glm-5.3");
-    // Prefix is case-insensitive on the check, verbatim on output.
-    assert.equal(plain(statusSegments({ model: "Zai/GLM", provider: "zai" }, th).left), "π · Zai/GLM");
-    assert.equal(plain(statusSegments({ model: "M", provider: "zai" }, th).left), "π · (zai) M");
-    // `off` and blank levels render nothing, not "(off)".
-    assert.equal(plain(statusSegments({ model: "M", thinkingLevel: "off" }, th).left), "π · M");
-    assert.equal(plain(statusSegments({ model: "M", thinkingLevel: "  " }, th).left), "π · M");
+  it("model segment: ⬢ icon, level after OMP's dot separator; off/blank level dropped", () => {
+    assert.equal(plain(statusSegments({ model: "zai/glm-5.3", provider: "zai" }, th).left), "π > ⬢ zai/glm-5.3");
+    assert.equal(plain(statusSegments({ model: "M", thinkingLevel: "off" }, th).left), "π > ⬢ M");
+    assert.equal(plain(statusSegments({ model: "M", thinkingLevel: "  " }, th).left), "π > ⬢ M");
     // Level without a model never renders alone.
     assert.equal(statusSegments({ thinkingLevel: "max" }, th).left, "");
   });
@@ -258,35 +277,36 @@ describe("status line + surface fill", () => {
       th,
     );
     const left = plain(s.left);
-    assert.equal(left, "π · (router) M (high) · ⑂ main *10 +1 ?4");
+    assert.equal(left, "π > ⬢ M · high > ⑂ main *10 +1 ?4");
     // Supplied-but-dropped figures never leak into the band — line 1
     // (rateLine) owns rate · stats · usage.
     assert.ok(!left.includes("R:59%") && !left.includes("↑1.9M") && !left.includes("tok/s"), "usage/stats/rate stay off the band");
     // Usage-only line 1 keeps tone-stepping.
-    assert.equal(plain(rateLine({ usage: "(r) R:59%/2H3M", usageTone: "warning" }, { ...th, warn: (t) => `W(${t})` }, 40)), "W((r) R:59%/2H3M)");
-    assert.equal(plain(statusSegments({ model: "M", usage: "  " }, th).left), "π · M");
-    assert.equal(plain(statusSegments({ model: "M", stats: "" }, th).left), "π · M");
+    assert.equal(plain(rateLine({ usage: "(r) R:59%/2H3M", usageTone: "warning" }, { ...th, warn: (t: string) => `W(${t})` }, 40)), "W((r) R:59%/2H3M)");
+    assert.equal(plain(statusSegments({ model: "M", usage: "  " }, th).left), "π > ⬢ M");
+    assert.equal(plain(statusSegments({ model: "M", stats: "" }, th).left), "π > ⬢ M");
   });
 
-  it("context window color-steps like pi's footer (>70 warn, >90 error)", () => {
+  it("context segment: ◫ icon, OMP format, color-steps at OMP's thresholds (>50 warn, >90 error), ⟲ when auto", () => {
     const seen = { warn: 0, error: 0 };
     const stepping: ShapeTheme = {
       ...th,
       warn: (s) => (seen.warn++, s),
       error: (s) => (seen.error++, s),
     };
-    assert.equal(plain(statusSegments({ pct: 42, window: 200_000 }, stepping).right), "42.0%/200k");
+    const seg = (d: BandData) => plain(bottomBar({ w: 200, hidden: 0, theme: stepping, data: d }, "full"));
+    assert.equal(seg({ pct: 42, window: 200_000 }), "π · ◫ 42.0%/200K");
     assert.equal(seen.warn, 0);
-    assert.equal(plain(statusSegments({ pct: 75, window: 200_000 }, stepping).right), "75.0%/200k");
+    assert.equal(seg({ pct: 75, window: 200_000 }), "π · ◫ 75.0%/200K");
     assert.equal(seen.warn, 1);
-    assert.equal(plain(statusSegments({ pct: 95, window: 200_000 }, stepping).right), "95.0%/200k");
+    assert.equal(seg({ pct: 95, window: 200_000 }), "π · ◫ 95.0%/200K");
     assert.equal(seen.error, 1);
     // Unknown pct with a known window shows the window alone.
-    assert.equal(plain(statusSegments({ pct: null, window: 200_000 }, th).right), "200k/?");
-    assert.equal(statusSegments({}, th).right, "");
-    // pi's `(auto)` compaction marker rides the context figure (footer parity).
-    assert.equal(plain(statusSegments({ pct: 42, window: 200_000, autoCompact: true }, th).right), "42.0%/200k (auto)");
-    assert.equal(plain(statusSegments({ pct: 95, window: 200_000, autoCompact: true }, stepping).right), "95.0%/200k (auto)");
+    assert.equal(seg({ pct: null, window: 200_000 }), "π · ◫ 200K/?");
+    assert.equal(seg({}), "", "nothing to show → no segment");
+    // OMP's auto-compact icon rides the context figure.
+    assert.equal(seg({ pct: 42, window: 200_000, autoCompact: true }), "π · ◫ 42.0%/200K ⟲");
+    assert.equal(seg({ pct: 95, window: 200_000, autoCompact: true }), "π · ◫ 95.0%/200K ⟲");
   });
 
   it("composeStatus justifies the right group; the left group yields first when narrow", () => {
@@ -298,25 +318,25 @@ describe("status line + surface fill", () => {
     assert.equal(plain(composeStatus("LLLLLL", "RRRR", 5)), "RRRR", "right alone when the left cannot fit");
   });
 
-  it("formatCompact matches pi-footer/OMP token figures", () => {
-    assert.equal(formatCompact(0), "0");
-    assert.equal(formatCompact(999), "999");
-    assert.equal(formatCompact(2_500), "2.5k");
-    assert.equal(formatCompact(200_000), "200k");
-    assert.equal(formatCompact(1_000_000), "1.0M");
-    assert.equal(formatCompact(12_000_000), "12M");
-    assert.equal(formatCompact(Number.NaN), "0");
+  it("formatNumberTokens matches OMP's token figures", () => {
+    assert.equal(formatNumberTokens(0), "0");
+    assert.equal(formatNumberTokens(999), "999");
+    assert.equal(formatNumberTokens(2_500), "2.5K");
+    assert.equal(formatNumberTokens(200_000), "200K");
+    assert.equal(formatNumberTokens(1_000_000), "1M");
+    assert.equal(formatNumberTokens(12_000_000), "12M");
+    assert.equal(formatNumberTokens(Number.NaN), "0");
   });
 
   it("status chips/bands carry dir, branch and the context window", () => {
     const data = { model: "M", cwd: "~/dev/ceulen", branch: "main", pct: 42.6, window: 1_000_000 };
     const band = previewShape("band", 60, th, data).map(plain)[0]!;
     assert.ok(band.includes("📁 ~/dev/ceulen") && band.includes("⑂ main"), band);
-    assert.ok(band.includes("42.6%/1.0M"), band);
-    // Right group is justified to the band's right edge (before the closing cap cells).
-    assert.ok(band.trimEnd().endsWith("42.6%/1.0M"), band);
+    // The gauge carries the context figure, rounded (OMP's embedded percent),
+    // and closes the band with the window label.
+    assert.ok(band.includes("43%") && band.includes("─1M"), band);
     const box = previewShape("box", 60, th, data).map(plain)[0]!;
-    assert.ok(box.includes("📁 ~/dev/ceulen") && box.includes("42.6%/1.0M") && box.endsWith("╮"), box);
+    assert.ok(box.includes("📁 ~/dev/ceulen") && box.includes("43%") && box.endsWith("╮"), box);
   });
 
   it("band fills the status chip only, not the whole line (OMP's band)", () => {
@@ -326,24 +346,26 @@ describe("status line + surface fill", () => {
     const line = shapeById("band").top!(c as never)!;
     const filled = line.slice(line.indexOf("⟦") + 1, line.indexOf("⟧"));
     assert.ok(filled.includes("main"), `identity is filled: ${filled}`);
-    assert.ok(!filled.includes("42.0%/1.0M"), `context figure stays on the bare surface: ${filled}`);
-    // The context figure survives OUTSIDE the chip, and the line is still full width.
+    // The gauge (context figure) survives OUTSIDE the chip, and the line is full width.
     assert.equal(visibleWidth(line), 80, "band still spans the full width");
-    assert.ok(plain(line).includes("42.0%/1.0M"), plain(line));
-    assert.ok(plain(line).indexOf("⟧") < plain(line).indexOf("42.0%/1.0M"), "fill ends before the context figure");
+    assert.ok(plain(line).includes("42%"), plain(line));
+    assert.ok(plain(line).indexOf("⟧") < plain(line).indexOf("42%"), "fill ends before the gauge");
   });
 
-  it("git segment renders OMP's indicators and goes warning when dirty", () => {
-    assert.equal(plain(statusSegments({ branch: "main" }, th).left), "π · ⑂ main", "clean tree: branch only");
+  it("git segment renders OMP's indicators with per-indicator colors", () => {
+    assert.equal(plain(statusSegments({ branch: "main" }, th).left), "π > ⑂ main", "clean tree: branch only");
     const dirty = statusSegments({ branch: "main", git: { staged: 1, unstaged: 3, untracked: 2 } }, th).left;
     assert.ok(plain(dirty).endsWith("⑂ main *3 +1 ?2"), plain(dirty));
-    // Dirty renders through the warning hook (OMP's statusLineGitDirty).
-    let warned = 0;
-    const th2: ShapeTheme = { ...th, warn: (s) => (warned++, s) };
-    statusSegments({ branch: "main", git: { staged: 0, unstaged: 1, untracked: 0 } }, th2);
-    assert.equal(warned, 1, "dirty tree warns");
-    assert.equal(plain(statusSegments({ branch: "main", git: { staged: 0, unstaged: 0, untracked: 0 } }, th2).left), "π · ⑂ main");
-    assert.equal(warned, 1, "clean tree does not warn again");
+    // Per-indicator colors (OMP's statusLine colors): branch warns when dirty,
+    // staged paints success, untracked dims.
+    const marks: ShapeTheme = { ...th, warn: (s) => `W<${s}>`, success: (s) => `S<${s}>`, dim: (s) => `D<${s}>` };
+    const marked = plain(statusSegments({ branch: "main", git: { staged: 1, unstaged: 3, untracked: 2 } }, marks).left);
+    assert.ok(marked.includes("W<⑂ main> W<*3>") && marked.includes("S<+1>") && marked.includes("D<?2>"), marked);
+    // Clean tree paints the branch plain (never warning) — OMP colors only
+    // the INDICATORS, not the branch itself.
+    const clean = statusSegments({ branch: "main", git: { staged: 0, unstaged: 0, untracked: 0 } }, marks).left;
+    assert.ok(!plain(clean).includes("W<") && plain(clean).includes("⑂ main"), clean);
+    assert.equal(plain(statusSegments({ branch: "main", git: { staged: 0, unstaged: 0, untracked: 0 } }, th).left), "π > ⑂ main", "zero counts are clean");
   });
 
   it("parseGitStats counts porcelain XY states like OMP's indicators", () => {

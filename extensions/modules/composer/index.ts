@@ -21,7 +21,6 @@ import { row, type PanelGroup, type PanelMenuOption } from "../../lib/panel.js";
 import { getGenRate } from "../../lib/rate.js";
 import { USAGE_STATUS_KEY, getUsageItem } from "../../lib/usage-store.js";
 import { ComposerFooter, statsLine, sessionTotals } from "./lib/footer.ts";
-import { formatCompact } from "./lib/shapes.ts";
 import { execFile } from "node:child_process";
 import { DEFAULT_SHAPE, IDENTITY_THEME, isShapeId, parseGitStats, previewShape, readGitBranch, ShapeEditor, shapeById, shapeTheme, SHAPES, type BandData, type GitStats, type ShapeTheme } from "./lib/shapes.ts";
 import { readComposerShape, writeComposerSection } from "./lib/settings.ts";
@@ -52,6 +51,24 @@ function bandStats(ctx: ExtensionContext | undefined): string {
     const stats = statsLine(sessionTotals(entries as never));
     statsCache = { sessionId, leafId, count: entries.length, stats };
     return stats;
+  } catch {
+    return "";
+  }
+}
+
+/** Session title (OMP's session_name segment — the right group / rule chip).
+ *  Cached with the same keys as the stats scan. */
+let nameCache: { sessionId: string; name: string } | undefined;
+
+function bandSessionName(ctx: ExtensionContext | undefined): string {
+  if (!ctx) return "";
+  try {
+    const sm = ctx.sessionManager;
+    const sessionId = sm.getSessionId();
+    if (nameCache?.sessionId === sessionId) return nameCache.name;
+    const name = sm.getSessionName() ?? "";
+    nameCache = { sessionId, name };
+    return name;
   } catch {
     return "";
   }
@@ -170,6 +187,7 @@ function shapeData(ctx: ExtensionContext | undefined): BandData {
       pct: usage?.percent ?? null,
       window: usage?.contextWindow,
       autoCompact: liveAutoCompact,
+      sessionName: bandSessionName(ctx),
       rate: getGenRate().tps,
       usage: getUsageItem().windows,
       usageTone: getUsageItem().tone,

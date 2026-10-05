@@ -14,7 +14,7 @@
  */
 
 import { truncateToWidth, type Component } from "@earendil-works/pi-tui";
-import { formatCompact, type ShapeTheme } from "./shapes.ts";
+import { formatNumberTokens, type ShapeTheme } from "./shapes.ts";
 
 /** Usage fields the totals read (structural — pi's Usage satisfies it). */
 interface UsageLike {
@@ -69,14 +69,14 @@ export function sessionTotals(entries: readonly EntryLike[]): SessionTotals {
   return t;
 }
 
-/** Band token stats for line 1 (`↑1.9M ↓377k R69M CH99.7%` — cost stays
- *  /usage-only; "" before any usage). */
+/** Band token stats for line 1 (`↑1.9M ↓377k R69M CH99.7%` — OMP's
+ *  formatNumber figures; cost stays /usage-only; "" before any usage). */
 export function statsLine(t: SessionTotals): string {
   const parts: string[] = [];
-  if (t.input) parts.push(`↑${formatCompact(t.input)}`);
-  if (t.output) parts.push(`↓${formatCompact(t.output)}`);
-  if (t.cacheRead) parts.push(`R${formatCompact(t.cacheRead)}`);
-  if (t.cacheWrite) parts.push(`W${formatCompact(t.cacheWrite)}`);
+  if (t.input) parts.push(`↑${formatNumberTokens(t.input)}`);
+  if (t.output) parts.push(`↓${formatNumberTokens(t.output)}`);
+  if (t.cacheRead) parts.push(`R${formatNumberTokens(t.cacheRead)}`);
+  if (t.cacheWrite) parts.push(`W${formatNumberTokens(t.cacheWrite)}`);
   if (t.cacheHitRate !== undefined) parts.push(`CH${t.cacheHitRate.toFixed(1)}%`);
   return parts.join(" ");
 }

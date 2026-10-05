@@ -1,5 +1,29 @@
 # Changelog
 
+## Unreleased
+
+- **composer**: status layer aligned with OMP's actual rendering (source-level
+  study of `packages/tui/src/components/composer/*` + `status-line/component.ts`):
+  band/box embed OMP's POWERLINE row — bg-filled left group
+  `π > ⬢ model · level > 📁 dir > ⑂ git` (thin `>` separators, model icon,
+  dot-joined thinking level) over the context-reactive GAUGE (accent used-
+  portion, rounded `N%` label riding the used cells, `┃` at pi's compaction
+  threshold (window − 16384) when armed, window figure right-justified), with
+  the session-title chip on box (`─ omp ─╮`); the band starts FLUSH (OMP's
+  `sep.powerlineCapLeft` is empty outside the nerd set — no `╭─` cap). claude
+  and rule dock the title chip on the top rule and render the left group +
+  `◫ N%/window ⟲` context segment on a standalone BOTTOM status bar (after
+  the closing rule for claude, after a spacer row for rule) — pi/borderless/
+  field/rail render the full bar with the title right-justified. Context
+  segment steps at OMP's thresholds (>50 warning, >90 error) and carries the
+  `⟲` auto-compact icon; git indicators get OMP's per-indicator colors
+  (`*n` warn, `+n` success, `?n` dim; branch warns only when dirty); token
+  figures use OMP's formatNumber (`200K`, `1.0M`, trailing `.0` trimmed);
+  thinking level rides the model segment as `⬢ model · level` (was
+  `(provider) model (level)`). Session title sourced from
+  `sessionManager.getSessionName()`; line 1 (rate · token stats · quota
+  windows) unchanged.
+
 ## 0.10.0 — 2026-10-05
 
 - **gh module**: new module — ONE read-only `github` tool over the `gh` CLI

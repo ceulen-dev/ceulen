@@ -9,12 +9,16 @@
  * FINAL line — so chrome can wrap each composed row (rails, caps, gutter,
  * fill) without touching text, wrapping, or cursor placement.
  *
- * Status: shapes that embed a status line in their chrome (band · box ·
- * claude · rule) render OMP's stock info split — left group (model · dir
- * (branch) · Generation Rate) flush-left, right group (`0.0%/1.0M` context
- * window) justified right on the band, docked on the rule chip. OMP's
- * standalone BOTTOM status bar has no twin here — pi's own footer already
- * sits under the editor for every shape.
+ * Status architecture = OMP's, per shape: band/box embed a POWERLINE status
+ * row (bg-filled left group `π > ⬢ model > 📁 dir > ⑂ git`, OMP's context
+ * gauge with embedded `N%`/window labels, session-title chip on box) — the
+ * band relocates the title away, exactly like OMP's band layout. claude and
+ * rule dock the session-title chip on the top rule and render the left group
+ * + context segment on a standalone BOTTOM bar (left of the closing rule for
+ * claude, after a spacer row for rule); pi/borderless/field/rail render the
+ * full standalone bottom bar (session title right-justified). pi's replaced
+ * footer keeps only the other extensions' statuses; line 1 (rateLine) stays
+ * ceulen's numeric block on every shape.
  */
 
 import { CustomEditor } from "@earendil-works/pi-coding-agent";
@@ -39,8 +43,11 @@ export interface BandData {
   pct?: number | null;
   /** Context window size in tokens, when known. */
   window?: number;
-  /** Auto-compaction armed (pi's footer `(auto)` marker). */
+  /** Auto-compaction armed (drives the gauge's `┃` threshold marker and the
+   *  context segment's `⟲` icon — OMP's auto marker). */
   autoCompact?: boolean;
+  /** Session title (OMP's session_name segment — the right group / rule chip). */
+  sessionName?: string;
   /** Generation Rate: last response's tok/s. */
   rate?: number;
   /** Provider quota windows from the usage module (e.g. `(router) R:59%/2H3M`). */
@@ -67,6 +74,8 @@ export interface ShapeTheme {
   dim: (s: string) => string;
   warn: (s: string) => string;
   error: (s: string) => string;
+  /** Clean-tree git branch / staged indicator (OMP's statusLineStaged). */
+  success: (s: string) => string;
   /** Filled surface (background + on-surface foreground), robust to nested
    *  SGR resets — the cursor glyph emits one, which would otherwise drop the
    *  fill from that point on (OMP's bgFill). */
@@ -81,6 +90,7 @@ export const IDENTITY_THEME: ShapeTheme = {
   dim: (s) => s,
   warn: (s) => s,
   error: (s) => s,
+  success: (s) => s,
   fill: (s) => s,
   inverse: (s) => s,
 };
@@ -104,6 +114,7 @@ export function shapeTheme(t: ThemeLike): ShapeTheme {
     dim: (s) => t.fg("dim" as never, s),
     warn: (s) => t.fg("warning" as never, s),
     error: (s) => t.fg("error" as never, s),
+    success: (s) => t.fg("success" as never, s),
     fill: surfacePainter(bg + onBg),
     inverse: (s) => t.inverse?.(s) ?? s,
   };
@@ -138,10 +149,17 @@ export interface ComposerShapeDef {
   sideWidth: number;
   /** Minimum editor paddingX this shape needs (host padding can raise it). */
   padX: number;
-  /** True when the shape's top row embeds the status line (OMP's
-   *  statusAttachment). Non-embedding shapes surface the working spinner
-   *  through pi's native spinner-bearing rule instead. */
+  /** True when the shape's top chrome carries status (band/box powerline
+   *  row, claude/rule chip); the rest surface the spinner through pi's
+   *  native spinner-bearing rule and status on the standalone bottom bar. */
   embedsStatus?: boolean;
+  /** OMP's bottomBar: standalone status bar under the editor — `left` group
+   *  only (claude/rule: the title rides the top rule), `full` (pi/borderless/
+   *  field/rail: title right-justified), `none` (band/box: embedded top). */
+  bottomBar?: "left" | "full" | "none";
+  /** Blank spacer row between the editor and the standalone bottom bar
+   *  (OMP's bottomBarGap — styles without bottom chrome need it). */
+  barGap?: boolean;
   /** First-row prompt gutter (OMP's defaultPromptGutter); continuation rows
    *  get spaces so the text column stays aligned. */
   gutter?: string;
@@ -164,105 +182,139 @@ export function surfacePainter(prefix: string): (s: string) => string {
   return (s) => (prefix === "" ? s : prefix + s.replace(/\x1b\[0m/g, `\x1b[0m${prefix}`) + "\x1b[39m\x1b[49m");
 }
 
-/** Compact token counts for the context window — pi-footer/OMP parity
- *  (`200k`, `1.0M`). */
-export function formatCompact(n: number): string {
+/** Token/window figure in OMP's formatNumber shape (`9.5k`, `200K`, `1.0M`). */
+export function formatNumberTokens(n: number): string {
   if (!Number.isFinite(n) || n < 0) return "0";
   if (n < 1000) return `${Math.round(n)}`;
-  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  if (n < 10_000) return `${trim1(n / 1000)}K`;
+  if (n < 1_000_000) return `${Math.round(n / 1000)}K`;
+  if (n < 10_000_000) return `${trim1(n / 1_000_000)}M`;
+  return `${Math.round(n / 1_000_000)}M`;
 }
+
+const trim1 = (n: number): string => {
+  const s = n.toFixed(1);
+  return s.endsWith(".0") ? s.slice(0, -2) : s;
+};
 
 /** Composer status icons — OMP's unicode glyph set, so every shape speaks the
  *  same visual language: brand mark before the model, folder on the working
  *  dir, branch glyph on the git segment, throughput on the Generation Rate. */
 export const ICONS = {
   brand: "π",
+  model: "⬢",
   folder: "📁",
   branch: "⑂",
+  context: "◫",
+  auto: "⟲",
+  threshold: "┃",
   throughput: "⚡",
 } as const;
 
-/** Context-window segment: `0.0%/1.0M` (one-decimal pct + compact window),
- *  color-stepped like pi's footer (>70 warning, >90 error). */
+/** Context-window segment: `◫ 2.1%/1M ⟲` (OMP's context_pct — icon, one-
+ *  decimal pct + OMP-format window, auto-compact `⟲` when armed). Color
+ *  steps at OMP's thresholds (>50 warning, >90 error). */
 function contextSegment(data: BandData, theme: ShapeTheme): string {
   const pct = typeof data.pct === "number" && Number.isFinite(data.pct) ? data.pct : undefined;
-  const win = typeof data.window === "number" && data.window > 0 ? formatCompact(data.window) : undefined;
+  const win = typeof data.window === "number" && data.window > 0 ? formatNumberTokens(data.window) : undefined;
   if (pct === undefined && win === undefined) return "";
-  const text = (pct !== undefined ? `${pct.toFixed(1)}%${win ? `/${win}` : ""}` : `${win}/?`) + (data.autoCompact ? " (auto)" : "");
-  if (pct !== undefined && pct > 90) return theme.error(text);
-  if (pct !== undefined && pct > 70) return theme.warn(text);
-  return theme.dim(text);
+  const text = pct !== undefined ? `${pct.toFixed(1)}%${win ? `/${win}` : ""}` : `${win}/?`;
+  const color = pct !== undefined && pct > 90 ? theme.error : pct !== undefined && pct > 50 ? theme.warn : theme.dim;
+  const auto = data.autoCompact ? ` ${theme.dim(ICONS.auto)}` : "";
+  return `${theme.dim(ICONS.context)} ${color(text)}${auto}`;
 }
 
-/** Git segment: `⑂ main *3 +1 ?2` — branch + OMP's working-tree indicators
- *  (`*` unstaged, `+` staged, `?` untracked). A dirty tree renders `warning`. */
+/** Git segment: `⑂ main *3 +1 ?2` — branch + OMP's working-tree indicators,
+ *  each in OMP's per-indicator color (`*` unstaged warn, `+` staged success,
+ *  `?` untracked dim); the branch goes warning when the tree is dirty. */
 function gitSegment(data: BandData, theme: ShapeTheme): string {
   const branch = typeof data.branch === "string" && data.branch.trim() ? data.branch.trim() : "";
   const g = data.git;
   const dirty = !!g && g.staged + g.unstaged + g.untracked > 0;
-  const parts: string[] = [];
-  if (branch) parts.push(`${ICONS.branch} ${branch}`);
+  const ind: string[] = [];
   if (dirty && g) {
-    if (g.unstaged > 0) parts.push(`*${g.unstaged}`);
-    if (g.staged > 0) parts.push(`+${g.staged}`);
-    if (g.untracked > 0) parts.push(`?${g.untracked}`);
+    if (g.unstaged > 0) ind.push(theme.warn(`*${g.unstaged}`));
+    if (g.staged > 0) ind.push(theme.success(`+${g.staged}`));
+    if (g.untracked > 0) ind.push(theme.dim(`?${g.untracked}`));
   }
-  if (parts.length === 0) return "";
-  return dirty ? theme.warn(parts.join(" ")) : theme.dim(parts.join(" "));
+  const branchText = branch ? `${ICONS.branch} ${branch}` : ind.length > 0 ? ICONS.branch : "";
+  if (!branchText) return "";
+  // OMP colors the BRANCH itself only when dirty; a clean branch rides the
+  // plain group color, and only the indicators carry their own colors.
+  return [dirty ? theme.warn(branchText) : branchText, ...ind].join(" ");
 }
 
-/** The status line's stock groups (OMP's segment split): left = identity
- *  (model · dir · git · Generation Rate), right = context window.
- *  Segments drop out when the session hasn't provided them — never wrong,
- *  just shorter. Every segment carries its icon. */
+/** The status line's stock groups. OMP's powerline layouts fill the LEFT
+ *  group (brand · model · dir · git) with the context segment appended —
+ *  the gauge absorbs the context figure at render time; the RIGHT group is
+ *  the session title. `plain` bars join with ` · ` instead of powerline `>`. */
 export function statusSegments(
   data: BandData | undefined,
   theme: ShapeTheme,
   spinner?: string,
 ): { left: string; right: string } {
-  return { left: identitySegments(data, theme, spinner).join(theme.dim(" · ")), right: data ? contextSegment(data, theme) : "" };
+  return {
+    left: identitySegments(data, theme, spinner).join(theme.dim(` ${POWERLINE_SEP} `)),
+    right: data?.sessionName?.trim() ? theme.accent(data.sessionName.trim()) : "",
+  };
 }
 
-/** The identity group as separate styled segments, brand first — callers that
- *  must fit a fixed width shed WHOLE trailing segments (stats → rate → usage
- *  → git → dir) rather than cutting one in half (OMP's overflow behavior). */
-export function identitySegments(data: BandData | undefined, theme: ShapeTheme, spinner?: string): string[] {
+/** The identity segments WITHOUT the leading brand (model · dir · git) —
+ *  the bottom bar appends the context segment before the brand joins. */
+function identityList(data: BandData | undefined, theme: ShapeTheme): string[] {
   const identity: string[] = [];
-  // Model cluster — model info only for now: usage windows + token stats are
-  // dropped from the band at the user's request (restore = push usageSegment
-  // + stats back into this cluster, see git history).
-  const cluster: string[] = [];
-  // Model segment: `(provider) model (level)` — provider prefix from the model
-  // id (a router model's upstream slug), thinking level in parens, OMP's
-  // model-segment shape (its `showThinkingLevel` option).
   const model = data?.model?.trim();
   if (model) {
-    const provider = data?.provider?.trim();
     const level = data?.thinkingLevel?.trim();
-    // Skip the prefix when the display name already carries it (direct
-    // providers register names like `zai/glm-5.3-flash` under provider `zai`).
-    const prefix = provider && !model.toLowerCase().startsWith(provider.toLowerCase() + "/") ? `(${provider}) ` : "";
-    let label = prefix + model;
-    if (level && level !== "off") label += ` (${level})`;
-    cluster.push(theme.accent(label));
+    let label = `${ICONS.model} ${theme.accent(model)}`;
+    if (level && level !== "off") label += theme.dim(` · ${level}`);
+    identity.push(label);
   }
-  if (cluster.length > 0) identity.push(cluster.join(theme.dim(" | ")));
   const cwd = data?.cwd?.trim();
   if (cwd) identity.push(theme.dim(`${ICONS.folder} ${cwd}`));
   const git = data ? gitSegment(data, theme) : "";
   if (git) identity.push(git);
+  return identity;
+}
+
+/** The identity group as separate styled segments, brand first — callers that
+ *  must fit a fixed width shed WHOLE trailing segments (git → dir) rather
+ *  than cutting one in half (OMP's overflow behavior). Model segment:
+ *  `⬢ model · level` (OMP's model segment: icon, thinking level after OMP's
+ *  dot separator). */
+export function identitySegments(data: BandData | undefined, theme: ShapeTheme, spinner?: string): string[] {
+  const identity = identityList(data, theme);
   // Generation rate renders as its own right-justified line ABOVE the band
   // (OMP's throughline placement) — not a band segment.
   // The brand leads ONLY a group that exists (OMP's pi segment): with nothing
   // to identify, the band stays blank so the layout never shifts on startup.
   // While a turn runs the working spinner takes the brand slot.
-  const lead = identity.length > 0 || spinner ? spinner ?? theme.accent(ICONS.brand) : undefined;
+  const lead = identity.length > 0 || spinner ? spinner ?? theme.dim(ICONS.brand) : undefined;
   return lead ? [lead, ...identity] : identity;
 }
 
+/** Powerline separator + soft cap glyphs (OMP's `powerline-thin` / band cap;
+ *  the unicode fallbacks — the nerd-font private-use glyphs are terminal-
+ *  specific, and the ascii twins render everywhere). */
+const POWERLINE_SEP = ">";
+/** OMP's band soft cap (`sep.powerlineCapLeft`) — empty in the unicode/ascii
+ *  symbol sets (only the nerd set has \ue0b6), so the band starts flush. */
+const BAND_CAP = "";
+/** Cells reserved ahead of the left group so the gauge keeps room for its
+ *  embedded `─N% ┃ ─window` labels (OMP's embeddedContextGaugeMinWidth). */
+const GAUGE_RESERVE = 14;
+
+/** Fill a styled group for the powerline row: OMP's bg-filled group text —
+ *  ` seg > seg > seg ` — padded one cell each side, background preserved
+ *  across the nested SGR resets the styled segments carry. */
+function powerlineGroup(segs: readonly string[], theme: ShapeTheme): string {
+  if (segs.length === 0) return "";
+  const joined = segs.join(theme.dim(` ${POWERLINE_SEP} `));
+  return theme.fill(` ${joined} `);
+}
+
 /** One composed status line: left flush-left, right justified right. Over-
- *  budget, the LEFT group yields first (OMP's priority — the context window
+ *  budget, the LEFT group yields first (OMP's priority — the session title
  *  stays); the right group is truncated only when it alone overflows. */
 export function composeStatus(left: string, right: string, w: number): string {
   const rw = visibleWidth(right);
@@ -280,7 +332,7 @@ function rule(w: number, th: ShapeTheme): string {
   return th.border("─".repeat(Math.max(0, w)));
 }
 
-/** Rule carrying pi's native scroll indicator (` ↑ N more `), centered. */
+/** Rule carrying pi's scroll indicator (` ↑ N more `), centered. */
 function ruleWithScroll(w: number, hidden: number, th: ShapeTheme): string {
   if (hidden > 0) {
     const label = ` ↑ ${hidden} more `;
@@ -293,47 +345,108 @@ function ruleWithScroll(w: number, hidden: number, th: ShapeTheme): string {
   return rule(w, th);
 }
 
-/** Right-docked status chip on a rule (OMP's renderTopRule: left fill, status
- *  at the right edge, one rule cell after it). */
+/** Context-reactive gauge (OMP's #buildContextGaugeFill): accent used-portion,
+ *  border remainder; the rounded `N%` label rides just past the used cells,
+ *  the `┃` marks pi's auto-compaction threshold position (window − 16384
+ *  reserve) when armed, and the window figure sits at the far right edge. */
+function gaugeFill(w: number, data: BandData | undefined, theme: ShapeTheme): string {
+  const pct = typeof data?.pct === "number" && Number.isFinite(data.pct) ? Math.min(100, Math.max(0, data.pct)) : null;
+  const win = typeof data?.window === "number" && data.window > 0 ? formatNumberTokens(data.window) : undefined;
+  const windowLabel = win ?? "";
+  const percentLabel = pct === null ? "" : `${Math.round(pct)}%`;
+  const windowStart = windowLabel ? Math.max(1, w - windowLabel.length - 1) : -1;
+  const scale = windowStart >= 0 ? windowStart : w;
+  const usedCount = Math.min(scale, Math.max(1, Math.round(((pct ?? 0) / 100) * scale)));
+  const percentStart = percentLabel ? Math.min(Math.max(1, scale - percentLabel.length - 1), Math.max(1, usedCount)) : -1;
+  // pi's compaction fires at contextWindow − reserveTokens (16384 default).
+  const thresholdIdx =
+    data?.autoCompact && w >= 8 && data.window ? Math.min(scale - 1, Math.max(0, Math.round(((data.window - 16384) / data.window) * scale))) : -1;
+  let out = "";
+  for (let i = 0; i < w; i++) {
+    if (percentStart >= 0 && i >= percentStart && i < percentStart + percentLabel.length) out += theme.accent(percentLabel[i - percentStart]!);
+    else if (i === thresholdIdx && (percentStart < 0 || i < percentStart || i >= percentStart + percentLabel.length)) out += theme.dim(ICONS.threshold);
+    else if (windowStart >= 0 && i >= windowStart) out += i < windowStart + windowLabel.length ? theme.dim(windowLabel[i - windowStart]!) : theme.dim("─");
+    else out += i < usedCount ? theme.accent("─") : theme.border("─");
+  }
+  return out;
+}
+
+/** Left group the gauge layouts shed whole trailing segments from
+ *  (stats → git → dir), never a half segment. */
+function shedSegments(segs: readonly string[], theme: ShapeTheme, budget: number): string[] {
+  const sep = visibleWidth(theme.dim(` ${POWERLINE_SEP} `));
+  const width = (n: number) => segs.slice(0, n).reduce((a, s) => a + visibleWidth(s), 0) + sep * Math.max(0, n - 1);
+  let keep = segs.length;
+  while (keep > 1 && width(keep) > budget) keep--;
+  return width(keep) > budget ? [] : segs.slice(0, keep);
+}
+
+/** Right-docked session-title chip on a rule (OMP's renderTopRule: left
+ *  fill, chip near the right edge, one rule cell after it). */
 function topRuleChip(c: ShapeCtx): string {
-  const { w, theme } = c;
-  const { left, right } = statusSegments(c.data, theme, c.spinner);
-  // The chip is the compact `left · right` join — full-width justification is
-  // the band's job, not a right-docked chip's.
-  const status = [left, right].filter(Boolean).join(theme.dim(" · "));
-  if (visibleWidth(status) > 0 && w > 2) {
-    const content = visibleWidth(status) > w - 2 ? truncateToWidth(status, w - 2, "…") : status;
+  const { w, theme, data } = c;
+  const title = data?.sessionName?.trim() ? theme.accent(data.sessionName.trim()) : "";
+  if (visibleWidth(title) > 0 && w > 2) {
+    const content = visibleWidth(title) > w - 2 ? truncateToWidth(title, w - 2, "…") : title;
     return theme.border("─".repeat(Math.max(0, w - visibleWidth(content) - 1))) + content + theme.border("─");
   }
   return ruleWithScroll(w, c.hidden, theme);
 }
 
-/** Flush soft-capped status band (no frame). Reserved row: blank when the
- *  status has nothing to show yet, so the layout never shifts. */
+/** Flush soft-capped powerline band (OMP's band layout, minus the session
+ *  title it relocates): filled left group, context-reactive gauge to the
+ *  right edge. Reserved blank row until the status has anything to show. */
 function bandTop(c: ShapeCtx): string {
-  const { w, theme } = c;
-  const segs = identitySegments(c.data, theme, c.spinner);
-  const right = c.data ? contextSegment(c.data, theme) : "";
-  const cap = theme.accent("╭─");
-  const scroll = c.hidden > 0 ? theme.border(` ↑${c.hidden} `) : "";
-  const budget = Math.max(1, w - visibleWidth(cap) - visibleWidth(scroll));
-  if (segmentsWidth(segs, theme) === 0 && right === "") return ""; // reserved blank row until data arrives
-  // The fill covers the STATUS CHIP only (OMP's band: the chip ends where the
-  // identity does; the context figure floats right on the bare prompt
-  // surface). A full-width fill reads as a title bar, not a status band.
-  const rw = visibleWidth(right);
-  const maxLeft = Math.max(0, budget - rw);
-  // Fit by shedding WHOLE trailing segments (stats → rate → usage → git →
-  // dir) — never half a segment. The context figure is reserved in full: it is
-  // the one
-  // figure worth keeping whole, and clipping it defeats the window display.
+  const { w, theme, data } = c;
+  const segs = identitySegments(data, theme, c.spinner);
+  const context = data ? contextSegment(data, theme) : "";
+  if (segs.length === 0 && context === "") return ""; // reserved blank row until data arrives
+  const budget = Math.max(0, w - visibleWidth(BAND_CAP) - GAUGE_RESERVE);
+  const left = powerlineGroup(shedSegments(segs, theme, budget), theme);
+  const body = Math.max(0, w - visibleWidth(BAND_CAP) - visibleWidth(left));
+  return left + gaugeFill(body, data, theme);
+}
+
+/** Rounded box top: `╭─ left …gauge… title ─╮` — the powerline row embedded
+ *  in the border (OMP's box + getTopBorder, session-title chip on the right). */
+function boxTop(c: ShapeCtx): string {
+  const { w, theme, data } = c;
+  const inner = Math.max(0, w - 2);
+  const segs = identitySegments(data, theme, c.spinner);
+  const title = data?.sessionName?.trim() ? theme.accent(data.sessionName.trim()) : "";
+  if (segs.length === 0 && !title) return theme.border("╭" + "─".repeat(inner) + "╮");
+  const titleBlock = title ? ` ${title} ` : "";
+  // `╭─` + content + `─╮` = w ⇒ the content budget is inner - 2; the closing
+  // dash before `╮` is unconditional (OMP's ` omp ─┐`).
+  const body = Math.max(0, inner - 2);
+  const gauge = Math.min(Math.max(8, Math.floor(inner / 5)), Math.max(8, body - visibleWidth(titleBlock) - 24));
+  const budget = Math.max(0, body - gauge - visibleWidth(titleBlock));
+  let left = powerlineGroup(shedSegments(segs, theme, budget), theme);
+  if (visibleWidth(left) > budget) left = truncateToWidth(left, budget, "…");
+  const gap = Math.max(0, body - visibleWidth(left) - visibleWidth(titleBlock));
+  return theme.border("╭─") + left + gaugeFill(gap, data, theme) + titleBlock + theme.border("─╮");
+}
+
+/** Standalone bottom status bar (OMP's renderBottomBar): plain ` · `-joined
+ *  groups — left group + context segment flush-left, session title right-
+ *  justified. `groups: "left"` drops the title (claude/rule: it's on the chip). */
+export function bottomBar(c: ShapeCtx, groups: "left" | "full"): string {
+  const { w, theme, data } = c;
+  const identity = identityList(data, theme);
+  const context = data ? contextSegment(data, theme) : "";
+  const rest = context ? [...identity, context] : identity;
+  const title = groups === "full" && data?.sessionName?.trim() ? theme.accent(data.sessionName.trim()) : "";
+  if (rest.length === 0 && !title) return "";
+  const lead = rest.length > 0 || c.spinner ? c.spinner ?? theme.dim(ICONS.brand) : undefined;
+  const segs = lead ? [lead, ...rest] : rest;
+  const sep = theme.dim(" · ");
+  const right = title;
+  const rw = visibleWidth(right) + (right ? 1 : 0);
   let keep = segs.length;
-  while (keep > 1 && segmentsWidth(segs.slice(0, keep), theme) + 2 > maxLeft) keep--;
-  const left = segmentsWidth(segs.slice(0, keep), theme) + 2 > maxLeft ? "" : segs.slice(0, keep).join(theme.dim(" · "));
-  if (left === "" && right === "") return "";
-  // ` text ` — the padding IS the separation from the context figure.
-  const chip = left === "" ? "" : theme.fill(` ${left} `);
-  return cap + chip + spaces(Math.max(0, maxLeft - visibleWidth(chip))) + right + scroll;
+  const width = (n: number) => segs.slice(0, n).reduce((a, s) => a + visibleWidth(s), 0) + visibleWidth(sep) * Math.max(0, n - 1);
+  while (keep > 1 && width(keep) + rw > w) keep--;
+  const left = width(keep) + rw > w ? "" : segs.slice(0, keep).join(sep);
+  return composeStatus(left, right, w);
 }
 
 /** Line 1 (OMP's Generation Rate placement): the numeric block split by the
@@ -358,26 +471,6 @@ export function rateLine(data: BandData | undefined, theme: ShapeTheme, w: numbe
   if (!right) return leftText;
   if (!leftText) return spaces(Math.max(0, w - visibleWidth(right))) + right;
   return composeStatus(leftText, right, w);
-}
-
-/** Width of a joined segment group (separators included). */
-function segmentsWidth(segs: readonly string[], theme: ShapeTheme): number {
-  if (segs.length === 0) return 0;
-  const sep = visibleWidth(theme.dim(" · "));
-  return segs.reduce((n, s) => n + visibleWidth(s), 0) + sep * (segs.length - 1);
-}
-
-/** Rounded box top: `╭─ left …fill… right ─╮` (status embedded, OMP's box). */
-function boxTop(c: ShapeCtx): string {
-  const { w, theme } = c;
-  const inner = Math.max(0, w - 2);
-  const { left, right } = statusSegments(c.data, theme, c.spinner);
-  const status = composeStatus(left, right, Math.max(0, inner - 4));
-  if (!status || visibleWidth(status) === 0) return theme.border("╭" + "─".repeat(inner) + "╮");
-  const content = truncateToWidth(status, Math.max(1, inner - 4), "…");
-  // `╭─ ` (3) + content + ` ` (1) + fill + `─` (1) + `╮` (1) = w  ⇒  fill = inner - content - 4.
-  const fill = "─".repeat(Math.max(0, inner - visibleWidth(content) - 4));
-  return theme.border("╭─ ") + content + theme.border(" " + fill + "─" + "╮");
 }
 
 /** Current git branch for a cwd — reads `.git/HEAD` (walk-up; a `.git` FILE
@@ -445,6 +538,7 @@ export const SHAPES: ComposerShapeDef[] = [
     sideWidth: 0,
     padX: 0,
     embedsStatus: true,
+    bottomBar: "none",
     gutter: "╰─ ",
     top: bandTop,
     row: (c, text, o) =>
@@ -457,6 +551,7 @@ export const SHAPES: ComposerShapeDef[] = [
     sideWidth: 1,
     padX: 2,
     embedsStatus: true,
+    bottomBar: "none",
     top: boxTop,
     row: (c, text, o) => {
       if (!o.isLast) return c.theme.border("│") + text + c.theme.border("│");
@@ -474,6 +569,7 @@ export const SHAPES: ComposerShapeDef[] = [
     sideWidth: 0,
     padX: 0,
     embedsStatus: true,
+    bottomBar: "left",
     gutter: "❯ ",
     top: topRuleChip,
     bottom: (c) => ruleWithScroll(c.w, c.hidden, c.theme),
@@ -485,6 +581,7 @@ export const SHAPES: ComposerShapeDef[] = [
     description: "Framed horizontal rules with status line at bottom",
     sideWidth: 0,
     padX: 1,
+    bottomBar: "full",
     top: (c) => ruleWithScroll(c.w, c.hidden, c.theme),
     bottom: (c) => ruleWithScroll(c.w, c.hidden, c.theme),
     row: (_c, text) => text,
@@ -495,6 +592,10 @@ export const SHAPES: ComposerShapeDef[] = [
     description: "Clean prompt glyph with status line at bottom, no box borders",
     sideWidth: 0,
     padX: 0,
+    bottomBar: "full",
+    // OMP's borderless is bottomBarGap:false — the bar sits flush under the
+    // single prompt row.
+    barGap: false,
     gutter: "❯ ",
     row: (c, text, o) => (o.first ? c.theme.accent(c.gutter ?? "") : spaces(visibleWidth(c.gutter ?? ""))) + text,
   },
@@ -505,6 +606,8 @@ export const SHAPES: ComposerShapeDef[] = [
     sideWidth: 0,
     padX: 0,
     embedsStatus: true,
+    bottomBar: "left",
+    barGap: true,
     gutter: "❯ ",
     top: topRuleChip,
     row: (c, text, o) => (o.first ? c.theme.accent(c.gutter ?? "") : spaces(visibleWidth(c.gutter ?? ""))) + text,
@@ -515,6 +618,8 @@ export const SHAPES: ComposerShapeDef[] = [
     description: "Filled one-row field with accent end caps",
     sideWidth: 1,
     padX: 1,
+    bottomBar: "full",
+    barGap: true,
     row: (c, text) => c.theme.accent("▐") + c.theme.fill(text) + c.theme.accent("▌"),
   },
   {
@@ -523,6 +628,8 @@ export const SHAPES: ComposerShapeDef[] = [
     description: "Filled one-row field anchored by a single accent rail",
     sideWidth: 1,
     padX: 1,
+    bottomBar: "full",
+    barGap: true,
     row: (c, text) => c.theme.accent("▎") + c.theme.fill(text),
   },
 ];
@@ -562,10 +669,17 @@ export function previewShape(id: string, w: number, theme: ShapeTheme, data?: Ba
   const text = padRow(inner, spaces(shape.padX) + prompt + theme.inverse(" "));
   const lines: string[] = [];
   const top = shape.top?.(c);
-  if (top !== undefined) lines.push(top);
+  if (top !== undefined && top !== "") lines.push(top);
   lines.push(shape.row(c, text, { first: true, isLast: true }));
   const bottom = shape.bottom?.(c);
   if (bottom !== undefined) lines.push(bottom);
+  if (shape.bottomBar && shape.bottomBar !== "none") {
+    const bar = bottomBar(c, shape.bottomBar);
+    if (bar) {
+      if (shape.barGap) lines.push("");
+      lines.push(bar);
+    }
+  }
   return lines.map((l) => truncateToWidth(l, w, "", true));
 }
 
@@ -628,6 +742,17 @@ export class ShapeEditor extends CustomEditor {
       content.forEach((r, i) => out.push(shape.row(c, padRow(inner, r), { first: i === 0, isLast: i === content.length - 1 })));
       const bottom = shape.bottom?.(c);
       if (bottom !== undefined) out.push(bottom);
+      // OMP's standalone bottom status bar (claude/rule: left group only;
+      // pi/borderless/field/rail: full), after its spacer row when the shape
+      // has no bottom chrome. Hidden while the autocomplete menu is up — the
+      // menu yields rows instead (OMP's autocomplete probe).
+      if (shape.bottomBar && shape.bottomBar !== "none" && acH === 0) {
+        const bar = bottomBar(c, shape.bottomBar);
+        if (bar) {
+          if (shape.barGap) out.push("");
+          out.push(bar);
+        }
+      }
       for (const r of acRows) out.push(shape.row(c, padRow(inner, r), { first: false, isLast: false }));
       return out.map((l) => truncateToWidth(l, width, "", true));
     } catch {

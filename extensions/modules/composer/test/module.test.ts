@@ -163,9 +163,10 @@ describe("applyShape dispatch", () => {
     const band = lines[1]!;
     assert.ok(band.includes("GLM"), band);
     assert.ok(band.includes("/tmp/somerepo"), `cwd shown: ${band}`);
-    assert.ok(band.includes("10.0%/1.0k"), `context window shown: ${band}`);
+    // The gauge carries the context figure rounded (OMP's embedded percent) + window.
+    assert.ok(band.includes("10%") && band.includes("1K"), `context window shown: ${band}`);
     assert.ok(!band.includes("↑100 ↓50") && !band.includes("R:59%"), `stats/quota stay off the band: ${band}`);
-    assert.ok(band.includes("10.0%/1.0k (auto)"), `auto-compact marker from pi settings: ${band}`);
+    assert.ok(band.includes("┃"), `auto-compact threshold marker from pi settings: ${band}`);
     resetGenRate();
     resetUsageItem();
   });
@@ -270,13 +271,13 @@ describe("module registration (core)", () => {
       (ctx as unknown as { __calls: { factory: (t: unknown, th: unknown, kb: unknown) => { render(w: number): string[] } }[] }).__calls.at(-1)!.factory;
     const render = (ed: { render(w: number): string[] }) => {
       const lines = ed.render(120).map((l) => l.replace(/\x1b\[[0-9;]*m/g, ""));
-      return lines.find((l) => l.includes("π ·")) ?? lines[0]!;
+      return lines.find((l) => l.includes("π >")) ?? lines[0]!;
     };
     const ed1 = factoryOf()({ terminal: { rows: 30 }, requestRender() {} }, { borderColor: (s: string) => s }, {});
-    assert.ok(render(ed1).includes("(high)"), "session_start ctx level");
+    assert.ok(render(ed1).includes("· high"), "session_start ctx level");
     await events.get("thinking_level_select")!({ type: "thinking_level_select", level: "max", previousLevel: "high" }, ctx);
     const ed2 = factoryOf()({ terminal: { rows: 30 }, requestRender() {} }, { borderColor: (s: string) => s }, {});
-    assert.ok(render(ed2).includes("(max)"), "event updates the level live");
+    assert.ok(render(ed2).includes("· max"), "event updates the level live");
   });
 });
 
