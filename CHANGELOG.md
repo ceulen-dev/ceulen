@@ -1,5 +1,54 @@
 # Changelog
 
+## 0.13.0 — 2026-10-08
+
+- **Tool-parity wave** (8h OMP/industry survey plan): 4 new modules + 4
+  read/write upgrades, all live-verified end-to-end (real spawns, real
+  classifier round-trips, real osascript):
+  - **shells** (new module): one `shell` tool — start/list/output/stdin/kill
+    over persistent background processes (dev servers, watchers, long
+    builds). Own process group per session (group kill via `kill(-pid)`),
+    256 KB line rings (head+tail + truncation marker), 10 live/5 exited
+    caps, `since:"last"` output cursor, killAll on session_shutdown.
+    Plan-blocked.
+  - **read-sqlite** (repair): the wrapped read opens `db.sqlite` views —
+    table list, `:users` schema+rows, `:users:42` rowid, `:users:name=alice`
+    key lookup, `:?SELECT…` read-only query. `node:sqlite` READ-ONLY per
+    call; db is genuinely un-writable.
+  - **read-archive** (repair): `.tar`/`.tgz`/`.zip` member listing +
+    content through the read path; exact-then-unique-suffix member match,
+    1 MB cap, binary refusal; `pkg.tgz:src/x.ts:50-80` slices the member.
+  - **auto-generated guard** (repair): writes/edits to lockfiles, minified
+    bundles, build dirs and snapshots are refused with a regenerate hint
+    (bash stays the deliberate override); `repair.autoGenGuard` setting,
+    default on, /config row on Tools → Repair.
+  - **read_pdf** (web, 13th tool): local PDF text via vendored pdf.js 4.10
+    (Apache-2.0, lazy import, workerless) — no external binaries; pages
+    grammar `"3"`, `"1-5"`, `"2,4,6-8"`, 10-page cap/call. Plan read-only.
+  - **sg** (new module): `ast_grep` (structural search, `$VAR`/`$$$ALL`
+    meta-variables, multi-pattern merge+dedupe) + `ast_edit` (pattern →
+    rewrite across files; DRY-RUN by default, staleness re-check after
+    apply warns on self-matching rewrites). Fail-open on a missing
+    ast-grep binary. Pattern-parse failures render a hint on ast-grep 0.4x
+    (exit 8 "Cannot parse query") as well as legacy sg. Plan read-only
+    search, blocked rewrite.
+  - **jfind** (new module): semantic code find — describe a behavior, get
+    files + line ranges, strongest first. OMP cascade port (lexical IDF
+    prior → filename judging → sketch routing → passage verification); the
+    judge routes through the router's System One classifier models. Plan
+    read-only.
+  - **notify** (new module): one `notify` tool — desktop notification via
+    osascript/notify-send, bell fallback, harmless by construction.
+- Wiring: registry entries + per-tool kill-switches + plan-mode tiers, test
+  globs, /config tool-section count 16→20, composer disabled-list, AGENTS.md
+  sections, `@types/node` ^24 (node:sqlite types).
+- Tests: 2750 (was 2661) — suites for shells sessions, readers, sg ops,
+  jfind cascade (fake-judge), notify.
+- Live-verified (2026-10-08 round): shells ring/group-kill/stdin,
+  sqlite+archive views + guard refusal through real pi runs, pdf extraction,
+  sg dry-run/apply/staleness, jfind cascade vs the real classifier, notify
+  osascript delivery; one fix shipped (sg pattern-error detection, above).
+
 ## 0.12.0 — 2026-10-08
 
 - **Secrets never land in settings.json** (user policy: URLs fine, credentials

@@ -47,6 +47,12 @@ export function buildRepairGroups(cfg: RepairSettings): PanelGroup[] {
           defaultValue: DEFAULT_REPAIR_SETTINGS.guards,
           description: "Block destructive bash (rm -rf /, dd writes) and read-on-guessed-path.",
         }),
+        row("repair.autoGenGuard", "Auto-generated write guard", "toggle", cfg.autoGenGuard, (v) => {
+          cfg.autoGenGuard = v === true;
+        }, {
+          defaultValue: DEFAULT_REPAIR_SETTINGS.autoGenGuard,
+          description: "Refuse write/edit on generated files (lockfiles, dist/, *.min.js) — regenerate from source instead; bash is the override hatch.",
+        }),
         row("repair.autoBg", "Auto-background bash", "toggle", cfg.autoBg, (v) => {
           cfg.autoBg = v === true;
         }, {
@@ -66,7 +72,7 @@ export function buildRepairGroups(cfg: RepairSettings): PanelGroup[] {
 }
 
 const OWNED_PREFIX = "repair.";
-const BOOL_KEYS = ["arguments", "editRetry", "guards", "autoBg"] as const;
+const BOOL_KEYS = ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg"] as const;
 
 /** repair's ModuleConfig for the central /config panel. The factory receives
  *  the module's guarded pi but needs nothing from it — settings live in the

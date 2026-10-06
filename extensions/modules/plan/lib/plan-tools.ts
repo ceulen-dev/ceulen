@@ -33,6 +33,13 @@ export const READ_ONLY_TOOLS = new Set([
   // Rendered-page accessibility audit — reads the page in a local headless
   // Chrome, mutates nothing.
   "web_a11y",
+  // PDF text extraction (vendored pdf.js, in-process) — reads a local file.
+  "read_pdf",
+  // Semantic find — read-only judging over the workspace; costs model calls
+  // but mutates nothing.
+  "jfind",
+  // ast-grep search is read-only; the REWRITE tool (ast_edit) is NOT here.
+  "ast_grep",
   // NOTE: herdr is deliberately NOT here — its prompt action can drive a
   // write-capable child, so every herdr call takes the confirm tier.
 ]);
@@ -43,6 +50,12 @@ export const BLOCKED_TOOLS = new Set([
   "edit", "write",
   // Diff-style file mutation — same treatment as edit/write.
   "apply_patch",
+  // ast-grep rewrite with write:true mutates files; dry-run default keeps it
+  // a mutator (the schema carries write, so the tool is gated as a whole).
+  "ast_edit",
+  // Background shell sessions are an arbitrary-execution escape hatch —
+  // hard-blocked like bash writers, not confirm-tier.
+  "shell",
   // File editor (create/str_replace/insert) — a direct source mutator like edit/write.
   "str_replace_editor",
   // Serena file mutation (restart/onboarding tools are state-changing but no

@@ -50,6 +50,10 @@ import { attachmentsConfig } from "../modules/attachments/configPanel.ts";
 import cronModule from "../modules/cron/index.ts";
 import { cronConfig } from "../modules/cron/configPanel.ts";
 import permissionModule from "../modules/permission/index.ts";
+import shellsModule from "../modules/shells/index.ts";
+import sgModule from "../modules/sg/index.ts";
+import jfindModule from "../modules/jfind/index.ts";
+import notifyModule from "../modules/notify/index.ts";
 import configModule from "../modules/config/index.ts";
 
 /** A module's contribution to the central `/config` panel. */
@@ -156,11 +160,14 @@ export const MODULES: ModuleEntry[] = [
   { name: "fff", category: "Tools", describe: "FFF fuzzy file/content search (ffgrep, fffind) + @-mention completions.", load: fffModule, tools: [
     "ffgrep", "ffind", "fff_multi_grep", "resolve_file", "related_files",
   ] },
+  // jfind after fff: the semantic sibling of the lexical search pair (its
+  // judge resolves through the router's classifier models at execute time).
+  { name: "jfind", category: "Tools", describe: "Semantic code find: describe what code does, get files + line ranges (lexical prior + System One judge cascade).", load: jfindModule, tools: ["jfind"] },
   // Web after fff: same class of append-only before_agent_start guidance
   // (conditional on web_* tools being active) — no prompt-rewrite contract
   // beyond fff's shipped precedent.
   { name: "web", category: "Tools", describe: "Unified web tools: search (SearXNG/Brave/Firecrawl), extract & crawl (JSDOM/Firecrawl/Crawl4AI/agy), screenshot/PDF, CDP browser interaction, Gemini research, image generation, one-off chat.", load: webModule, config: webConfig, tools: [
-    "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status", "web_a11y",
+    "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status", "web_a11y", "read_pdf",
   ] },
   { name: "rules", category: "Context", describe: "Sticky RULES.md constraints carried in every request + a rulebook of on-demand rules served by rule_get. Nearest-first project walk over user-level.", load: rulesModule, tools: ["rule_get"] },
   // Attachments: paste/drop files become real attachments. No tools/commands —
@@ -170,6 +177,10 @@ export const MODULES: ModuleEntry[] = [
   // gh binary (registers nothing until installed). Read-only ops only, so
   // plan mode auto-allows it (plan-tools.ts READ_ONLY_TOOLS).
   { name: "gh", category: "Tools", describe: "GitHub tool over the gh CLI: repo/file/PR views, PR diff, five search flavors, Actions run_watch. Read-only; mutating flows stay on bash gh.", load: ghModule, config: ghConfig, tools: ["github"] },
+  // sg after gh: the same external-binary fail-open shape, for ast-grep.
+  { name: "sg", category: "Tools", describe: "Structural search & rewrite via the ast-grep CLI: ast_grep search, ast_edit dry-run-default rewrites. Registers nothing until ast-grep/sg is installed.", load: sgModule, tools: ["ast_grep", "ast_edit"] },
+  // notify: harmless desktop ping (bell fallback), herdr multi-pane ergonomics.
+  { name: "notify", category: "Tools", describe: "Desktop notification tool: ping the user when long work settles or input is needed (osascript / notify-send / bell).", load: notifyModule, tools: ["notify"] },
   // rtk is a PROMPT REWRITER (its before_agent_start appends the RTK note), so
   // it must load BEFORE steering — during a ds-anchor bootstrap, steering's
   // minimal prompt replaces everything, including this note (byte-identity);
@@ -190,6 +201,9 @@ export const MODULES: ModuleEntry[] = [
   // Permission after rtk: persistent allow/ask/deny gating. Inert until rules
   // exist; defers to plan mode via the shared plan-bridge flag (order-free).
   { name: "permission", category: "Shell", describe: "Persistent allow/ask/deny permission rules per tool (wildcards, external-directory boundary, doom-loop guard) — opt-in via the `permission` settings section; inert until configured.", load: permissionModule },
+  // Background shell sessions (the bash-escape-hatch tool is BLOCKED in plan
+  // mode via plan-tools.ts — keep that in sync when renaming).
+  { name: "shells", category: "Shell", describe: "Background shell sessions: start/list/output/stdin/kill over persistent processes (dev servers, watchers). Killed on session shutdown; blocked in plan mode.", load: shellsModule, tools: ["shell"] },
   // ── Plugins ────────────────────────────────────────────────────────────
   // Config last: it owns /config and reads the contrib map. CORE: the panel is
   // the only in-app way back from a misconfiguration — it can never be the

@@ -11,6 +11,8 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { existsSync } from "node:fs";
+import { resolve as resolvePath } from "node:path";
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -19,6 +21,7 @@ import { readDisabledTools } from "../../lib/tools.js";
 import { skillsRoot } from "../../lib/skill-path.js";
 
 import { formatA11ySummary, runA11yAudit } from "./lib/a11y";
+import { formatPdfText, parsePagesParam, readPdfText } from "./lib/pdf";
 
 import {
   findEnvValue,
@@ -968,6 +971,37 @@ export default function piWebExtension(pi: ExtensionAPI) {
       status.crawl4ai = { ...(status.crawl4ai as Record<string, unknown>), health: c4aiHealth };
 
       return { content: [{ type: "text" as const, text: JSON.stringify(status, null, 2) }], details: status };
+    },
+  });
+
+  // ── read_pdf ─────────────────────────────────────────────────
+  pi.registerTool({
+    name: "read_pdf",
+    label: "Read PDF",
+    description:
+      "Read a local PDF file's text (vendored pdf.js engine — no external binaries, no Chrome). Params: path, pages ('3', '1-5', '2,4,6-8'; default first 5, cap 10/call). Text-only: scanned/image pages return a 'no extractable text' notice.",
+    promptSnippet: "Extract text from a local PDF",
+    promptGuidelines: [
+      "Text extraction only — scanned/image PDFs yield a notice; OCR is out of scope.",
+      "Request specific pages for big documents (cap 10 pages per call).",
+    ],
+    parameters: Type.Object({
+      path: Type.String({ description: "Path to the PDF (absolute or cwd-relative)." }),
+      pages: Type.Optional(
+        Type.String({ description: 'Pages to extract: "3", "1-5", or "2,4,6-8". Default: first 5 pages (cap 10/call).' }),
+      ),
+    }),
+    async execute(_id: string, params: Record<string, unknown>, signal: AbortSignal, _onUpdate: unknown, ctx: any) {
+      const cwd = cwdFromContext(ctx);
+      const rawPath = params.path as string;
+      const abs = resolvePath(cwd, rawPath);
+      if (!existsSync(abs)) throw new Error(`PDF not found: ${rawPath}`);
+      if (!/\.pdf$/i.test(abs)) throw new Error(`not a PDF (extension check): ${rawPath}`);
+      // First parse page 1 to learn numPages cheaply, then the real slice.
+      const probe = await readPdfText({ path: abs, pages: [1], signal });
+      const wanted = parsePagesParam(params.pages as string | undefined, probe.totalPages);
+      const result = wanted.length === 1 && wanted[0] === 1 ? probe : await readPdfText({ path: abs, pages: wanted, signal });
+      return { content: [{ type: "text" as const, text: formatPdfText(result) }], details: result };
     },
   });
 

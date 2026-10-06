@@ -134,7 +134,7 @@ describe("projectShadow", () => {
 });
 
 describe("buildRepairGroups (panel contract)", () => {
-  it("renders the five repair.* rows on the Tools tab with the documented defaults", () => {
+  it("renders the six repair.* rows on the Tools tab with the documented defaults", () => {
     const groups = buildRepairGroups({ ...DEFAULT_REPAIR_SETTINGS });
     assert.equal(groups.length, 1);
     assert.equal(groups[0].tab, "Tools");
@@ -144,6 +144,7 @@ describe("buildRepairGroups (panel contract)", () => {
       "repair.arguments",
       "repair.editRetry",
       "repair.guards",
+      "repair.autoGenGuard",
       "repair.autoBg",
       "repair.autoBgSecs",
     ]);

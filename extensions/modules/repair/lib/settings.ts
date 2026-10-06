@@ -20,6 +20,8 @@ export interface RepairSettings {
   editRetry: boolean;
   /** Destructive-bash + read-on-guessed-path guards. */
   guards: boolean;
+  /** Refuse write/edit on auto-generated files (lockfiles, dist, min.js). */
+  autoGenGuard: boolean;
   /** Auto-background long foreground bash calls. */
   autoBg: boolean;
   /** Foreground threshold (seconds) before auto-backgrounding. */
@@ -30,6 +32,7 @@ export const DEFAULT_REPAIR_SETTINGS: RepairSettings = {
   arguments: true,
   editRetry: true,
   guards: true,
+  autoGenGuard: true,
   autoBg: false,
   autoBgSecs: 120,
 };
@@ -55,7 +58,7 @@ function section(json: Record<string, unknown> | null, key: string): Record<stri
 /** Merge one settings layer's `repair` keys over out (field-wise override). */
 function mergeLayer(out: RepairSettings, json: Record<string, unknown> | null): void {
   const s = section(json, "repair");
-  for (const key of ["arguments", "editRetry", "guards", "autoBg"] as const) {
+  for (const key of ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg"] as const) {
     if (typeof s[key] === "boolean") out[key] = s[key];
   }
   if (typeof s.autoBgSecs === "number" && Number.isFinite(s.autoBgSecs)) {

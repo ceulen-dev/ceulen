@@ -705,6 +705,65 @@ paths change). No tools/commands/skills; NO /config contribution factory — the
 synthesized Enable-only section lands on Shell (`Permissions` 🛡); rules are a
 nested blob edited in settings.json by design (OpenCode convention).
 
+### Tool-parity modules (shells, sg, jfind, notify)
+
+Four OMP/industry-parity ports (2026-10-06 survey plan), all non-core with
+per-tool kill-switches, no prompt rewriting (steering order contract
+untouched):
+
+- **shells** (`extensions/modules/shells/`) — ONE `shell` tool over
+  persistent background processes (Claude Code BashOutput/KillShell + Codex
+  unified_exec parity): `start/list/output/stdin/kill`, spawned
+  `detached:true` so the process GROUP dies (kill `-pid`), per-stream 256 KB
+  line rings (head+tail + `[… N bytes truncated …]` marker), 10 live / 5
+  exited cap, `since:"last"` output cursor. `session_shutdown` fire-and-forget
+  killAll; `session_start` clears. Plan mode: `shell` is in BLOCKED_TOOLS
+  (arbitrary-exec escape hatch — never move it to the confirm tier).
+- **sg** (`extensions/modules/sg/`) — `ast_grep` search + `ast_edit`
+  multi-op rewrite over the ast-grep CLI (gh-module fail-open: `ast-grep`
+  probe, `sg` fallback, registers NOTHING when absent; env pins
+  NO_COLOR/CLICOLOR*). Runner seam `lib/sg-cli.ts`, CLI facts encoded in
+  `lib/ops.ts`: `--json=compact` matches are 0-BASED (converted), exit 1 +
+  `[]` = no match NOT an error, stderr "ERROR node" = pattern parse error,
+  exit 9 = bad args, dry-run = no `-U`, apply = `-U` (silent) + post-rewrite
+  staleness re-check. ast_edit is DRY-RUN by default (write:true applies);
+  plan mode: `ast_grep` is READ_ONLY, `ast_edit` is BLOCKED.
+- **jfind** (`extensions/modules/jfind/`) — OMP's semantic-find cascade
+  (lexical keyword prior → filename judging → sketch routing → passage
+  verification, budgets/constants preserved) ported to plain fs; the judge
+  seam (`lib/judge.ts`) routes through `modelRegistry.classify` (classifier
+  askJev pattern incl. the 60s cold-start refresh) and fails LOUD with a
+  remediation hint when no classifier model resolves. `keywords`/`path`
+  params; 45s wall-clock; judge failures degrade to `stats.failures`.
+  READ_ONLY in plan mode. Skipped from OMP: native grep/glob/sketch engine
+  (pi-natives), internal-URL filesystem, judgment caching.
+- **notify** (`extensions/modules/notify/`) — ONE `notify` tool:
+  darwin osascript / linux notify-send / terminal-bell fallback, always
+  resolves, injectable spawn/probe/platform fakes for tests.
+
+### Extended read views (repair module) + read_pdf (web module)
+
+The repair module's wrapped `read` ALSO serves two special views parsed from
+selector peels (before line-range parsing, literal-wins preserved):
+**sqlite** — a path whose 16-byte header is `SQLite format 3\0` (plain
+`db.sqlite` = table list; `:users` = schema + 10 preview rows; `:users:42` =
+rowid row; `:users:name=alice` = key lookup; `:?SELECT …` = read-only query,
+SELECT/WITH/PRAGMA heads only, 200-row cap) via `node:sqlite` opened
+READ-ONLY per call; **archive** — `.tar/.tgz/.tar.gz/.zip` via `tar -tf`/`-xOf`
+and `unzip -Z1`/`-p` shell-out (`pkg.tgz` = listing; `:src/x.ts` = member,
+exact-then-unique-suffix match; `:src/x.ts:50-80` = member + line ranges;
+1 MiB member cap, NUL-byte members refused). The repair module also carries
+the **auto-generated write guard** (`repair.autoGenGuard`, default on, row on
+Tools → Repair): write/edit/apply_patch/str_replace_editor refuse
+lockfiles/`*.min.js`/`dist/**`-style paths with a regenerate-from-source
+message; bash stays the override hatch.
+The web module's `read_pdf` extracts a local PDF's TEXT in-process through
+the vendored pdf.js (`vendor/pdfjs/`, Apache-2.0, lazy import, workerless —
+`pdf.worker.mjs` MUST sit beside `pdf.min.mjs` or the fake-worker setup
+fails); page-image rendering is deliberately out of scope (headless-Chrome
+PDF viewer renders blank live-probed 2026-10-06), scanned pages come back as
+"no extractable text". READ_ONLY in plan mode.
+
 ### Read path selectors (repair module)
 
 The repair module's wrapped `read` accepts OMP-style path suffixes:
