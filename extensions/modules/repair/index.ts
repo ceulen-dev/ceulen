@@ -27,7 +27,7 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, resolve as resolvePath } from "node:path";
 import {
   createBashToolDefinition,
@@ -182,9 +182,109 @@ function addReadDefaults(args: unknown): unknown {
   return out;
 }
 
+// ── Write freshness guard (multi-session blind-overwrite protection) ──
+// A `write` replaces a file wholesale: unlike edit/apply_patch (anchored on
+// exact content) it cannot notice a foreign change. Record each file's mtime
+// when read; before a write, compare — a mismatch means ANOTHER session or
+// process changed the file since we last saw it. Only files this session
+// actually read are guarded (intentional never-read overwrites stay legal).
+const seenMtime = new Map<string, number>();
+
+async function statMtime(abs: string): Promise<number | undefined> {
+  try {
+    return (await stat(abs)).mtimeMs;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Record mtimes for files a successful read just returned. */
+async function recordReadMtimes(params: any, cwd: string): Promise<void> {
+  if (!isRecord(params) || typeof params.path !== "string" || params.path.includes("://")) return;
+  const mtime = await statMtime(resolvePath(cwd, params.path));
+  if (mtime !== undefined) seenMtime.set(resolvePath(cwd, params.path), mtime);
+  // ponytail: the map grows with files-read-per-process; a cap keeps it
+  // bounded without an eviction policy.
+  if (seenMtime.size > 2000) seenMtime.clear();
+}
+
+/** After a successful mutation, refresh the recorded mtime so a FOLLOW-UP
+ *  write compares against what this session last wrote, not what it read. */
+async function recordMutatedMtimes(toolName: string, params: any, cwd: string): Promise<void> {
+  const paths: string[] = [];
+  if (toolName === "write" && isRecord(params) && typeof params.path === "string") paths.push(params.path);
+  if (toolName === "edit" && isRecord(params) && typeof params.path === "string") paths.push(params.path);
+  if (toolName === "apply_patch" && isRecord(params) && typeof params.patch === "string") {
+    paths.push(...parsePatchTargetPaths(params.patch));
+  }
+  for (const p of paths) {
+    const abs = resolvePath(cwd, p);
+    const mtime = await statMtime(abs);
+    if (mtime !== undefined) seenMtime.set(abs, mtime);
+    else seenMtime.delete(abs);
+  }
+}
+
+/** V4D patch targets: `*** Update File: <path>` / Add / Delete / rename. */
+function parsePatchTargetPaths(patch: string): string[] {
+  const out: string[] = [];
+  for (const m of patch.matchAll(/^\*{3} (?:Add|Delete|Update) File: (.+?)(?: → .+)?$/gm)) {
+    const target = m[1].trim();
+    if (target && !target.includes("://")) out.push(target.split(" → ")[0].trim());
+  }
+  return out;
+}
+
+/** Public seam for tools registered outside wrapToolDefinition (apply_patch,
+ *  str_replace_editor) to refresh the freshness baseline after their own
+ *  successful mutations. */
+export async function refreshMtime(path: string, cwd: string): Promise<void> {
+  const abs = resolvePath(cwd, path);
+  const mtime = await statMtime(abs);
+  if (mtime !== undefined) seenMtime.set(abs, mtime);
+  else seenMtime.delete(abs);
+}
+
+/** Pre-write check. Returns an error message when the file changed since this
+ *  session last read it, else undefined (allowed). Exported for tests. */
+export async function checkWriteFresh(params: any, cwd: string): Promise<string | undefined> {
+  if (!isRecord(params) || typeof params.path !== "string" || params.path.includes("://")) return undefined;
+  const abs = resolvePath(cwd, params.path);
+  const seen = seenMtime.get(abs);
+  if (seen === undefined) return undefined; // never read here — intentional overwrite is legal
+  const current = await statMtime(abs);
+  if (current === undefined) return undefined; // gone since read — write recreates it
+  if (current !== seen) {
+    return `File changed on disk since this session last read it (mtime differs — another session/process likely wrote it). Re-read the file, then re-apply your write to <${params.path}>.`;
+  }
+  return undefined;
+}
+
 function appendReadNote(result: any, note: unknown) {
   if (typeof note !== "string" || !note) return result;
   return { ...result, content: [...(Array.isArray(result?.content) ? result.content : []), { type: "text", text: note }] };
+}
+
+/** Auto-detect unresolved git conflict markers in a full-file read and append
+ *  a footer naming them (OMP's conflict-detect workflow). Zero extra I/O —
+ *  scans the text blocks the read already returned. The `:conflicts` selector
+ *  path is excluded (it lists blocks explicitly). Exported for tests. */
+export function appendConflictFooter(result: any, params: any, selector: ParsedSelector | undefined, cwd: string): any {
+  if (selector) return result;
+  const p = isRecord(params) && typeof params.path === "string" ? params.path : "";
+  if (!p) return result;
+  const texts = (Array.isArray(result?.content) ? result.content : [])
+    .filter((c: any) => c?.type === "text" && typeof c.text === "string")
+    .map((c: any) => c.text as string);
+  if (texts.length === 0) return result;
+  const lines = texts.join("\n").split("\n") as string[];
+  // Cheap pre-check before the block scanner.
+  if (!lines.some((l) => l.startsWith("<<<<<<<"))) return result;
+  const blocks = extractConflictBlocks(lines);
+  if (blocks.length === 0) return result;
+  const first = lines.indexOf(blocks[0][0]) + 1;
+  const footer = `⚠ ${blocks.length} unresolved merge conflict block(s) detected in ${p} (first at line ${first}) — read with :conflicts to list them, then edit to resolve.`;
+  return { ...result, content: [...(result.content as any[]), { type: "text", text: footer }] };
 }
 
 // Strip read-tool contamination notices from an edit's oldText fields. Mutates
@@ -289,8 +389,26 @@ export function wrapToolDefinition(
 
       if (base.name !== "edit") {
         try {
+          // Write freshness guard (see checkWriteFresh): a `write` to a file
+          // THIS session read earlier but someone else changed since must
+          // fail loudly instead of clobbering the foreign edit.
+          if (base.name === "write") {
+            const stale = await checkWriteFresh(params, cwd);
+            if (stale) {
+              return { content: [{ type: "text", text: stale }], isError: true, details: undefined };
+            }
+          }
           const result = await freshDef.execute(toolCallId, params, signal, onUpdate, ctx);
-          return base.name === "read" ? appendReadNote(result, readNote) : result;
+          if (base.name === "read") {
+            const withNote = appendReadNote(result, readNote);
+            await recordReadMtimes(params, cwd);
+            return appendConflictFooter(withNote, params, selector ?? peeledSelector, cwd);
+          }
+          // Own mutations refresh the freshness baseline so later writes
+          // compare against what THIS session last left on disk. Awaited:
+          // a write immediately following must observe the new baseline.
+          await recordMutatedMtimes(base.name, params, cwd);
+          return result;
         } catch (err: any) {
           // Session mining: "(no output) / Command exited with code 1" after a
           // search reads as a crash, so models retry the same command. Annotate
@@ -460,6 +578,9 @@ export default function repairModule(pi: ExtensionAPI) {
         }
         try {
           const res = await applyPatchToFiles(parsed, cwd);
+          // Refresh freshness baselines: a later write to a patched file must
+          // compare against this patch's mtime, not an older read.
+          await Promise.all(res.files.map((f) => refreshMtime(f.path, cwd)));
           const summary = res.files.map((f) => {
             if (f.kind === "add") return `Added ${f.path}`;
             if (f.kind === "delete") return `Deleted ${f.path}`;
@@ -479,8 +600,18 @@ export default function repairModule(pi: ExtensionAPI) {
   });
 
   // ── str_replace_editor: DSH Minimal-pair editor (byte-faithful schema) ──
+  const strReplaceDef = createStrReplaceEditorToolDefinition(process.cwd());
   pi.registerTool({
-    ...createStrReplaceEditorToolDefinition(process.cwd()),
+    ...strReplaceDef,
+    async execute(toolCallId: string, params: any, signal: any, onUpdate: any, ctx: any) {
+      const result = await strReplaceDef.execute(toolCallId, params, signal, onUpdate, ctx);
+      // Refresh the freshness baseline for the edited file (same rationale as
+      // apply_patch above) — only on success, only for plain file paths.
+      if (!result?.isError && isRecord(params) && typeof params.path === "string" && !params.path.includes("://")) {
+        await refreshMtime(params.path, ctx?.cwd || process.cwd());
+      }
+      return result;
+    },
     defaultActive: !disabled.has("str_replace_editor"),
   });
 

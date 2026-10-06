@@ -17,7 +17,7 @@
  */
 
 import * as path from "node:path";
-import * as fsPromises from "node:fs/promises";
+import * as fs from "node:fs/promises";
 import { Container, Markdown, SelectList, Spacer, Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 import {
@@ -35,14 +35,18 @@ import { StringEnum } from "./lib/schema.ts";
 import { type AgentColor, type AgentConfig, type AgentScope, discoverAgents, formatAgentList, getModelCandidates, invalidateAgentCache } from "./lib/agents.ts";
 import {
   type SubAgentProgress,
+  type WorktreeOwner,
   type SubAgentResult,
   formatPatchBlock,
   getFinalOutput,
   getResultOutput,
   isFailedResult,
   mapWithConcurrencyLimit,
+  pidAlive,
   runSubAgent,
   startHeartbeat,
+  sweepStaleWorktrees,
+  WORKTREE_DIR_NAME,
 } from "./lib/runner.ts";
 import {
   flushWarnings,
@@ -296,6 +300,9 @@ export default function (pi: ExtensionAPI) {
     });
     // Clear any widget from a prior session.
     if (ctx.mode === "tui") widget.clearWidgetIfIdle(ctx);
+    // Reclaim crashed runs' worktree sandboxes (fire-and-forget: never blocks
+    // startup; a no-.pi-worktrees repo costs one rev-parse).
+    void sweepStaleWorktrees(ctx.cwd).catch(() => { /* best effort */ });
     // Mark prior-session running tasks as interrupted (we can't resume them),
     // but keep entries for background tasks still live in this process — only
     // shutdown aborts them, so a session reload must not mislabel them.
@@ -388,10 +395,10 @@ export default function (pi: ExtensionAPI) {
     return container;
   });
   pi.registerCommand("subagent", {
-    description: "Configure model roles (/subagent), list agents (/subagent list), agent details (/subagent <name>), role detail (/subagent @role), reload definitions (/subagent reload), history (/subagent history)",
+    description: "Configure model roles (/subagent), list agents (/subagent list), agent details (/subagent <name>), role detail (/subagent @role), reload definitions (/subagent reload), history (/subagent history), worktree sandboxes (/subagent worktrees [clean])",
     getArgumentCompletions: (prefix) => {
       const ctx = currentCtx;
-      const keywords = ["list", "all", "agents", "roles", "reload", "refresh", "history"];
+      const keywords = ["list", "all", "agents", "roles", "reload", "refresh", "history", "worktrees"];
       const vocab = [...keywords];
       if (ctx) {
         const discovery = discoverAgents(ctx.cwd, "both", bundledAgentsDir);
@@ -406,6 +413,32 @@ export default function (pi: ExtensionAPI) {
     handler: async (args, ctx) => {
       const cmd = args.trim().toLowerCase();
       const discovery = discoverAgents(ctx.cwd, "both", bundledAgentsDir);
+
+      // /subagent worktrees [clean] — worktree sandbox inventory + GC.
+      if (cmd === "worktrees" || cmd.startsWith("worktrees ")) {
+        const force = cmd.includes("clean");
+        const ownerLabel = async (): Promise<string> => {
+          const base = path.join(path.resolve(ctx.cwd), WORKTREE_DIR_NAME);
+          let entries: string[] = [];
+          try { entries = (await fs.readdir(base)).filter((e) => e !== ".gitignore"); } catch { return "No worktree sandboxes."; }
+          if (entries.length === 0) return "No worktree sandboxes.";
+          const lines = await Promise.all(entries.map(async (entry) => {
+            let owner: WorktreeOwner | undefined;
+            try { owner = JSON.parse(await fs.readFile(path.join(base, `${entry}.owner.json`), "utf8")) as WorktreeOwner; } catch { /* stale/legacy */ }
+            const state = !owner ? "stale (no marker)"
+              : pidAlive(owner.pid) ? `live (pid ${owner.pid})`
+              : `dead (pid ${owner.pid}, ${Math.round((Date.now() - (owner.createdAt ?? Date.now())) / 60000)}min old)`;
+            return `  ${entry} — ${state}`;
+          }));
+          return `Worktree sandboxes (${entries.length}):
+${lines.join("\n")}`;
+        };
+        const result = force ? await sweepStaleWorktrees(ctx.cwd) : null;
+        const listing = await ownerLabel();
+        const sweepLine = result ? `\n\nSwept ${result.removed.length} stale sandbox(es): ${result.removed.map((r) => path.basename(r)).join(", ") || "none"}.` : "\n\n(/subagent worktrees clean to sweep stale entries)";
+        pi.sendMessage({ customType: "ceulen-subagent", content: `${listing}${sweepLine}`, display: true });
+        return;
+      }
 
       // /subagent history — list recent task delegations (durable metadata).
       if (cmd === "history" || cmd === "hist") {
@@ -2115,7 +2148,7 @@ export default function (pi: ExtensionAPI) {
           if (params.wait) {
             const timeoutMs = params.timeout ?? 120_000;
             const fileStampBefore = entry
-              ? await fsPromises.stat(entry.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "")
+              ? await fs.stat(entry.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "")
               : "";
             // Abortable: an aborted tool call interrupts the wait (esc to the
             // child) instead of blocking until the CLI timeout.
@@ -2151,7 +2184,7 @@ export default function (pi: ExtensionAPI) {
               // if THIS prompt changed it — otherwise the previous run's report
               // would come back as the answer.
               if (collected.source === "file") {
-                const stampAfter = await fsPromises.stat(entry.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "");
+                const stampAfter = await fs.stat(entry.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "");
                 if (stampAfter === fileStampBefore) {
                   // Unchanged file = the previous run's report — don't return
                   // it as the answer to this prompt.

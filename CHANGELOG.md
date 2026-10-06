@@ -2,6 +2,62 @@
 
 ## Unreleased
 
+## 0.11.0 — 2026-10-07
+
+- **Worktree sandbox hardening + multi-session repo safety** (subagent module;
+  OMP/Claude-Code mechanisms ported at ponytail scale — no new deps, no new
+  settings):
+  - **Per-repo lock** (`withRepoLock`, keyed by resolved repo root):
+    serializes the parent-mutating git calls — `worktree add`, `worktree
+    remove`, and the `git apply --3way` merge — which previously raced on
+    git's no-waiter O_EXCL locks when parallel children finished together.
+  - **Owner marker + GC sweep**: each sandbox records a sibling
+    `<id>.owner.json` (`{pid, id, createdAt}`, 0600) OUTSIDE the sandbox dir
+    so it can never leak into the captured diff (an in-sandbox marker made
+    two parallel merges add/add-conflict — caught by the live race test);
+    `sweepStaleWorktrees` runs fire-and-forget on `session_start` and removes
+    dead-owner sandboxes (registration-aware: `worktree remove` for
+    registered entries, `rm -rf` for CoW copies). `/subagent worktrees
+    [clean]` lists or forces the sweep.
+  - **`<repoRoot>/.pi-worktrees/.gitignore`** (content `*`) auto-created so
+    sandboxes never pollute the parent's `git status` or the untracked
+    baseline capture — no user-file edits.
+  - **CoW backend (darwin)**: `createWorktree` prefers a per-top-level-entry
+    `cp -cR` clone staged OUTSIDE the copied tree (sibling temp dir, skip
+    `.pi-worktrees`), then atomic-renames into place — BSD cp lacks GNU's
+    self-copy guard, and whole-tree copies would compound prior sandboxes.
+    The copy IS the working tree (uncommitted state, node_modules, .env come
+    free; the copied `.git` is fully independent). Any failure/EXDEV falls
+    back to the detached `git worktree add`. Linux is deliberately
+    worktree-only (`--reflink=auto` silently full-copies big trees).
+  - **Baseline carry** (git-worktree fallback): `captureParentBaseline`
+    composes the parent's WIP as PURE READS — `git diff --cached --binary` +
+    `git diff --binary` + per-untracked-file `git diff --no-index --binary
+    /dev/null <f>` — never `git add`/`stash create` on the parent (both
+    mutate it). 256 MiB cap (constant; OMP #8939 lesson). The child's delta
+    then 3-way-merges cleanly onto a parent holding the same baseline.
+  - **`.worktreeinclude`**: repo-root gitignore-style lines; matching
+    gitignored files (zero-dep glob matcher, 500-file cap) copied into
+    git-worktree sandboxes. Fail-open per file.
+- **repair module — multi-session guards** (always-on, deterministic):
+  - **Conflict-marker footer**: full-file reads append a footer naming
+    detected `<<<<<<<`/`=======`/`>>>>>>>` blocks (OMP conflict-detect
+    workflow; zero extra I/O; `:conflicts` stays the explicit listing path).
+  - **Write freshness guard**: reads record each file's mtime (capped map);
+    a `write` to a file changed since this session last read it fails BEFORE
+    writing with a re-read-first error — no more blind clobbering of a
+    foreign session's edit. `apply_patch`/`str_replace_editor` refresh the
+    baseline via a `refreshMtime` seam; `edit` needs no guard (its
+    exact-match anchor already fails loudly).
+- **README**: documents every module in the bundle (subagent, repair,
+  steering, zai, a2a, todo, rules, gh, attachments, cron, permission were
+  missing) — the subagent section leads with the multi-session safety work.
+- Live-verified end to end on this machine: baseline carry through a real
+  `sandbox:"worktree"` child, GC sweep in a fresh headless `pi -p` session,
+  herdr-pane load, both repair guards through real wrapped tools, and a
+  concurrent two-child `merge:"3way"` race (both patches landed, no
+  conflicts, no lock leftovers). 23 new tests; suite at 2639 green.
+
 ## 0.10.1 — 2026-10-07
 
 - **Windows fix**: extension load crashed with `ENOENT ... lstat 'D:\C:'` —

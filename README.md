@@ -2,7 +2,7 @@
 
 **The Pi coding agent, fully dressed.**
 
-One extension bundle that turns [Pi](https://github.com/earendil-works/pi) into a fully equipped coding agent: a router provider, a second-model reviewer, long-term memory, usage display, themes, and a central settings panel — one install, one command surface, most modules individually switchable.
+One extension bundle that turns [Pi](https://github.com/earendil-works/pi) into a fully equipped coding agent: a router provider, a second-model reviewer, long-term memory, subagent delegation with multi-session repo safety, usage display, themes, and a central settings panel — one install, one command surface, most modules individually switchable.
 
 Named for Ludolph van Ceulen, who computed π to 35 digits — they're carved on his tombstone.
 
@@ -75,6 +75,33 @@ Pick the input editor's look from `/config` → Appearance → Composer Shape: S
 
 `/ponytail off|lite|full|ultra` switches an over-engineering discipline: simplest solution that works, stdlib first, no speculative abstraction. Also ships `/ponytail-review`, `/ponytail-audit`, `/ponytail-debt`, `/ponytail-gain` skills. Deactivate with `stop ponytail`.
 
+### subagent — delegate work, safely
+
+One `subagent` tool fans work out to specialized agents — `scout` (recon), `tester`, `worker`, `planner`, `reviewer` — in three modes: single, parallel (up to 8 tasks), or chained pipelines. Background tasks report liveness (`operation:"status"/"wait"/"cancel"`); when Pi runs inside herdr, tasks can delegate to visible interactive panes instead. Model tier and thinking effort are routed per task by the classifier module; `/subagent` manages roles, `/agent` inspects threads.
+
+Multi-session repo safety (isolated children never clobber you or each other):
+
+- **Worktree sandbox** — `sandbox:"worktree"` runs the child in a copy-on-write clone of your working tree (macOS `clonefile` — near-zero time and disk; carries your uncommitted changes, `node_modules`, and `.env` for free), falling back to a detached git worktree elsewhere. The child's changes come back as a patch; `merge:"3way"` applies it to your checkout with conflicts **reported, never silently resolved**.
+- **Baseline carry** — on the worktree fallback the parent's uncommitted state is composed as pure reads (`git diff`/`--no-index`) and seeded into the sandbox, so children never work a stale tree and patches merge cleanly.
+- **`.worktreeinclude`** — gitignore-style file listing copied into fresh worktrees (env files, configs).
+- **Repo lock + GC** — parent-mutating git operations serialize per repo (no `index.lock` races between parallel children); crashed runs' sandboxes are swept on session start. `/subagent worktrees [clean]` lists or forces the sweep.
+- **Write freshness guard** (repair module) — a `write` to a file another session changed since you last read it fails with a re-read-first error instead of clobbering.
+- **Conflict footer** (repair module) — full-file reads surface unresolved `<<<<<<<` conflict markers automatically.
+
+Config: `/config` → Tasks → Subagents (model pools, routing, timeouts).
+
+### repair — tool-call hardening
+
+Wraps the built-in read/write/edit/grep/find/ls/bash once each: schema argument repair, edit-mismatch trim-tolerant retry with `apply_patch` escalation, destructive-bash + guessed-path guards, and read path suffixes — `file.ts:50`, `:50-200`, `:50+150`, `:-60` (tail), comma-joined ranges, `:raw`, and `:conflicts` (list merge-conflict blocks). Registers `apply_patch` (Codex-style V4D diffs) and `str_replace_editor` as standalone tools. Config: `/config` → Tools → Repair.
+
+### steering — model-family guidance
+
+Provider-agnostic deepseek/glm family detection with first-tool hints, reasoning stripping, error categorization + recovery hints, and the ds-anchor two-phase bootstrap for DeepSeek minimal mode. `/steering` shows status.
+
+### zai — Z.AI provider (GLM)
+
+Registers a `zai-anthropic` provider serving GLM through Z.ai's Anthropic endpoint: explicit prompt caching, `speed:"fast"` serving tier, effort-based reasoning, a cross-process rate-limit throttle, and optional ZCode request signing. `/zai` = status; config in `/config` → Providers.
+
 ### ux — anti-slop UI discipline
 
 `/ux off|lite|strict` injects a UI design method (tokens only, full interaction states, no AI-slop tells) for any UI work; `strict` blocks handoff until the deterministic `ux_audit` tool passes (APCA contrast, token, and state gates — no model needed). Ships the `ux-*` skills. Deactivate with `stop ux`.
@@ -89,6 +116,34 @@ Pick the input editor's look from `/config` → Appearance → Composer Shape: S
 
 - Config: `/config` → Tools → **Web** — 16 provider rows (endpoints, keys, timeouts, Gemini cookie, image/chat providers). Written to the global `web` settings section and read per tool call, so saves apply without `/reload`; `BRAVE_API_KEY`, `SEARXNG_BASE_URL`, `FIRECRAWL_*`, `CRAWL4AI_*`, `GEMINI_WEB_*`, `ZAI_API_KEY`, `WEB_IMAGE_*`, `WEB_CHAT_*` env vars still win. Secrets are masked. Individual tools toggle from the same section.
 - Static extraction uses vendored readability/turndown (no extra install); `jsdom` and `gemini-reverse` are the module's only runtime dependencies.
+
+### a2a — Agent2Agent protocol
+
+Talk to remote agents (Hermes, ADK, LangChain, CrewAI, any A2A peer): 7 outbound tools (`a2a_call` with async dispatch, `a2a_status`, `a2a_discover`, `a2a_list`, `a2a_history`, `a2a_orchestrate` fan-out, `a2a_peers`) and an opt-in inbound server that serves isolated child sessions. Discovery spans a local registry, mDNS, and a2a-switchboard gateways. `/a2a-help` for everything; config in `/config` → Tasks → A2A.
+
+### todo — phased task board
+
+One `todo` tool tracks an ordered phase list with `blockedBy` edges, auto-start, and a live TUI HUD; `/todo` prints the board. Follows the batch contract (call it alongside real work, never alone).
+
+### rules — sticky rules + rulebook
+
+`<dir>/.pi/RULES.md` files (walking to repo root, plus a user-level file) inject sticky rules into every request; `## name` sections with a `description:` line become an on-demand rulebook served by the `rule_get` tool. Edits apply without `/reload`; `/rules` = status.
+
+### gh — GitHub (read-only)
+
+One `github` tool over the `gh` CLI: `repo_view`, `file_read`, `pr_view`, `pr_diff`, issue/PR/code/commit/repo search with date qualifiers, and `run_watch` for Actions runs with failed-job log tails. Zero npm deps; fails open when `gh` is absent. Mutating flows stay with bash `gh` — which keeps the tool auto-allowed in plan mode.
+
+### attachments — paste files into prompts
+
+Pasting file paths (or big text) collapses to `[[attach:name]]` tokens with a tray widget; on submit they become real image parts, path chips, or inline file blocks. `alt+shift+v` pastes clipboard file references. Config: `/config` → Files → Attachments.
+
+### cron — scheduled jobs
+
+The `cron` tool + `/cron` manage recurring prompts in `<agentDir>/cron/jobs.json` (vixie-cron schedules, hand-rolled matcher — zero deps). Jobs fire as follow-up turns; pinned jobs run headless in their own Pi process. `/cron test` previews fire times; config in `/config` → Tasks → Cron.
+
+### permission — config-driven tool permissions
+
+Opt-in `permission` settings section: allow/ask/deny rules per tool with wildcards, an `external_directory` deny boundary, and a doom-loop guard on repeated identical calls. No section = no opinion. Headless asks fail closed; `--yolo`/`--auto` auto-approve.
 
 ### serena / fff / rtk — code navigation & search (bundled tools)
 

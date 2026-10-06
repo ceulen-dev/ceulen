@@ -243,6 +243,54 @@ cap-3 preview). Raw SDK event labels (`message_end`…) never render — only
   vendored unchanged. Auto-review is NOT ported (advisor covers turn-end
   review; a diff-reviewer belongs to a future model-tools port).
 
+**Multi-session hardening (2026-10, OMP/Claude-Code port at ponytail scale)**
+— `lib/runner.ts` gained a worktree-lifecycle layer (`withRepoLock`,
+`sweepStaleWorktrees`, owner markers, baseline carry, CoW backend):
+
+- **Per-repo lock** (`withRepoLock`, keyed by resolved repo root): serializes
+  the parent-mutating git calls — `worktree add`, `worktree remove`, and the
+  `git apply --3way` merge — because git's own `index.lock` is O_EXCL with no
+  waiter (racing siblings fail instantly instead of queuing). In-process only;
+  cross-process still relies on git failing loudly.
+- **Owner marker + GC**: each sandbox records a SIBLING marker file
+  `<base>/<id>.owner.json` (`{pid, id, createdAt}`, 0600) — deliberately
+  OUTSIDE the sandbox dir so it can never leak into `captureWorktreeDiff`
+  (`add -A` + diff) and add/add-conflict parallel merges (found by the
+  concurrent-merge race test); `sweepStaleWorktrees` runs fire-and-forget on
+  `session_start` and removes sandboxes whose owner pid is dead (no marker =
+  legacy stale; live pid = kept — pid recycling can only false-KEEP, the
+  safe direction; `/subagent worktrees [clean]` lists/forces). Removal is
+  registration-aware: `worktree remove` for registered entries, plain
+  `rm -rf` for unregistered (CoW) copies.
+- **`<repoRoot>/.pi-worktrees/.gitignore`** (content `*`) is auto-created
+  (base dir is mkdir'd first — the wx write fails silently on a missing
+  parent otherwise) so sandboxes never pollute the parent's `git status` or
+  the untracked baseline capture — no user-file edits.
+- **CoW backend (darwin)**: `createWorktree` prefers a `cp -cR` clone of the
+  working tree — clonefile(2) means near-zero time and marginal disk, and the
+  copy IS the working tree (uncommitted state, node_modules, .env come for
+  free; the copied `.git` is a fully independent repo, no shared ref
+  namespace). Construction is self-copy-safe: per top-level entry into a
+  STAGING DIR OUTSIDE the copied tree (sibling of repoRoot, same FS),
+  skipping `.pi-worktrees` (no recursion, no compounding), then atomic
+  rename. Any failure/EXDEV → falls back to a detached `git worktree add`.
+  Linux is deliberately worktree-only (`--reflink=auto` would silently do a
+  FULL copy of a big tree).
+- **Baseline carry** (git-worktree fallback only — the CoW copy doesn't need
+  it): `captureParentBaseline` composes the parent's WIP as PURE READS —
+  `git diff --cached --binary` + `git diff --binary` + per-untracked-file
+  `git diff --no-index --binary /dev/null <f>` — never `git add`/`stash` on
+  the parent (both mutate it). `applyBaselineToWorktree` applies it inside
+  the sandbox; failure → child runs on clean HEAD with a stderr note. The
+  child's captured delta (diff vs HEAD) then carries baseline + edits, which
+  3-way-merges cleanly onto a parent holding the same baseline; genuine
+  mid-run parent changes surface as conflicts. Cap: 256 MiB (`BASELINE_MAX_BYTES`,
+  constant — patches buffer as JS strings; OMP #8939 lesson).
+- **`.worktreeinclude`**: repo-root file, gitignore-style lines; matching
+  gitignored files (`ls-files --others --ignored --exclude-standard`, zero-dep
+  glob matcher, 500-file cap) are copied into git-worktree sandboxes. CoW
+  copies don't need it. Fail-open per file.
+
 ### Repair module (repair)
 
 Ported from the tool-hardening half of `@bacnh85/pi-model-tools` 0.9.5 (see
@@ -664,6 +712,29 @@ no line-number prefixes). `:img` is dropped (pi read doesn't render SVGs).
 Always-on (deterministic, like read-notice decontamination); the selector
 grammar is appended to the wrapped read's description, which binds at load
 (autoBg precedent — next session).
+
+### Multi-session guards (repair module)
+
+Two always-on, deterministic guards for repos worked by several sessions at
+once (2026-10; see the subagent module's worktree hardening for the isolation
+half):
+
+- **Conflict-marker footer**: every full-file `read` result is scanned with
+  the existing `:conflicts` block extractor (column-0 strict); completed
+  `<<<<<<<`/`=======`/`>>>>>>>` blocks append a one-line footer naming the
+  count and first line, pointing at `:conflicts` (which stays the explicit
+  listing path; selector reads are excluded). Zero extra I/O — scans the
+  text blocks the read already returned. OMP conflict-detect precedent.
+- **Write freshness guard**: the wrapped `read` records each file's mtime in
+  a module-scoped map (capped 2000); a wrapped `write` to a file the session
+  has read whose mtime has since changed (another session/process wrote it)
+  fails BEFORE writing with a re-read-first error — a blind full-file
+  overwrite can no longer clobber a foreign edit. Never-read paths stay
+  writable (intentional overwrite is legal); successful write/edit plus the
+  separately-registered `apply_patch` and `str_replace_editor` (via the
+  `refreshMtime` seam) refresh the recorded mtime so follow-up writes
+  compare against the session's own last write. `edit` needs no guard (its
+  exact-match anchor already fails loudly on foreign edits).
 
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 

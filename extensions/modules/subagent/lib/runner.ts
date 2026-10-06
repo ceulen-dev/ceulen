@@ -261,6 +261,25 @@ export async function runSubAgent(options: {
         worktreeDir = wt.path;
         worktreeRepoRoot = wt.repoRoot;
         childCwd = wt.path!;
+        // Seed the parent's uncommitted state into a git-worktree fallback
+        // (the CoW copy already IS the working tree). Read-only capture; the
+        // child's delta (diff vs HEAD) then carries baseline + edits, which
+        // 3-way-merges cleanly onto a parent that holds the same baseline —
+        // conflicts surface only genuine mid-run parent changes.
+          if (wt.cow === false && worktreeRepoRoot && worktreeDir) {
+          const baseline = await captureParentBaseline(worktreeRepoRoot, exec);
+          if (baseline.ok && baseline.patch && baseline.patch.trim()) {
+            const applied = await applyBaselineToWorktree(worktreeDir, baseline.patch, exec);
+            if (!applied.ok) {
+              const note = `Baseline carry failed (${applied.error?.slice(0, 200)}); child runs on clean HEAD.`;
+              result.stderr = result.stderr ? `${result.stderr}; ${note}` : note;
+            }
+          } else if (!baseline.ok && baseline.error) {
+            const note = `Baseline capture failed (${baseline.error.slice(0, 200)}); child runs on clean HEAD.`;
+            result.stderr = result.stderr ? `${result.stderr}; ${note}` : note;
+          }
+          await copyWorktreeIncludes(worktreeRepoRoot, worktreeDir).catch(() => { /* best effort */ });
+        }
       } else if (wt.error) {
         result.stderr = `Worktree unavailable (${wt.error}); running in workspace.`;
       }
@@ -401,21 +420,333 @@ async function runGit(
   return { ok: res.code === 0, stdout: res.stdout, stderr: res.stderr };
 }
 
-/** Create a detached git worktree at .pi-worktrees/<rand> under the repo root. */
+/** Per-repo serialization for git operations that mutate the SHARED parent
+ *  `.git` (worktree add/remove registry, `git apply`'s index/ODB writes).
+ *  Git's own locks are O_EXCL with no waiter — concurrent mutations fail
+ *  instantly instead of blocking (OMP withRepoLock precedent), so callers
+ *  that can collide must queue here. Keyed by repo root so parallel repos
+ *  stay independent; a failing block does not poison the queue. */
+const repoLocks = new Map<string, Promise<unknown>>();
+
+export async function withRepoLock<T>(repoRoot: string, fn: () => Promise<T>): Promise<T> {
+  const key = path.resolve(repoRoot);
+  const prior = repoLocks.get(key) ?? Promise.resolve();
+  const run = prior.then(fn, fn);
+  // The stored chain swallows errors so the NEXT caller starts clean; the
+  // returned promise still propagates this block's error to its own caller.
+  const stored = run.then(() => undefined, () => undefined);
+  repoLocks.set(key, stored);
+  // Drop the key once idle so the map cannot grow unboundedly across repos.
+  // A concurrent waiter has already replaced the stored chain by then.
+  stored.then(() => { if (repoLocks.get(key) === stored) repoLocks.delete(key); });
+  return run;
+}
+
+/** Owner marker written into every worktree sandbox: lets the GC sweep tell a
+ *  live session's sandbox from a crashed run's leftover. */
+export interface WorktreeOwner {
+  pid: number;
+  id: string;
+  createdAt: number;
+}
+
+export const WORKTREE_DIR_NAME = ".pi-worktrees";
+
+/** A nested `.gitignore` (content `*`) inside the sandbox base keeps sandboxes
+ *  out of the parent's `git status` AND out of untracked baseline capture —
+ *  without touching the user's own .gitignore. */
+async function ensureWorktreeBaseGitignore(base: string): Promise<void> {
+  const ignoreFile = path.join(base, ".gitignore");
+  try {
+    await fs.mkdir(base, { recursive: true });
+    await fs.writeFile(ignoreFile, "*\n", { flag: "wx" });
+  } catch { /* exists (or unwritable) — either is fine */ }
+}
+
+/** Owner marker: a SIBLING file inside the (gitignored) sandbox base —
+ *  deliberately NOT inside the sandbox, so it never leaks into
+ *  captureWorktreeDiff (`add -A` + diff) or the child's own reads. Two
+ *  parallel merges would otherwise add/add-conflict on it (found by the
+ *  concurrent-merge race test). */
+export const OWNER_SUFFIX = ".owner.json";
+
+async function writeOwnerMarker(base: string, id: string): Promise<void> {
+  const owner: WorktreeOwner = { pid: process.pid, id, createdAt: Date.now() };
+  await fs.writeFile(path.join(base, `${id}${OWNER_SUFFIX}`), JSON.stringify(owner), { encoding: "utf8", mode: 0o600 });
+}
+
+async function readOwnerMarker(base: string, entry: string): Promise<WorktreeOwner | undefined> {
+  try {
+    const raw = await fs.readFile(path.join(base, `${entry}${OWNER_SUFFIX}`), "utf8");
+    const parsed = JSON.parse(raw) as WorktreeOwner;
+    if (typeof parsed?.pid !== "number" || typeof parsed?.id !== "string") return undefined;
+    return parsed;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Is a pid alive? EPERM counts as alive (another user's process). */
+export function pidAlive(pid: number): boolean {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (err) {
+    return (err as NodeJS.ErrnoException)?.code === "EPERM";
+  }
+}
+
+export interface SweepResult {
+  removed: string[];
+  kept: number;
+}
+
+/** Remove crashed runs' worktree sandboxes under <repoRoot>/.pi-worktrees.
+ *  Source of truth is the DIRECTORY (covers both backends); the git
+ *  registration check only decides HOW a stale dir is removed. Never removes
+ *  a sandbox whose marker pid is alive. Best-effort throughout. */
+export async function sweepStaleWorktrees(
+  cwd: string,
+  exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
+): Promise<SweepResult> {
+  const removed: string[] = [];
+  try {
+    const root = await runGit(cwd, ["rev-parse", "--show-toplevel"], exec);
+    if (!root.ok) return { removed, kept: 0 };
+    const repoRoot = root.stdout.trim();
+    const base = path.join(repoRoot, WORKTREE_DIR_NAME);
+    let entries: string[];
+    try {
+      entries = await fs.readdir(base);
+    } catch {
+      return { removed, kept: 0 }; // no .pi-worktrees — the common path
+    }
+    let kept = 0;
+    await withRepoLock(repoRoot, async () => {
+      const list = await runGit(repoRoot, ["worktree", "list", "--porcelain"], exec);
+      const registered = new Set(
+        (list.ok ? list.stdout : "").split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice("worktree ".length).trim()),
+      );
+      for (const entry of entries) {
+        if (entry.endsWith(OWNER_SUFFIX)) continue; // marker files, not sandboxes
+        const dir = path.join(base, entry);
+        // The nested .gitignore is a FILE, not a sandbox — never scan/rm it.
+        if (!(await fs.stat(dir).then((s) => s.isDirectory()).catch(() => false))) continue;
+        const owner = await readOwnerMarker(base, entry);
+        if (owner && pidAlive(owner.pid)) { kept++; continue; }
+        // ponytail: pid recycling can false-KEEP a stale sandbox (safe
+        // direction); `/subagent worktrees clean` is the manual override.
+        try {
+          if (registered.has(dir)) await runGit(repoRoot, ["worktree", "remove", "--force", dir], exec);
+          await fs.rm(dir, { recursive: true, force: true });
+          await fs.rm(path.join(base, `${entry}${OWNER_SUFFIX}`), { force: true });
+          removed.push(dir);
+        } catch { /* best effort per dir */ }
+      }
+    });
+    return { removed, kept };
+  } catch {
+    return { removed, kept: 0 };
+  }
+}
+
+/** Ponytail ceiling: baseline patches are buffered as JS strings — refuse a
+ *  pathological tree instead of blowing the heap (OMP #8939 lesson). Not a
+ *  setting. */
+const BASELINE_MAX_BYTES = 256 * 1024 * 1024;
+
+/** Capture the parent's uncommitted state as PURE READS — no `git add`, no
+ *  `stash create` (both mutate the parent; add stages the user's files, stash
+ *  writes ODB objects). Order mirrors working-tree construction: staged, then
+ *  unstaged (they can overlap), then untracked as new-file diffs. */
+export async function captureParentBaseline(
+  repoRoot: string,
+  exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
+): Promise<{ ok: boolean; patch?: string; error?: string }> {
+  try {
+    const staged = await runGit(repoRoot, ["diff", "--cached", "--binary"], exec);
+    if (!staged.ok) return { ok: false, error: staged.stderr.trim() || "git diff --cached failed" };
+    const unstaged = await runGit(repoRoot, ["diff", "--binary"], exec);
+    if (!unstaged.ok) return { ok: false, error: unstaged.stderr.trim() || "git diff failed" };
+    const ls = await runGit(repoRoot, ["ls-files", "--others", "--exclude-standard"], exec);
+    if (!ls.ok) return { ok: false, error: ls.stderr.trim() || "git ls-files failed" };
+    const parts: string[] = [];
+    let total = Buffer.byteLength(staged.stdout) + Buffer.byteLength(unstaged.stdout);
+    if (total > BASELINE_MAX_BYTES) return { ok: false, error: "baseline exceeds 256 MiB budget; skipping carry" };
+    if (staged.stdout.trim()) parts.push(staged.stdout);
+    if (unstaged.stdout.trim()) parts.push(unstaged.stdout);
+    const untracked = ls.stdout.split("\n").map((l) => l.trim()).filter(Boolean);
+    for (const entry of untracked) {
+      // `diff --no-index` exits 1 when files differ — here that IS success;
+      // empty stdout means a vanished entry.
+      const diff = await runGit(repoRoot, ["diff", "--no-index", "--binary", "--", "/dev/null", entry], exec);
+      if (!diff.stdout.trim()) continue;
+      total += Buffer.byteLength(diff.stdout);
+      if (total > BASELINE_MAX_BYTES) return { ok: false, error: "baseline exceeds 256 MiB budget; skipping carry" };
+      parts.push(diff.stdout);
+    }
+    return { ok: true, patch: parts.join("\n") };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
+/** Apply a captured baseline patch inside the worktree (its own index —
+ *  disposable). Failure is the CALLER's cue to skip carry and note stderr. */
+export async function applyBaselineToWorktree(
+  worktreeDir: string,
+  patch: string,
+  exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
+): Promise<{ ok: boolean; error?: string }> {
+  const tmp = path.join(os.tmpdir(), `pi-subagent-baseline-${randomUUID()}.patch`);
+  try {
+    const patchText = patch.endsWith("\n") ? patch : `${patch}\n`;
+    // wx: never follow a pre-planted symlink at this path (shared /tmp).
+    await fs.writeFile(tmp, patchText, { encoding: "utf8", flag: "wx" });
+    const res = await runGit(worktreeDir, ["apply", "--binary", "--whitespace=nowarn", tmp], exec);
+    return res.ok ? { ok: true } : { ok: false, error: (res.stderr || res.stdout).trim() || "git apply failed" };
+  } catch (error) {
+    return { ok: false, error: error instanceof Error ? error.message : String(error) };
+  } finally {
+    await fs.rm(tmp, { force: true }).catch(() => { /* best effort */ });
+  }
+}
+
+/** Where CoW cloning is attempted: darwin `cp -c` is clonefile(2) — near-zero
+ *  time and marginal disk, and the copy carries uncommitted state, node_modules
+ *  and .env for free. Linux cp --reflink=auto silently degrades to a FULL copy
+ *  of a big tree, so it is deliberately NOT used (git worktree is safer there). */
+function cowAvailable(): boolean {
+  return process.platform === "darwin";
+}
+
+/** Materialize the sandbox by CoW-cloning the working tree. The copy is a
+ *  FULLY independent repo (copied .git — no shared ref namespace, no detach
+ *  needed) and needs no baseline patches: it IS the working tree incl. WIP.
+ *
+ *  Construction is self-copy-safe (BSD cp lacks GNU's guard): each top-level
+ *  entry is copied individually into a staging dir OUTSIDE the copied tree
+ *  (sibling of repoRoot — same FS, so the final rename is atomic), and
+ *  `.pi-worktrees` is skipped so prior sandboxes never compound into the
+ *  copy. Any failure → rm staging, caller falls back to `git worktree add`. */
+async function createCowClone(
+  repoRoot: string,
+  wtPath: string,
+  exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
+): Promise<boolean> {
+  if (!cowAvailable()) return false;
+  const run = exec ?? defaultExec;
+  const staging = path.join(path.dirname(repoRoot), `.pi-wt-tmp-${path.basename(wtPath)}`);
+  try {
+    await fs.mkdir(staging, { recursive: true });
+    const entries = await fs.readdir(repoRoot, { withFileTypes: true });
+    for (const entry of entries) {
+      if (entry.name === WORKTREE_DIR_NAME) continue;
+      const res = await run("cp", ["-cR", path.join(repoRoot, entry.name), path.join(staging, entry.name)], { timeout: 300_000 });
+      if (res.code !== 0) return false;
+    }
+    await fs.mkdir(path.dirname(wtPath), { recursive: true });
+    try {
+      await fs.rename(staging, wtPath);
+    } catch {
+      // EXDEV (repoRoot is a mount point) — CoW unusable here.
+      return false;
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    await fs.rm(staging, { recursive: true, force: true }).catch(() => { /* best effort */ });
+  }
+}
+
+/** Copy gitignored files named in <repoRoot>/.worktreeinclude into the
+ *  worktree (git-worktree fallback lacks them). Lines: gitignore-style globs,
+ *  matched against gitignored files only (ls-files --others --ignored);
+ *  `#` comments and blanks skipped. Zero-dep glob→regex, ~15 lines. */
+export async function copyWorktreeIncludes(
+  repoRoot: string,
+  worktreeDir: string,
+  exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
+): Promise<number> {
+  let raw: string;
+  try {
+    raw = await fs.readFile(path.join(repoRoot, ".worktreeinclude"), "utf8");
+  } catch {
+    return 0;
+  }
+  const patterns = raw.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("#"));
+  if (patterns.length === 0) return 0;
+  const regexes = patterns.map((p) => globToRegExp(p)).filter((r): r is RegExp => r !== null);
+  if (regexes.length === 0) return 0;
+  const ls = await runGit(repoRoot, ["ls-files", "--others", "--ignored", "--exclude-standard"], exec);
+  if (!ls.ok) return 0;
+  const matches = ls.stdout.split("\n").map((l) => l.trim()).filter(Boolean)
+    .filter((f) => regexes.some((re) => re.test(f)));
+  let copied = 0;
+  for (const rel of matches.slice(0, 500)) {
+    const src = path.join(repoRoot, rel);
+    const dst = path.join(worktreeDir, rel);
+    try {
+      const st = await fs.stat(src);
+      if (!st.isFile()) continue;
+      await fs.mkdir(path.dirname(dst), { recursive: true });
+      await fs.copyFile(src, dst);
+      copied++;
+    } catch { /* skip vanished/unreadable */ }
+  }
+  return copied;
+}
+
+/** Gitignore-style glob → RegExp. Supports `*`, `**`, `?`, leading/trailing
+ *  `/`, and `dir/` (prefix). Negations unsupported (returns null). */
+function globToRegExp(globRaw: string): RegExp | null {
+  let glob = globRaw;
+  if (glob.startsWith("!")) return null;
+  let prefix = false;
+  if (glob.endsWith("/")) { prefix = true; glob = glob.slice(0, -1); }
+  glob = glob.replace(/^\//, "");
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") { re += ".*"; i++; }
+    else if (c === "*") re += "[^/]*";
+    else if (c === "?") re += "[^/]";
+    else re += c.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+  }
+  try {
+    return prefix ? new RegExp(`^${re}(/|$)`) : new RegExp(`^${re}$`);
+  } catch {
+    return null;
+  }
+}
+
+/** Create a sandbox at .pi-worktrees/<rand> under the repo root: CoW clone of
+ *  the working tree when available (carries WIP + node_modules + .env), else a
+ *  detached git worktree the caller can seed with captureParentBaseline. */
 export async function createWorktree(
   cwd: string,
   exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
-): Promise<{ ok: boolean; path?: string; repoRoot?: string; error?: string }> {
+): Promise<{ ok: boolean; path?: string; repoRoot?: string; error?: string; /** false when the git-worktree fallback ran (caller seeds baseline); undefined = CoW copy */ cow?: boolean }> {
   try {
     const root = await runGit(cwd, ["rev-parse", "--show-toplevel"], exec);
     if (!root.ok) return { ok: false, error: root.stderr.trim() || "not a git repo" };
     const repoRoot = root.stdout.trim();
     if (!repoRoot) return { ok: false, error: "empty git root" };
     const id = `pi-subagent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const wtPath = path.join(repoRoot, ".pi-worktrees", id);
-    const add = await runGit(repoRoot, ["worktree", "add", "--detach", wtPath, "HEAD"], exec);
+    const wtPath = path.join(repoRoot, WORKTREE_DIR_NAME, id);
+    await ensureWorktreeBaseGitignore(path.join(repoRoot, WORKTREE_DIR_NAME));
+    if (await createCowClone(repoRoot, wtPath, exec)) {
+      await writeOwnerMarker(path.join(repoRoot, WORKTREE_DIR_NAME), id).catch(() => { /* best effort */ });
+      return { ok: true, path: wtPath, repoRoot };
+    }
+    // Fallback: detached git worktree (clean HEAD; the caller seeds the
+    // parent's WIP via applyBaselineToWorktree). worktree add mutates the
+    // parent's shared .git/worktrees registry.
+    const add = await withRepoLock(repoRoot, () => runGit(repoRoot, ["worktree", "add", "--detach", wtPath, "HEAD"], exec));
     if (!add.ok) return { ok: false, error: add.stderr.trim() || "git worktree add failed" };
-    return { ok: true, path: wtPath, repoRoot };
+    await writeOwnerMarker(path.join(repoRoot, WORKTREE_DIR_NAME), id).catch(() => { /* best effort */ });
+    return { ok: true, path: wtPath, repoRoot, cow: false };
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }
@@ -439,20 +770,27 @@ export async function captureWorktreeDiff(
   return { ok: true, diff: text || "(no changes)" };
 }
 
-/** Remove a worktree and its metadata, best-effort. */
+/** Remove a worktree and its metadata, best-effort. Handles BOTH backends:
+ *  registered git worktrees (worktree remove) and unregistered sandbox dirs
+ *  (plain rm). */
 export async function removeWorktree(
   repoRoot: string,
   worktreeDir: string,
   exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
 ): Promise<void> {
   try {
-    await runGit(repoRoot, ["worktree", "remove", "--force", worktreeDir], exec);
+    // Marker is a SIBLING file (never inside the sandbox — see OWNER_SUFFIX).
+    await fs.rm(`${worktreeDir}${OWNER_SUFFIX}`, { force: true }).catch(() => {});
+    await withRepoLock(repoRoot, async () => {
+      const removed = await runGit(repoRoot, ["worktree", "remove", "--force", worktreeDir], exec);
+      if (!removed.ok) await fs.rm(worktreeDir, { recursive: true, force: true }).catch(() => { /* best effort */ });
+    });
   } catch { /* best effort */ }
 }
 
 /** Serialized `git apply` on the parent checkout: parallel siblings finishing
- *  at the same time must not race the merge (OMP's withRepoLock equivalent). */
-let applyChain: Promise<unknown> = Promise.resolve();
+ *  at the same time must not race the merge (withRepoLock — the OMP
+ *  withRepoLock equivalent, now shared with worktree add/remove too). */
 
 /** Apply a unified diff to the repo root via `git apply --3way`. Never throws;
  *  ok:false means conflict/failure — the caller reports it and still delivers
@@ -462,7 +800,7 @@ export async function applyWorktreePatch3way(
   diff: string,
   exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
 ): Promise<{ ok: boolean; stderr: string }> {
-  const run = applyChain.then(async (): Promise<{ ok: boolean; stderr: string }> => {
+  return withRepoLock(repoRoot, async (): Promise<{ ok: boolean; stderr: string }> => {
     const tmp = path.join(os.tmpdir(), `pi-subagent-apply-${randomUUID()}.patch`);
     try {
       // git apply interprets paths relative to cwd — write the diff to a file
@@ -481,8 +819,6 @@ export async function applyWorktreePatch3way(
       await fs.rm(tmp, { force: true }).catch(() => { /* best effort */ });
     }
   });
-  applyChain = run.then(() => undefined, () => undefined);
-  return run;
 }
 
 /** Model-facing patch block for a worktree result; "" when there is no patch.
