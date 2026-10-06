@@ -38,9 +38,22 @@ describe("nextFire / nextFires", () => {
   });
 
   it("names, ranges, step-in-range", () => {
-    // 2026-02-09 is a Monday: from Monday 08:00Z (after local 09:00 in +TZ
-    // hosts), the next weekday-9am fire is Tuesday LOCAL 09:00.
-    assert.equal(iso(nextFires("0 9 * * mon-fri", 1, T("2026-02-09T08:00:00Z"))[0]!), iso(L(2026, 2, 10, 9, 0)));
+    // cron is LOCAL time: the next mon-fri 09:00 strictly after `from`,
+    // computed against the LOCAL calendar so the assertion holds in every TZ
+    // (CI runners are UTC; dev machines often are not).
+    const from = T("2026-02-09T08:00:00Z");
+    const expected = (() => {
+      const d = new Date(from);
+      d.setSeconds(0, 0);
+      do {
+        d.setHours(9);
+        if (d > from && d.getDay() >= 1 && d.getDay() <= 5) return d;
+        d.setDate(d.getDate() + 1);
+        d.setHours(0);
+      } while (d.getTime() < from.getTime() + 7 * 86_400_000);
+      throw new Error("unreachable");
+    })();
+    assert.equal(iso(nextFires("0 9 * * mon-fri", 1, from)[0]!), iso(expected));
     assert.deepEqual(
       nextFires("10-30/5 * * * *", 4, T("2026-02-09T10:07:00Z")).map((d) => d.getMinutes()),
       [10, 15, 20, 25],

@@ -105,7 +105,7 @@ describe("axeSource", () => {
   });
 });
 
-describe("runner expression (via fake CDP server)", () => {
+describe("runner expression (via fake CDP server)", { skip: process.platform === "linux" && !process.env.CHROME_PATH && "CI runners have no Chrome — launchCdp always spawns a real browser (the wsFactory only fakes the WS protocol)" }, () => {
   it("bootstraps axe then runs it, returning the normalized report", async () => {
     const evals: string[] = [];
     const ws = new FakeWs();
