@@ -219,4 +219,25 @@ describe("rules module — /rules command", () => {
     await commands.get("rules").handler("bogus", context(workspace(), notes));
     assert.equal(notes[0].level, "error");
   });
+
+  it("UNTRUSTED project: repo RULES.md never reaches the prompt; user file still applies", async () => {
+    // Live-found defect (reviewer 2026-10-06): the composer had no trust gate —
+    // an untrusted checkout's RULES.md (and its @imports) landed in every
+    // request's system prompt. Same gate as pi's AGENTS.md context files.
+    const cwd = workspace({ ".pi/RULES.md": "## project-rule\nPROJECT-SECRET-MARKER\n" });
+    const { events } = harness();
+    const untrusted = { ...context(cwd), isProjectTrusted: () => false };
+    const result = await events.get("before_agent_start")!({ systemPrompt: "BASE", prompt: "p" }, untrusted);
+    assert.equal(result, undefined, "no project rules for an untrusted checkout");
+
+    // rule_get honors the same gate (no on-demand exfiltration of bodies).
+    const { tools } = harness();
+    const got = await tools.get("rule_get")!.execute("t1", { name: "project-rule" }, undefined, undefined, untrusted);
+    assert.match(JSON.stringify(got), /not found/i, "untrusted: rule body not served");
+
+    // Trusted sees them again (and the cache key carries the flag).
+    const trustedResult = await events.get("before_agent_start")!({ systemPrompt: "BASE", prompt: "p" }, context(cwd));
+    assert.ok(trustedResult?.systemPrompt.includes("PROJECT-SECRET-MARKER"));
+  });
 });
+

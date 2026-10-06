@@ -8,7 +8,7 @@ import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { createReadToolDefinition, createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
+import { createEditToolDefinition, createReadToolDefinition, createWriteToolDefinition } from "@earendil-works/pi-coding-agent";
 import { appendConflictFooter, checkWriteFresh, wrapToolDefinition } from "../index.js";
 
 const dirs: string[] = [];
@@ -120,6 +120,46 @@ describe("write freshness guard", () => {
     await exec(read, { path: file }, dir);
     await rm(file);
     assert.equal(await checkWriteFresh({ path: file }, dir), undefined);
+  });
+
+  it("a SELECTOR read records the freshness baseline (ranged reads don't blind the guard)", async () => {
+    // Live finding (reviewer 2026-10-06): the selector slice path returned
+    // early without recordReadMtimes, so read f.ts:5-10 → foreign write →
+    // blind full-file write silently clobbered the foreign edit.
+    const dir = await tempDir();
+    const file = join(dir, "sel.txt");
+    await writeFile(file, "l1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n");
+    const read = wrapToolDefinition(createReadToolDefinition(dir), createReadToolDefinition, () => false, () => {});
+    const sliced = await exec(read, { path: `${file}:2-4` }, dir);
+    assert.equal(sliced.isError, undefined);
+    // Foreign edit + mtime bump after our ranged read.
+    await writeFile(file, "FOREIGN\nl2\nl3\nl4\nl5\nl6\nl7\nl8\n");
+    const future = new Date(Date.now() + 1100);
+    await utimes(file, future, future);
+    const write = makeWrapped("write", dir);
+    const result = await exec(write, { path: file, content: "mine\n" }, dir);
+    assert.equal(result.isError, true, "selector read must arm the freshness guard");
+    assert.match(result.content[0].text, /Re-read the file/);
+    assert.match(await readFile(file, "utf8"), /FOREIGN/);
+  });
+
+  it("write after a wrapped EDIT does not false-positive (edit refreshes the baseline)", async () => {
+    // Live-found defect (reviewer 2026-10-06): a successful edit never
+    // refreshed the freshness baseline, so read → edit → write compared the
+    // write against the stale READ-time mtime and blocked with a false
+    // "File changed on disk" — recordMutatedMtimes' edit branch was dead code.
+    const dir = await tempDir();
+    const file = join(dir, "edit-baseline.txt");
+    await writeFile(file, "alpha\n");
+    const read = wrapToolDefinition(createReadToolDefinition(dir), createReadToolDefinition, () => false, () => {});
+    await exec(read, { path: file }, dir);
+    const edit = wrapToolDefinition(createEditToolDefinition(dir), createEditToolDefinition, () => false, () => {});
+    const edited = await exec(edit, { path: file, edits: [{ oldText: "alpha", newText: "alpha\nbeta" }] }, dir);
+    assert.equal(edited.isError, undefined, "edit succeeded");
+    const write = makeWrapped("write", dir);
+    const result = await exec(write, { path: file, content: "alpha\nbeta\ngamma\n" }, dir);
+    assert.equal(result.isError, undefined, "write after own edit must pass the freshness guard");
+    assert.equal(await readFile(file, "utf8"), "alpha\nbeta\ngamma\n");
   });
 });
 

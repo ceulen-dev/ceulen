@@ -57,6 +57,12 @@ same keys/values as pi-classifier, migration-free; `planGate` is left untouched
 and NOT consumed by the plan module — pi 1.0.0's `tool_call` can only block,
 never approve, so the gate would only have trimmed prompts). Replaces the standalone package — if both are
 installed, first tool registration wins.
+The `systemoneClassify` transport carries a DEFAULT 30s deadline (pi's
+model-runtime passes no timeoutMs — without one, a silent endpoint parks the
+caller's turn forever; live incident 2026-10-06), and the bash-verdict hook
+has a failure circuit-breaker (advisor precedent): 3 consecutive classify
+failures pause verdicts for 5 minutes (instant fail-open, audited
+`pause:true`); a changed settings reference or a successful verdict re-arms.
 
 ### Advisor module (advisor)
 
@@ -367,7 +373,9 @@ and executes it in the current session on settle, no keypress.
 
 LOAD ORDER: the registry places plan AFTER subagent (its gating reads subagent
 agent frontmatter) and BEFORE steering (steering must stay the last
-`before_agent_start` rewriter). Standalone `@bacnh85/pi-plan` must be removed
+`before_agent_start` rewriter; rtk also loads BEFORE steering — its RTK note is
+a prompt append the ds-anchor bootstrap must be able to replace). Standalone
+`@bacnh85/pi-plan` must be removed
 when ceulen's plan module is enabled — the conflict guard refuses the
 duplicate commands/tools.
 
@@ -389,8 +397,9 @@ trace ring).
 
 LOAD-ORDER CONTRACT (the reason steering is its own registry entry, placed
 last of the prompt rewriters — after every before_agent_start composer
-(ponytail/plan/subagent/munin/advisor/ux/fff/serena/web) and immediately
-before rtk/config): pi chains
+(ponytail/plan/subagent/munin/advisor/ux/fff/serena/web/rules/rtk — rtk IS a
+prompt rewriter, its before_agent_start appends the RTK note, so it loads
+BEFORE steering) and immediately before config): pi chains
 `before_agent_start` results — each handler's returned systemPrompt becomes
 the next handler's event.systemPrompt. Steering registers LAST of the prompt
 rewriters, so during the anchor bootstrap its returned minimal prompt
@@ -754,6 +763,21 @@ half):
 
 `ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). `/config` writes to whichever file currently carries the `ceulen` section (see the config-module section) — never a shadowed layer. The deprecated `"sub"` key is still treated as `"usage"`. **CORE modules** (`ModuleEntry.core: true`, today `composer`, `advisor`, `router`, `classifier`, `usage`, `ux`, `config`) are always loaded: `readDisabled`/`writeDisabled` filter them (a stale entry can't disable one), `nextDisabled` never lists them, and the config panel adds no Enable row. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
 
+## Secrets policy
+
+Credentials NEVER persist in settings.json. Non-secret config (URLs, toggles,
+timeouts) lives in the module's settings section; secrets live in
+`<agentDir>/.env.local` (0600; ingested into `process.env` at import by
+`extensions/lib/env.ts`, mirrored live on panel saves via `writeSecretEnvs`).
+Read-time precedence already puts env above settings everywhere, so diverting
+the write side changes nothing effective. The bundle entry's session_start runs
+`migrateSecretsFromSettings()` once per session — it moves any legacy
+plaintext secret (web rows, a2a gateway tokens) into .env.local (onlyAbsent:
+the first value wins) and scrubs it from settings.json, idempotently and
+fail-open. Router's key has always been auth.json-only (pi's own credential
+store, `/login router`). Masked panel rows are the write boundary: a secret
+row's save goes to .env.local; URL rows keep writing settings.json.
+
 ## Yardmaster usage contract (usage module)
 
 With `router.baseUrl` set to a yardmaster instance, the usage module polls `GET <baseUrl>/usage?provider=<prefix>` (Bearer = the router API key), falling back to aggregate `GET /usage` on per-provider 404, and to OmniRoute `GET <origin>/api/usage/om-usage` when no JSON usage endpoint exists. Response shape: `{windows: {session|weekly|monthly: {remaining_pct, reset_at}}, credits: {currency, balance}}`. The key needs yardmaster's usage permission. Renderer + parser live in `extensions/modules/usage/index.ts` (`parseGenericUsage`).
@@ -975,9 +999,19 @@ writes the GLOBAL `plan` section, read per event so saves apply live;
 **Tasks** tab, `Plan mode` section) and **web** (`web.{searxng.baseUrl,
 brave.apiKey, firecrawl.*, crawl4ai.*, gemini.cookie, gemini.proxy,
 image.zaiKey, image.customUrl, image.customKey, image.dailyCap, chat.baseUrl,
-chat.apiKey}` — writes the GLOBAL `web` section, read per tool call so saves
-apply live; the two timeout rows are a closed set; **Tools** tab, `Web`
-section 🌍). A NON-CORE module
+chat.apiKey}` — NON-SECRET rows (URLs, timeouts, caps) write the GLOBAL `web`
+section, read per tool call so saves apply live; the two timeout rows are a
+closed set; **Tools** tab, `Web` section 🌍). **SECRETS NEVER LAND IN
+settings.json**: secret rows (brave/firecrawl/crawl4ai/gemini/zai/custom/chat
+keys + cookies) persist to `<agentDir>/.env.local` (0600, `writeSecretEnvs` in
+extensions/lib/env.ts) and resolve through the env layer, which already wins
+over settings at read time — the effective value is unchanged. a2a gateway
+tokens follow the same rule (`A2A_GATEWAY_TOKEN`, `A2A_GATEWAY_<KEY>_TOKEN` /
+`_UPSTREAM_TOKEN` per gateway; the loader falls back to those env names).
+`migrateSecretsFromSettings` (bundle session_start) moves any pre-fix
+plaintext secrets out of settings.json into .env.local once, idempotently.
+Router's API key already lived only in auth.json — that contract is now repo-
+wide: settings.json carries URLs and switches, never credentials). A NON-CORE module
 without a contribution factory gets
 a synthesized Enable-only section (serena → **Tools** · `Serena`, fff →
 **Tools** · `FFF search`, rtk → **Shell** · `RTK`). The per-module kill-switch

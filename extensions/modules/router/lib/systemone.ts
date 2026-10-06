@@ -22,7 +22,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 function url(model: ClassifierModelT): string {
-  return `${model.baseUrl.replace(/\/+$/u, "")}/systemone`;
+  // Same /v1 convention as fetchSystemoneModels/fetchModels (client.ts):
+  // a baseUrl like http://host:20128 must POST to /v1/systemone or every
+  // classify silently 404s while model DISCOVERY worked (found live by
+  // review 2026-10-06) — never double the segment.
+  return /\/v1\/?$/.test(model.baseUrl)
+    ? `${model.baseUrl.replace(/\/+$/u, "")}/systemone`
+    : `${model.baseUrl.replace(/\/+$/u, "")}/v1/systemone`;
 }
 
 function requiredNumber(label: string, value: unknown, field: string): number {
@@ -127,10 +133,17 @@ export const systemoneClassify: ClassifierImpl["classify"] = async (model, conte
       "content-type": "application/json",
       ...(options.headers ?? {}),
     };
-    const timeoutSignal = options.timeoutMs !== undefined ? AbortSignal.timeout(options.timeoutMs) : undefined;
-    const signal = options.signal && timeoutSignal
+    // pi's model-runtime passes no timeoutMs for classify calls, and an
+    // unanswered fetch parks the caller's turn FOREVER (live incident
+    // 2026-10-06: two dispatches stuck 8h in kevent on an ESTABLISHED socket).
+    // A routing verdict is cheap — default to a hard 30s deadline unless the
+    // caller asked for something else. Never rejects (contract): the timeout
+    // surfaces as stopReason:"error" and callers fail open.
+    const timeoutMs = options?.timeoutMs ?? 30_000;
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal = options?.signal
       ? AbortSignal.any([options.signal, timeoutSignal])
-      : (options.signal ?? timeoutSignal);
+      : timeoutSignal;
     const response = await fetch(url(model), {
       method: "POST",
       headers,

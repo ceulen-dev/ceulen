@@ -62,6 +62,7 @@ import {
   MAX_PARALLEL_TASKS,
   MAX_CHAIN_LENGTH,
   MAX_INSTRUCTIONS_LENGTH,
+  MAX_TIMEOUT_MS,
 } from "./lib/security.ts";
 import {
   aggregateUsage,
@@ -152,7 +153,7 @@ const TaskItem = Type.Object({
   task: Type.String({ description: "Task to delegate to the agent" }),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent" })),
   solutionSpace: Type.Optional(Type.String({ description: "How open-ended this task's problem is — feeds model-tier/thinking routing." })),
-  timeout: Type.Optional(Type.Number({ description: "Inactivity timeout in ms; aborts on no activity within timeout. Default: 3 min (PI_SUBAGENT_INACTIVITY_TIMEOUT_MINS). The agent always has a lifetime cap: default 20 min  or (PI_SUBAGENT_HARD_TIMEOUT_MINS)." })),
+  timeout: Type.Optional(Type.Number({ description: "Inactivity timeout in ms; aborts after this long with no child activity. Default: 3 min (subagent.idleTimeoutMins). Hard lifetime cap is opt-in via subagent.hardTimeoutMins (default off); herdr panes are additionally capped at 60 min wall clock." })),
   merge: Type.Optional(StringEnum(["3way"] as const, { description: "With a worktree-sandboxed agent, apply its diff to the parent checkout via git apply --3way after it completes. Conflicts are reported, not resolved. Default: patch returned only." })),
 });
 
@@ -160,7 +161,7 @@ const ChainItem = Type.Object({
   agent: Type.String({ description: "Name of the agent to invoke" }),
   task: Type.String({ description: "Task with optional {previous} placeholder for prior output" }),
   cwd: Type.Optional(Type.String({ description: "Working directory for the agent" })),
-  timeout: Type.Optional(Type.Number({ description: "Inactivity timeout in ms; aborts on no activity within timeout. Default: 3 min (PI_SUBAGENT_INACTIVITY_TIMEOUT_MINS). The agent always has a lifetime cap: default 20 min or (PI_SUBAGENT_HARD_TIMEOUT_MINS)." })),
+  timeout: Type.Optional(Type.Number({ description: "Inactivity timeout in ms; aborts after this long with no child activity. Default: 3 min (subagent.idleTimeoutMins). Hard lifetime cap is opt-in via subagent.hardTimeoutMins (default off); herdr panes are additionally capped at 60 min wall clock." })),
   merge: Type.Optional(StringEnum(["3way"] as const, { description: "With a worktree-sandboxed agent, apply its diff to the parent checkout via git apply --3way after the step completes. Conflicts are reported, not resolved." })),
 });
 
@@ -203,7 +204,7 @@ const SubagentParams = Type.Object({
   // Project-agent confirmation is enforced via trusted configuration.
   // See Security model section in README.
   cwd: Type.Optional(Type.String({ description: "Working directory (single mode, must be inside workspace)" })),
-  timeout: Type.Optional(Type.Number({ description: "Inactivity timeout for the whole run, in ms; resets on activity, aborts on silence. Default 3 min (PI_SUBAGENT_INACTIVITY_TIMEOUT_MINS). Lifetime cap: 20 min or (PI_SUBAGENT_HARD_TIMEOUT_MINS)." })),
+  timeout: Type.Optional(Type.Number({ description: "Inactivity timeout in ms; aborts after this long with no child activity. Default: 3 min (subagent.idleTimeoutMins). Hard lifetime cap is opt-in via subagent.hardTimeoutMins (default off); herdr panes are additionally capped at 60 min wall clock." })),
   merge: Type.Optional(StringEnum(["3way"] as const, { description: "Single mode: with a worktree-sandboxed agent, apply its diff to the parent checkout via git apply --3way after it completes. Conflicts are reported, not resolved. Default: patch returned only." })),
   instructions: Type.Optional(Type.String({ description: "Bounded repository/task instructions passed to each child (max 16 KB)" })),
   solutionSpace: Type.Optional(Type.String({ description: "Single/parallel mode: how open-ended the child's problem is (design given vs choices open). Feeds model-tier/thinking routing; never mention siblings. e.g. 'one fix: rename, names given' vs 'several retry API shapes; error classes to choose'." })),
@@ -1086,10 +1087,15 @@ ${lines.join("\n")}`;
           return { error: `No model resolved for agent "${agentName}" (tried: ${resolved.attempted.join(", ") || "none"}).` };
         }
         // herdr children run full pi — they need SOME lifetime cap so an
-        // unattended pane can't run forever; fall back to the idle window.
+        // unattended pane can't run forever. The IDLE window is NOT a lifetime
+        // cap (live incident 2026-10-06: a healthy 13-min chapter write was
+        // abandoned at the default 3-min idle window — the pane kept working,
+        // the parent read "timeout"). Wall-clock cap = the OPT-IN hard cap;
+        // when it is off, the unattended-pane guard is the MAX absolute cap
+        // (60 min), NOT the idle window.
         const timeouts = resolveChildTimeouts({ requested: timeoutMs, agentTimeoutMins: agent.timeout, idleTimeoutMins: subSettings.idleTimeoutMins, hardTimeoutMins: subSettings.hardTimeoutMins });
         if (timeouts.error) return { error: timeouts.error };
-        const hardTimeoutMs = timeouts.hardTimeoutMs ?? timeouts.timeoutMs ?? 0;
+        const hardTimeoutMs = timeouts.hardTimeoutMs ?? MAX_TIMEOUT_MS;
         if (!hardTimeoutMs) return { error: "Invalid herdr timeout configuration." };
         const safe = resolveSafeCwd({ workspaceRoot, childCwd: cwd, allowExternalCwd });
         if (safe.error) return { error: safe.error };

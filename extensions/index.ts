@@ -10,7 +10,7 @@
  */
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { loadCwdEnvFilesIfTrusted } from "./lib/env.js";
+import { loadCwdEnvFilesIfTrusted, migrateSecretsFromSettings } from "./lib/env.js";
 import { MODULES, readDisabled, type ModuleConfig, type ModuleLoadDeps } from "./lib/registry.js";
 
 // Guards the ONE namespace bundle modules share: pi merges every module's
@@ -89,6 +89,10 @@ export default function ceulen(pi: ExtensionAPI) {
   // its own idempotent call as a safety net when this entry is bypassed.
   pi.on("session_start", async (_event, ctx) => {
     loadCwdEnvFilesIfTrusted(ctx);
+    // One-time migration: secrets saved pre-fix sit in PLAINTEXT settings.json
+    // — move them into <agentDir>/.env.local (0600) and scrub. Env was already
+    // winning at read time, so effective values are unchanged.
+    migrateSecretsFromSettings();
   });
 
   // One ownership map for the whole loop — this is what makes guarded() able

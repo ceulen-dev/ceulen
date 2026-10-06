@@ -13,8 +13,13 @@ export interface RouterSettings {
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
-/** Repo-scope settings (`.pi/settings.json` in the working directory). */
-const REPO_SETTINGS_PATH = join(process.cwd(), ".pi", "settings.json");
+/** Repo-scope settings path for one session cwd (zai/advisor/munin convention:
+ *  resolved per call, never bound to process.cwd() at import — RPC/a2a child
+ *  sessions and --cwd launches differ from the process dir, and the trust
+ *  verdict applies to the SESSION's repo, so the file must too). */
+function repoSettingsPath(cwd?: string): string {
+  return join(cwd ?? process.cwd(), ".pi", "settings.json");
+}
 
 function agentDir(): string {
   return process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
@@ -41,10 +46,10 @@ const envReasoning = () => process.env.ROUTER_ENABLE_REASONING ?? process.env.NI
  *  untrusted checkout must not redirect `router.baseUrl` to an attacker
  *  endpoint while the auth.json credential is sent there as Bearer.
  *  Repo-scope `router.apiKey` is ignored (secrets must not come from a checked-in file). */
-export function getSettings(opts: { trustProject?: boolean } = {}): RouterSettings {
+export function getSettings(opts: { trustProject?: boolean; cwd?: string } = {}): RouterSettings {
   const saved = readRouterSection(readFileJson(globalSettingsPath())) ?? {};
   const repo = opts.trustProject
-    ? readRouterSection(readFileJson(REPO_SETTINGS_PATH)) ?? {}
+    ? readRouterSection(readFileJson(repoSettingsPath(opts.cwd))) ?? {}
     : {};
   return {
     baseUrl: normalizeUrl(envBaseUrl() || repo.baseUrl || saved.baseUrl || ""),

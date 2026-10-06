@@ -128,7 +128,7 @@ export async function classifyTask(
   task: string,
   solutionSpace: string | undefined,
   roles: RolesConfig,
-  opts: { askDispatch?: boolean } = {},
+  opts: { askDispatch?: boolean; deadlineMs?: number } = {},
 ): Promise<RoutingVerdict | undefined> {
   if (settings.mode !== "classify") return undefined;
   const pins = pinsFor(agent, roles);
@@ -145,7 +145,19 @@ export async function classifyTask(
   const wantDispatch = opts.askDispatch === true;
 
   try {
-    const result = await ctx.modelRegistry.classify(
+    // Belt-and-braces deadline: routing is advisory, so NOTHING about it may
+    // hang a dispatch. The systemone transport carries its own default
+    // timeout, but a provider that ignores the signal (the transport
+    // contract only says "never rejects") must not park the dispatch — RACE
+    // the ask against a hard cap and fail open to the static chain (live
+    // incident 2026-10-06: two dispatches stuck 8h on a silent endpoint).
+    const deadlineMs = opts.deadlineMs ?? 45_000;
+    const deadline = AbortSignal.timeout(deadlineMs);
+    const timedOut = new Promise<{ __deadline: true }>((resolve) => {
+      deadline.addEventListener("abort", () => resolve({ __deadline: true }), { once: true });
+    });
+    const result = (await Promise.race([
+      ctx.modelRegistry.classify(
       model as never,
       {
         state: {
@@ -180,10 +192,16 @@ export async function classifyTask(
             : {}),
         },
       } as never,
-    );
-    if (result.stopReason !== "stop") {
+        { signal: deadline } as never,
+      ),
+      timedOut,
+    ])) as { __deadline?: true; stopReason?: string; errorMessage?: string; answers?: Record<string, unknown> };
+    if (result.__deadline) {
+      return { applied: false, reason: `classifier deadline (${deadlineMs}ms) — failing open to static chain` };
+    }
+    if (result.stopReason !== "stop" || !result.answers) {
       if (process.env.CEULEN_ROUTING_DEBUG) process.stderr.write(`[routing] stopReason=${result.stopReason} err=${result.errorMessage ?? "-"}\n`);
-      return { applied: false, reason: `classifier ${result.stopReason}` };
+      return { applied: false, reason: `classifier ${result.stopReason ?? "no answers"}` };
     }
 
     const tierAnswer = result.answers.tier as { choice?: string; probabilities?: Record<string, number> } | undefined;
@@ -212,9 +230,14 @@ export async function classifyTask(
     if (wantDispatch) {
       const dispatchAnswer = result.answers.dispatch as { choice?: string; probabilities?: Record<string, number> } | undefined;
       if (dispatchAnswer?.choice === "pane" || dispatchAnswer?.choice === "background") {
-        const probs = dispatchAnswer.probabilities ?? {};
-        const top = Math.max(...Object.values(probs), 0);
-        if (top >= settings.threshold) dispatch = dispatchAnswer.choice;
+        // Gate on the CHOSEN label's own probability — a high-probability
+        // rival must not clear the threshold for a low-confidence choice,
+        // and a missing/out-of-range value fails open to the pane default
+        // (same rule as the tier gate above).
+        const prob = dispatchAnswer.probabilities?.[dispatchAnswer.choice];
+        if (typeof prob === "number" && Number.isFinite(prob) && prob >= 0 && prob <= 1 && prob >= settings.threshold) {
+          dispatch = dispatchAnswer.choice;
+        }
       }
     }
 

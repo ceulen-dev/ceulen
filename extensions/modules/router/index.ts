@@ -41,7 +41,7 @@ export default function (pi: ExtensionAPI) {
     lastCtx = ctx;
     // Now ctx exists: trust-gate the repo scope. A trusted repo may add/override
     // the endpoint; an untrusted one is ignored (attacker-redirect guard).
-    const s = getSettings({ trustProject: ctx.isProjectTrusted?.() === true });
+    const s = getSettings({ trustProject: ctx.isProjectTrusted?.() === true, cwd: ctx.cwd });
     if (!s.baseUrl) {
       ctx.ui.notify(
         "router provider not configured — set `router.baseUrl` in ~/.pi/agent/settings.json (or ROUTER_BASE_URL), then /login router.",

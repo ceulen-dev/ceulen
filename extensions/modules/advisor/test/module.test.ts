@@ -261,6 +261,37 @@ describe("advisor module wiring", () => {
     await fire(pi, state, "agent_settled", step(available(fakeCtx(entries)), "tui"));
     assert.equal(calls, 0, "nothing new since the reseed → no review of the pre-existing turn");
   });
+
+  it("session_start(review off, chain configured) + enable-only save reseeds the cursor (no history replay)", async () => {
+    // Live-found defect (reviewer 2026-10-06): the reseed keyed on the 0→N
+    // chain transition, so enabling `Review settled turns` on a session that
+    // STARTED with enabled:false + a configured chain left cursor undefined —
+    // the first settled turn counted the ENTIRE session's tool calls and
+    // reviewed the whole transcript. The reseed must key on first activation.
+    const { pi, state } = createFakePi();
+    advisorModule(pi);
+    writeSettings({ advisor: { enabled: false, models: [MODEL] } });
+    let ctx = available(fakeCtx(toolCalls(4)));
+    await fire(pi, state, "session_start", ctx);
+    const rt = __getRuntimeForTest();
+    assert.ok(rt, "runtime created");
+    assert.equal(rt!.models.length, 1, "chain was configured all along");
+    assert.equal(rt!.cursor, undefined, "review off at start → cursor never seeded");
+
+    // Enable ONLY the review — the chain is untouched.
+    const entries = toolCalls(4);
+    ctx = available(fakeCtx(entries));
+    const m = advisorConfig();
+    m.groups()[0]!.rows[0]!.set(true);
+    await m.save(new Set(["advisor.enabled"]), ctx);
+
+    assert.equal(rt!.cursor, entries.at(-1).id, "enable-only save reseeds to the tail — history is not replayed");
+
+    let calls = 0;
+    __setIsolatedForTest(async (_c, models) => { calls++; return { text: "", model: models[0], usage: NO_USAGE }; });
+    await fire(pi, state, "agent_settled", step(available(fakeCtx(entries)), "tui"));
+    assert.equal(calls, 0, "no new work since enable → no review");
+  });
 });
 
 describe("advisor review flow", () => {

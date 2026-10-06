@@ -1,6 +1,56 @@
 # Changelog
 
-## Unreleased
+## 0.12.0 — 2026-10-08
+
+- **Secrets never land in settings.json** (user policy: URLs fine, credentials
+  not): masked `/config` rows (web's 7 keys/cookies, a2a gateway
+  token/upstreamToken) persist to `<agentDir>/.env.local` (0600, ingested into
+  process.env at import — env already won at read time, so effective values
+  are unchanged); `migrateSecretsFromSettings` (bundle session_start) moves
+  any pre-fix plaintext secrets out of settings.json and scrubs them,
+  idempotently (extensions/lib/env.ts: writeSecretEnvs/readSecretEnvs; a2a's
+  loader gained per-gateway env fallbacks `A2A_GATEWAY_<KEY>_TOKEN` /
+  `_UPSTREAM_TOKEN`).
+- **Live-incident fixes (8h herdr hang)**: systemoneClassify carries a default
+  30s deadline (pi passes no timeoutMs — a silent endpoint parked dispatches
+  forever); subagent routing wraps the classify ask in a 45s race
+  (`deadlineMs` injectable, fail-open to the static chain); the herdr
+  wall-clock cap is the opt-in hard cap or 60 min — never the 3-min idle
+  window, which killed healthy long-running panes; timed-out panes report
+  that they may still complete their current write.
+- **Review fixes (two subagent review waves, 13 findings)**:
+  - repair: the read guard no longer blocks numeric path-selector reads
+    (`f.ts:50-200` — it probed the raw path while the selector peels only in
+    execute); a successful `edit` (direct or trim-retry) now refreshes the
+    write-freshness baseline (read → edit → write no longer false-positives);
+    selector reads record the baseline too.
+  - rules: project RULES.md is trust-gated — an untrusted checkout's rules
+    never reach the system prompt or rule_get (same gate as pi's AGENTS.md);
+    creating a previously-missing @import target now invalidates the cache.
+  - router: the systemone classify URL applies the same `/v1`-append
+    convention as discovery (a bare-host baseUrl silently 404'd every
+    classify); the repo-scope overlay resolves from the session cwd, not
+    process.cwd().
+  - classifier: the bash verdict hook is bounded to a 2.5s budget (verdicts
+    are annotation-only in pi 1.0.0 — never park a tool call on Jev) and
+    pauses after 3 consecutive classify failures for 5 minutes (audited;
+    settings change or success re-arms).
+  - subagent: the dispatch verdict gates on the CHOSEN label's own
+    probability (a rival no longer clears the threshold for a low-confidence
+    choice, matching the tier rule); removeWorktree locks on the resolved
+    repo root (subdir-cwd dispatches no longer key the per-repo lock
+    differently); the tool schema no longer promises upstream's removed
+    20-min lifetime cap.
+  - advisor: enabling the review via /config reseeds the cursor on FIRST
+    activation — an enable-only save no longer reviews the entire transcript.
+  - load order: rtk is a prompt rewriter and now loads BEFORE steering (its
+    note must not break the ds-anchor byte-identity); a registration-level
+    guard test (extensions/lib/order.test.ts) fails if any prompt rewriter
+    lands after steering.
+- Tests: 2661 (was 2647) — new suites for the secrets store + migration, the
+  registration-order guard, the guard×selector interaction, edit/selector
+  freshness, the classifier breaker + budget, and the dispatch/deadline
+  routing paths.
 
 ## 0.11.0 — 2026-10-07
 

@@ -503,7 +503,9 @@ export function loadConfig(opts: {
       url: gwUrl,
       token: gwToken,
       name: dg.name ? String(dg.name) : undefined,
-      upstreamToken: dg.upstreamToken ? String(dg.upstreamToken) : undefined,
+      // Secrets live in .env.local (panel diversion) — env fallback keeps
+      // settings.json free of tokens while the value still resolves.
+      upstreamToken: dg.upstreamToken != null ? String(dg.upstreamToken) : (env.A2A_GATEWAY_UPSTREAM_TOKEN || undefined),
       heartbeatSec: num(dg.heartbeatSec, 60),
       channel: dg.channel === undefined ? undefined : bool(dg.channel, true),
     };
@@ -518,15 +520,18 @@ export function loadConfig(opts: {
     if (!GATEWAY_KEY_RE.test(key)) continue;
     if (!raw || typeof raw !== "object") continue;
     const g = raw as Record<string, any>;
+    // Per-gateway secret env names (panel diversion — tokens never persist
+    // in settings.json): A2A_GATEWAY_<KEY>_TOKEN / _UPSTREAM_TOKEN.
+    const keyEnv = key.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
     const u = String(g.url ?? "");
-    const t = String(g.token ?? "");
+    const t = String(g.token ?? env[`A2A_GATEWAY_${keyEnv}_TOKEN`] ?? "");
     const enabled = g.enabled !== undefined ? bool(g.enabled, true) : Boolean(u && t);
     gateways[key] = {
       enabled,
       url: u,
       token: t,
       name: g.name ? String(g.name) : undefined,
-      upstreamToken: g.upstreamToken ? String(g.upstreamToken) : undefined,
+      upstreamToken: g.upstreamToken != null ? String(g.upstreamToken) : (env[`A2A_GATEWAY_${keyEnv}_UPSTREAM_TOKEN`] || undefined),
       heartbeatSec: num(g.heartbeatSec, 60),
       channel: g.channel === undefined ? undefined : bool(g.channel, true),
     };

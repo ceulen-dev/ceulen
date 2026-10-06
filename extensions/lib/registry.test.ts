@@ -53,15 +53,18 @@ describe("MODULES load order", () => {
   // rewriter (its ds-anchor bootstrap REPLACES the final prompt; a rewriter
   // loaded after it would append to the byte-identical minimal prompt, which
   // is exactly what serena/web used to do) and ahead of the non-rewriters
-  // (rtk/config). Modules registering before_agent_start and loading BEFORE
-  // steering: munin, advisor, ux, ponytail, subagent, plan, fff, serena, web
-  // — web is the last of them, hence the anchor below.
-  it("steering is the last prompt rewriter, before rtk/config", async () => {
+  // (config). Modules registering before_agent_start and loading BEFORE
+  // steering: munin, advisor, ux, ponytail, subagent, plan, fff, serena, web,
+  // rules, rtk — web is the last of them, hence the anchor below. rtk IS a
+  // prompt rewriter (its before_agent_start appends the RTK note), so it must
+  // sit before steering or the ds-anchor bootstrap loses byte-identity.
+  it("steering is the last prompt rewriter, after rtk, before config", async () => {
     const { MODULES } = await import("./registry.js");
     const at = (name: string) => MODULES.findIndex((m) => m.name === name);
     assert.ok(at("steering") > at("web"), "steering loads after the last rewriter (web)");
     assert.ok(at("steering") > at("serena") && at("steering") > at("plan"));
-    assert.ok(at("steering") < at("rtk"), "rtk (no prompt rewrite) loads after steering");
+    assert.ok(at("steering") > at("rtk"), "rtk (a prompt rewriter) loads before steering");
+    assert.ok(at("steering") > at("rules"), "rules (prompt composer) loads before steering");
     assert.equal(MODULES.at(-1)!.name, "config", "config stays last");
   });
 });

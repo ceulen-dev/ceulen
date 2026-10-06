@@ -374,6 +374,68 @@ describe("permission hook", () => {
     } finally { fx2.cleanup(); }
   });
 
+  it("circuit breaker: 3 consecutive classify failures pause the hook (instant fail-open, no network attempt)", async () => {
+    // With the transport's 30s deadline, a dead endpoint would stall every
+    // unique non-risky command ~30s — repeatedly. After 3 consecutive
+    // failures the hook must fail open instantly until the cooldown.
+    let classifyCalls = 0;
+    let fail = true;
+    const registry = stubRegistry({
+      classify: async () => {
+        classifyCalls++;
+        if (fail) throw new Error("endpoint dead");
+        return { stopReason: "stop", answers: { reversible: { type: "bool", probability: 0.99 } } };
+      },
+    });
+    const fx = await hookFixture(registry);
+    try {
+      fx.messageEnd("do some work");
+      // Three DISTINCT commands (fresh cache keys) each pay one failed call.
+      assert.equal(await fx.call("ls -la"), undefined);
+      assert.equal(await fx.call("git status"), undefined);
+      assert.equal(await fx.call("pwd"), undefined);
+      assert.equal(classifyCalls, 3);
+      assert.ok(readFileSync(fx.logPath, "utf8").includes('"pause":true'), "pause transition audited");
+
+      // Circuit open: further commands fail open with NO network attempt.
+      assert.equal(await fx.call("cat file.txt"), undefined);
+      assert.equal(await fx.call("echo hi"), undefined);
+      assert.equal(classifyCalls, 3, "no classify attempts while paused");
+    } finally { fx.cleanup(); }
+
+    // Fresh module state = fresh breaker; a healthy verdict serves normally.
+    const fx2 = await hookFixture(registry);
+    try {
+      fail = false;
+      fx2.messageEnd("more work");
+      assert.equal(await fx2.call("ls"), undefined);
+      assert.equal(classifyCalls, 4, "healthy verdict went through");
+    } finally { fx2.cleanup(); }
+  });
+
+  it("hook budget: a slow classify loses the race — bash proceeds without waiting for the verdict", async () => {
+    // pi awaits the tool_call handler before executing bash; the verdict is
+    // annotation-only, so a slow Jev must not sit on the hot path. A verdict
+    // slower than the budget is discarded (no cache poison).
+    let classifyCalls = 0;
+    const registry = stubRegistry({
+      classify: async () => {
+        classifyCalls++;
+        await new Promise((r) => setTimeout(r, 60_000)); // way over budget
+        return { stopReason: "stop", answers: { reversible: { type: "bool", probability: 0.99 } } };
+      },
+    });
+    const fx = await hookFixture(registry);
+    try {
+      fx.messageEnd("slow endpoint");
+      const t0 = Date.now();
+      assert.equal(await fx.call("ls -la"), undefined);
+      const elapsed = Date.now() - t0;
+      assert.ok(elapsed < 5_000, `hook returned in ${elapsed}ms — budget raced, not the 30s transport deadline`);
+      assert.equal(classifyCalls, 1, "one attempt was made (then raced away)");
+    } finally { fx.cleanup(); }
+  });
+
   it("classify error / no-model → fail-safe to prompt", async () => {
     for (const registry of [
       stubRegistry({ classify: async () => ({ stopReason: "error", errorMessage: "boom", answers: {} }) }),

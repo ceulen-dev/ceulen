@@ -29,6 +29,13 @@ import {
   type Peer,
 } from "./lib/config.js";
 import { a2aServerRunning as a2aServerRunningIndex, restartA2AServer as restartA2AServerIndex } from "./index.js";
+import { writeSecretEnvs } from "../../lib/env.js";
+
+/** Env var name for one gateway secret (per-key diversion). */
+function gatewayTokenEnv(key: string, field: "token" | "upstreamToken"): string {
+  const keyEnv = key.toUpperCase().replace(/[^A-Z0-9_]/g, "_");
+  return field === "token" ? `A2A_GATEWAY_${keyEnv}_TOKEN` : `A2A_GATEWAY_${keyEnv}_UPSTREAM_TOKEN`;
+}
 
 /** Restart bridge — defaults to the index.ts exports; tests inject via
  *  __setRestartBridgeForTests (the panel must not spin real servers). */
@@ -380,10 +387,43 @@ export function a2aConfig(pi: ExtensionAPI): ModuleConfig {
         gatewayChanged,
         editedGatewayKeys,
       });
+      // SECRETS DIVERSION: gateway tokens never persist in settings.json.
+      // Tokens the user actually edited → .env.local (0600, ingested at
+      // startup, env wins at read time); the loader's per-key env fallback
+      // (config.ts) resolves them at read time. The settings patch keeps
+      // every non-secret field (URL, name, heartbeat, enabled).
+      const secretEnvs: Record<string, string> = {};
+      const diverted = (patch: (a2a: any) => any): (a2a: any) => any => (a2a: any) => {
+        const out = patch(a2a);
+        if (out?.discovery && typeof out.discovery === "object") {
+          const scrub = (entry: Record<string, any>, key: string | null, editedToken: boolean, editedUpstream: boolean) => {
+            if (editedToken && entry.token) {
+              secretEnvs[key ? gatewayTokenEnv(key, "token") : "A2A_GATEWAY_TOKEN"] = String(entry.token);
+              entry.token = "";
+            }
+            if (editedUpstream && entry.upstreamToken) {
+              secretEnvs[key ? gatewayTokenEnv(key, "upstreamToken") : "A2A_GATEWAY_UPSTREAM_TOKEN"] = String(entry.upstreamToken);
+              entry.upstreamToken = undefined;
+            }
+          };
+          if (out.discovery.gateway && typeof out.discovery.gateway === "object") {
+            scrub(out.discovery.gateway, null, editedGatewayKeys.has("gateway.token"), editedGatewayKeys.has("gateway.upstreamToken"));
+          }
+          if (out.discovery.gateways && typeof out.discovery.gateways === "object") {
+            for (const [k, entry] of Object.entries(out.discovery.gateways as Record<string, any>)) {
+              if (entry && typeof entry === "object") {
+                scrub(entry, k, editedGatewayKeys.has(`gw.${k}.token`), editedGatewayKeys.has(`gw.${k}.upstreamToken`));
+              }
+            }
+          }
+        }
+        return out;
+      };
       const written = writeSettingsA2A({
         cwd: ctx.cwd,
-        patch: builtPatch,
+        patch: diverted(builtPatch),
       });
+      const savedSecrets = Object.keys(secretEnvs).length > 0 ? writeSecretEnvs(secretEnvs) : [];
 
       // Live apply — config is read per call; no /reload needed.
       setConfigOverrides({
@@ -395,6 +435,7 @@ export function a2aConfig(pi: ExtensionAPI): ModuleConfig {
       });
 
       const notes = [`A2A config saved to ${written} — applied live.`];
+      if (savedSecrets.length) notes.push(`Gateway token(s) saved to .env.local (${savedSecrets.length}) — never settings.json.`);
       // Env overrides still shadowing edited fields.
       const envOverrides = [...edited]
         .map((k) => (k.startsWith("a2a.") ? ENV_SHADOW[k.slice("a2a.".length)] : undefined))

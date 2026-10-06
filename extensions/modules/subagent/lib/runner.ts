@@ -295,7 +295,10 @@ export async function runSubAgent(options: {
       } as any);
       session = created.session;
     } catch (error) {
-      if (worktreeDir) await removeWorktree(cwd, worktreeDir, exec);
+      // Lock on the RESOLVED repo root (createWorktree/applyWorktreePatch3way do): a
+      // child dispatched with a subdirectory cwd must not key the per-repo lock
+      // differently — parallel siblings would race git's O_EXCL index.lock.
+      if (worktreeDir) await removeWorktree(worktreeRepoRoot ?? cwd, worktreeDir, exec);
       throw error;
     }
     let unsubscribe: (() => void) | undefined;
@@ -370,7 +373,10 @@ export async function runSubAgent(options: {
     } finally {
       unsubscribe?.(); removeAbort?.();
       try { session.dispose(); } catch { /* best effort */ }
-      if (worktreeDir) await removeWorktree(cwd, worktreeDir, exec);
+      // Lock on the RESOLVED repo root (createWorktree/applyWorktreePatch3way do): a
+      // child dispatched with a subdirectory cwd must not key the per-repo lock
+      // differently — parallel siblings would race git's O_EXCL index.lock.
+      if (worktreeDir) await removeWorktree(worktreeRepoRoot ?? cwd, worktreeDir, exec);
     }
   } catch (error) {
     result.exitCode = 1;

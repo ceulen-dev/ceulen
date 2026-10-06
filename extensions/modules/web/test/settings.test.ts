@@ -22,6 +22,12 @@ function setup(): void {
   fs.mkdirSync(agentDir, { recursive: true });
   fs.mkdirSync(projectDir, { recursive: true });
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  // env.ts ingests <real agentDir>/.env.local at import — once the secrets
+  // migration has run on this machine, FIRECRAWL_API_KEY etc. sit in the
+  // test process env and "unset everywhere" is a lie. Scrub the mapped
+  // vars for the suite's lifetime (the web module re-reads settings layers,
+  // not env, for these assertions).
+  for (const v of ["BRAVE_API_KEY", "FIRECRAWL_API_KEY", "CRAWL4AI_API_TOKEN", "GEMINI_WEB_SECURE_1PSID", "ZAI_API_KEY", "WEB_IMAGE_API_KEY", "WEB_CHAT_API_KEY", "SEARXNG_BASE_URL"]) delete process.env[v];
   // Trust: the real trust.json walk won't see our temp project → untrusted by
   // default. isProjectTrusted(cwd, dirs) is injected nowhere here, so trust
   // tests go through writeWebSection/readWebSettings with explicit trusted

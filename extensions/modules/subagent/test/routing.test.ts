@@ -509,6 +509,51 @@ test("classifyTask: a confident dispatch answer alone counts as applied", async 
   assert.equal(verdict?.applied, true, "dispatch alone can carry the verdict");
 });
 
+test("classifyTask: dispatch gates on the CHOSEN label's own probability — a high rival must not clear it", async () => {
+  // Live-found defect (reviewer 2026-10-06): the old gate took Math.max over
+  // ALL probabilities, so choice "background" at 0.4 applied because rival
+  // "pane" scored 0.65 — silently detaching a task the classifier wanted in
+  // a pane. Mirrors the tier question's chosen-label rule.
+  const rival = dispatchCtx({
+    ...TIER_AND_EFFORT,
+    dispatch: { choice: "background", probabilities: { background: 0.4, pane: 0.65 } },
+  });
+  const v1 = await classifyTask(rival, { ...DEFAULT_ROUTING, mode: "classify" }, WORKER, "long job", undefined, ROLES, { askDispatch: true });
+  assert.equal(v1?.dispatch, undefined, "rival probability must not clear the threshold for the choice");
+
+  const confident = dispatchCtx({
+    ...TIER_AND_EFFORT,
+    dispatch: { choice: "background", probabilities: { background: 0.72, pane: 0.28 } },
+  });
+  const v2 = await classifyTask(confident, { ...DEFAULT_ROUTING, mode: "classify" }, WORKER, "long job", undefined, ROLES, { askDispatch: true });
+  assert.equal(v2?.dispatch, "background");
+
+  // Out-of-range / bogus probabilities fail open (no dispatch override).
+  const bogus = dispatchCtx({
+    ...TIER_AND_EFFORT,
+    dispatch: { choice: "background", probabilities: { background: 7 } },
+  });
+  const v3 = await classifyTask(bogus, { ...DEFAULT_ROUTING, mode: "classify" }, WORKER, "long job", undefined, ROLES, { askDispatch: true });
+  assert.equal(v3?.dispatch, undefined, "out-of-range probability fails open to the pane default");
+});
+
+test("classifyTask: a never-resolving classify hits the deadline and fails open to the static chain", async () => {
+  // The 2026-10-06 live incident class: a silent endpoint parked the dispatch
+  // forever. The deadline race must return a fail-open verdict instead.
+  const ctx = {
+    modelRegistry: {
+      getAvailableOfType: async () => [{ provider: "router", id: "jev" }],
+      classify: () => new Promise(() => {}),
+    },
+  } as never;
+  const t0 = Date.now();
+  const verdict = await classifyTask(ctx, { ...DEFAULT_ROUTING, mode: "classify" }, WORKER, "anything", undefined, ROLES, { deadlineMs: 100 });
+  const ms = Date.now() - t0;
+  assert.ok(ms < 2_000, `deadline raced (${ms}ms) instead of hanging`);
+  assert.equal(verdict?.applied, false, "deadline expiry fails open");
+  assert.match(verdict?.reason ?? "", /deadline/);
+});
+
 test("classifyTask: an unresolvable chain suppresses the tier question (typo fails loud, not papered over)", async () => {
   let asked: Record<string, unknown> = {};
   const ctx = dispatchCtx(

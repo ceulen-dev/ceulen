@@ -277,7 +277,7 @@ describe("configPanel contribution", () => {
     );
   });
 
-  it("gateway token: an EDITED token persists; an env-sourced token does NOT leak to disk via unrelated edits", async () => {
+  it("gateway token: an EDITED token diverts to .env.local — never settings.json; unrelated edits touch nothing", async () => {
     await withoutA2AEnv(() =>
       withIsolatedPiDir(async (dir) => {
         // Operator has a gateway configured in the GLOBAL file (env-sourced token case:
@@ -302,16 +302,19 @@ describe("configPanel contribution", () => {
         hb.set(90);
         await (cfg.save as SaveFn)(new Set(["a2a.gw.work.heartbeatSec"]), ctx);
         let written = JSON.parse(fs.readFileSync(globalSettings, "utf-8"));
-        assert.equal(written.a2a.discovery.gateways.work.token, "file-token", "unedited token survives an unrelated edit");
+        assert.equal(written.a2a.discovery.gateways.work.token, "file-token", "unedited token survives an unrelated edit (legacy value untouched)");
 
-        // Now edit the token itself → persisted.
+        // Now edit the token itself → diverts to .env.local, scrubbed from settings.json.
         const cfg2 = a2aConfig({} as never);
         cfg2.groups();
         const tok = rowsOf(cfg2.groups()).find((r) => r.key === "a2a.gw.work.token")!;
         tok.set("rotated-token");
         await (cfg2.save as SaveFn)(new Set(["a2a.gw.work.token"]), ctx);
         written = JSON.parse(fs.readFileSync(globalSettings, "utf-8"));
-        assert.equal(written.a2a.discovery.gateways.work.token, "rotated-token", "edited token persisted");
+        assert.ok(!written.a2a.discovery.gateways.work.token, "edited token must NOT persist in settings.json");
+        const envLocal = fs.readFileSync(path.join(process.env.PI_CODING_AGENT_DIR!, ".env.local"), "utf-8");
+        assert.match(envLocal, /A2A_GATEWAY_WORK_TOKEN=rotated-token/, "edited token diverted to .env.local");
+        assert.equal(process.env.A2A_GATEWAY_WORK_TOKEN, "rotated-token", "live session resolves the diverted token immediately");
       }),
     );
   });

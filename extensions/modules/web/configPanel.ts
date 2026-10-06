@@ -12,6 +12,7 @@ import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { row, type PanelGroup } from "../../lib/panel.js";
 import type { ModuleConfig } from "../../lib/registry.js";
 import { agentDirs } from "../../lib/registry.js";
+import { writeSecretEnvs } from "../../lib/env.js";
 import { findEnvValue } from "./lib/config.js";
 import {
   DEFAULT_SEARXNG_BASE_URL,
@@ -21,9 +22,19 @@ import {
 import {
   ENV_TO_SETTINGS_KEY,
   readProjectWebSection,
+  readWebSettings,
   sectionValue,
   writeWebSection,
 } from "./lib/settings.js";
+import { secretsEnvFile } from "../../lib/env.js";
+
+function secretsEnvFilePath(): string {
+  return secretsEnvFile();
+}
+
+function readWebSettingsGlobal() {
+  return readWebSettings(process.cwd(), false);
+}
 
 /** One row's definition: settings key, label, effective value, default. */
 interface WebRowSpec {
@@ -136,7 +147,7 @@ export function buildWebGroups(working: Record<string, string>): PanelGroup[] {
             } : {}),
             description: spec.description,
             ...(spec.secret
-              ? { warning: "Stored in the settings file — prefer the env var on shared machines." }
+              ? { warning: "Saved to <agentDir>/.env.local (0600) — never settings.json. The matching env var overrides any settings value." }
               : {}),
           },
         ),
@@ -174,7 +185,11 @@ export function diffWebPatch(
 
 /** web's ModuleConfig for the central /config panel. cwd/trust come from the
  *  save ctx (factories receive none); reads use process.cwd(), matching
- *  munin's panel pattern. */
+ *  munin's panel pattern. SECRET rows persist to <agentDir>/.env.local (0600)
+ *  — never settings.json (live finding: real API keys sat in plaintext
+ *  settings.json). Env already wins at read time, so the effective value is
+ *  unchanged; the first save also MIGRATES any settings-stored secret into
+ *  .env.local and scrubs it from settings.json. */
 export function webConfig(): ModuleConfig {
   const read = () => {
     const values = readWebRowValues(process.cwd(), true);
@@ -192,11 +207,55 @@ export function webConfig(): ModuleConfig {
       // written (masked rows start empty — an untouched masked row diffs to
       // no change).
       const patch = diffWebPatch(working, before);
-      writeWebSection(patch, target);
-      const notes = [`Web config saved to ${target} — effective immediately (read per tool call).`];
-      // Disclose env vars that still override saved values, and a trusted
-      // project file that shadows a field.
-      const envOverrides = webRowSpecs().filter((s) => patch[s.key] !== undefined && process.env[s.envVar]).map((s) => s.envVar);
+      const specs = webRowSpecs();
+      const preSaveEnv = new Set(Object.keys(process.env).filter((k) => specs.some((s) => s.envVar === k)));
+      const secretPatch: Record<string, string> = {};
+      const settingsPatch: Record<string, string | number> = {};
+      for (const [key, value] of Object.entries(patch)) {
+        const spec = specs.find((s) => s.key === key);
+        // Secrets (typed this session) → .env.local only. A value that CLEARS a
+        // secret row (empty string) is dropped: deleting the env line would
+        // re-expose a settings-stored value or leave nothing — clearing is a
+        // rare deliberate act, do it by editing .env.local by hand.
+        if (spec?.secret && value !== "") {
+          secretPatch[spec.envVar] = String(value);
+        } else if (spec?.secret && value === "") {
+          continue;
+        } else {
+          settingsPatch[key] = value;
+        }
+      }
+      // Migration: secrets already sitting in settings.json (pre-fix saves)
+      // move into .env.local (onlyAbsent — env was already winning) and are
+      // scrubbed from settings.json. URL rows stay in settings.json untouched.
+      const migrate: Record<string, string> = {};
+      for (const spec of specs) {
+        if (!spec.secret) continue;
+        if (secretPatch[spec.envVar] !== undefined) continue;
+        const stored = sectionValue(readWebSettingsGlobal(), spec.key);
+        if (typeof stored === "string" && stored !== "") migrate[spec.envVar] = stored;
+      }
+      if (Object.keys(migrate).length > 0) writeSecretEnvs(migrate, { onlyAbsent: true });
+      const scrubKeys = Object.keys(migrate);
+      if (scrubKeys.length > 0) {
+        const scrubPatch: Record<string, string> = {};
+        for (const envName of scrubKeys) {
+          const spec = specs.find((s) => s.envVar === envName)!;
+          scrubPatch[spec.key] = ""; // writeWebSection deletes empty keys
+        }
+        writeWebSection(scrubPatch, target);
+      }
+      const written = Object.keys(secretPatch).length > 0 ? writeSecretEnvs(secretPatch) : [];
+      if (Object.keys(settingsPatch).length > 0) writeWebSection(settingsPatch, target);
+      const notes = [] as string[];
+      if (written.length) notes.push(`Secrets saved to ${secretsEnvFilePath()} — effective immediately (env wins at read time).`);
+      if (scrubKeys.length) notes.push(`Migrated ${scrubKeys.length} secret(s) out of settings.json into .env.local.`);
+      if (Object.keys(settingsPatch).length > 0) notes.push(`Web config saved to ${target} — effective immediately (read per tool call).`);
+      // Disclose env vars that PRE-EXISTED this save and still override it.
+      // Snapshot BEFORE writeSecretEnvs mirrors the new values into
+      // process.env — otherwise every edited secret row would falsely read
+      // as "still overridden by env" (it just became the env value).
+      const envOverrides = specs.filter((s) => patch[s.key] !== undefined && preSaveEnv.has(s.envVar)).map((s) => s.envVar);
       if (envOverrides.length) notes.push(`Still overridden by env: ${envOverrides.join(", ")}.`);
       // Resolve through the SAME lookup the runtime uses, so a hand-written
       // NESTED project entry (web.brave.apiKey as {brave:{apiKey}}) is
@@ -209,7 +268,7 @@ export function webConfig(): ModuleConfig {
           })
         : [];
       if (shadowed.length) notes.push(`A trusted project .pi/settings.json web section shadows: ${shadowed.join(", ")}.`);
-      ctx.ui.notify(notes.join(" "), "info");
+      if (notes.length) ctx.ui.notify(notes.join(" "), "info");
     },
   };
 }

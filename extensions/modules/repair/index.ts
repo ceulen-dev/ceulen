@@ -384,6 +384,10 @@ export function wrapToolDefinition(
           typeof params.offset === "number" ? params.offset : undefined,
           typeof params.limit === "number" ? params.limit : undefined,
         );
+        // Selector reads record the freshness baseline too (params.path is
+        // the peeled stem here) — a ranged read must not blind the write
+        // guard for the rest of the file (live finding, reviewer 2026-10-06).
+        await recordReadMtimes(params, cwd);
         return { ...result, details: base.name === "read" ? undefined : result.details };
       }
 
@@ -435,6 +439,12 @@ export function wrapToolDefinition(
       try {
         const result = await freshDef.execute(toolCallId, params, signal, onUpdate, ctx);
         editMismatchCounts?.delete(resolvePath(cwd, typeof params?.path === "string" ? params.path : ""));
+        // Own edit refreshes the freshness baseline (same contract as write/
+        // apply_patch/str_replace_editor): without this, read → edit → write
+        // false-positives — the write compares against the stale READ-time
+        // mtime (live finding, reviewer 2026-10-06; recordMutatedMtimes'
+        // edit branch was dead code for exactly this reason).
+        await recordMutatedMtimes("edit", params, cwd);
         return result;
       } catch (catchedErr: any) {
         let err: any = catchedErr;
@@ -461,7 +471,9 @@ export function wrapToolDefinition(
           else fixedParams.oldText = retry.fixedEdits[0].oldText;
           onRepair(base.name, ["trim-match-retry"]);
           try {
-            return await freshDef.execute(toolCallId, fixedParams, signal, onUpdate, ctx);
+            const retried = await freshDef.execute(toolCallId, fixedParams, signal, onUpdate, ctx);
+            await recordMutatedMtimes("edit", fixedParams, cwd); // params.path unchanged by the retry
+            return retried;
           } catch (retryErr: any) {
             // A failed trim-retry is still a miss — fall through to the
             // unresolvable path below so it counts toward escalation.
@@ -643,7 +655,19 @@ export default function repairModule(pi: ExtensionAPI) {
     }
     if (event.toolName === "read" && isRecord(event.input) && ctx.cwd) {
       const filePath = typeof event.input.path === "string" ? event.input.path.trim() : "";
-      if (filePath && looksLikeCodePath(filePath) && !existsSync(resolvePath(ctx.cwd, filePath))) {
+      // Selector reads (`file.ts:50-200`) probe the STEM: this hook runs on
+      // the RAW path, but the selector is only peeled inside execute —
+      // probing the un-peeled path would hard-block the module's own
+      // advertised read grammar (live finding, reviewer 2026-10-06). An
+      // invalid selector keeps the raw path so execute surfaces the loud error.
+      let probe = filePath;
+      if (filePath && !existsSync(resolvePath(ctx.cwd, probe))) {
+        try {
+          const peeled = peelPathSelector(filePath);
+          if (peeled.selector) probe = peeled.stem;
+        } catch { /* invalid selector — keep the raw path */ }
+      }
+      if (filePath && looksLikeCodePath(probe) && !existsSync(resolvePath(ctx.cwd, probe))) {
         const filename = filePath.split("/").pop() ?? filePath;
         const relDir = dirname(filePath);
         const dirPart = relDir !== "." ? ` under ${relDir}/` : "";

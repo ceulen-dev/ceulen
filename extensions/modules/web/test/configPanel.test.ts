@@ -115,12 +115,16 @@ describe("web configPanel", () => {
       const notifications: string[] = [];
       const ctx = { cwd: "/nonexistent", ui: { notify: (m: string) => notifications.push(m) }, isProjectTrusted: () => false } as never;
       await cfg.save(new Set(["web.brave.apiKey", "web.crawl4ai.timeoutMs"]), ctx);
+      // Secrets NEVER land in settings.json — brave (a secret row) goes to
+      // .env.local; only the non-secret timeout hits settings.json.
+      const envFile = fs.readFileSync(path.join(dir, ".env.local"), "utf8");
+      assert.match(envFile, /BRAVE_API_KEY=panel-key/);
       const raw = JSON.parse(fs.readFileSync(path.join(dir, "settings.json"), "utf8"));
-      assert.equal(raw.web["brave.apiKey"], "panel-key");
+      assert.equal(raw.web["brave.apiKey"], undefined, "secret must not be written to settings.json");
       assert.equal(raw.web["crawl4ai.timeoutMs"], 45000);
-      assert.equal(Object.keys(raw.web).length, 2, "only changed keys written");
+      assert.equal(Object.keys(raw.web).length, 1, "only the non-secret changed key written to settings.json");
       const note = notifications.join(" ");
-      assert.ok(note.includes("settings.json"), note);
+      assert.ok(note.includes(".env.local"), note);
       assert.ok(note.includes("BRAVE_API_KEY"), "env override disclosed");
     } finally {
       if (old === undefined) delete process.env.BRAVE_API_KEY;

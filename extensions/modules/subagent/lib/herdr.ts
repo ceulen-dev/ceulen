@@ -982,6 +982,11 @@ export async function executeHerdrTask(
     if (timedOut) {
       // Wall-clock cap: interrupt the child so it stops burning tokens.
       await cancelAgent(handle.name, exec);
+      // The interrupt is best-effort (esc/ctrl+c to a TUI); a pane deep in a
+      // tool call can finish its current write AFTER this result returns —
+      // say so instead of implying the pane is gone (live incident: parent
+      // read "timeout", child completed and wrote its file 10 min later).
+      prompt.error = `${prompt.error} (pane interrupted; it may still complete its current write — check ${path.basename(handle.resultFile)} or the pane before re-dispatching)`;
     } else if (!aborted) {
       advisorRounds = await awaitAdvisorCycle({
         name: handle.name,

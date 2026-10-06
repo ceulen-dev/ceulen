@@ -15,8 +15,8 @@ import { refreshActiveModel } from "./lib/refresh.js";
  *  shown), so the panel never hides what the next request will actually use.
  *  `trusted` is required — the caller decides, mirroring the rule the save-time
  *  ctx applies (see zai's precedent). */
-export function readRouterSettings(trusted: boolean): RouterSettings {
-  return getSettings({ trustProject: trusted });
+export function readRouterSettings(trusted: boolean, cwd?: string): RouterSettings {
+  return getSettings({ trustProject: trusted, cwd });
 }
 
 /** Build the router panel groups over a working copy (mutated by row setters).
@@ -66,7 +66,7 @@ export async function saveRouterConfig(pi: ExtensionAPI, before: RouterSettings,
     enableReasoning: working.enableReasoning !== before.enableReasoning ? working.enableReasoning : undefined,
   });
   const trusted = ctx.isProjectTrusted?.() === true;
-  const effective = readRouterSettings(trusted);
+  const effective = readRouterSettings(trusted, ctx.cwd);
   registerProvider(pi, effective);
   try {
     await maybeRefreshCatalog(ctx, { force: true });
@@ -91,7 +91,7 @@ export function routerConfig(pi: ExtensionAPI): ModuleConfig {
   // Baseline = what the next request resolves: the factory gets no ctx, so the
   // shared trust helper decides (same rule save-time ctx.isProjectTrusted
   // applies) — an untrusted checkout must not show phantom project values.
-  const before = readRouterSettings(isProjectTrusted(process.cwd()));
+  const before = readRouterSettings(isProjectTrusted(process.cwd()), process.cwd());
   const working = structuredClone(before);
   return {
     groups: () => buildRouterGroups(working),

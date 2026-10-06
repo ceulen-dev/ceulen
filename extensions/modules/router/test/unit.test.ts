@@ -1,6 +1,6 @@
 import { describe, it, before, after, mock } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync, unlinkSync, existsSync, readFileSync, rmSync, statSync } from "node:fs";
+import { mkdirSync, mkdtempSync, writeFileSync, unlinkSync, existsSync, readFileSync, rmSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -89,6 +89,26 @@ describe("config", () => {
         assert.equal(s.baseUrl, "http://trusted-repo/v1");
         assert.equal(s.enableReasoning, false);
       });
+    });
+
+    it("the repo overlay resolves from opts.cwd, not process.cwd() (session-cwd convention)", async () => {
+      // Live-found defect (reviewer 2026-10-06): REPO_SETTINGS_PATH was bound
+      // to process.cwd() at import — RPC/a2a child sessions with a different
+      // session cwd consulted the wrong file under the right trust verdict.
+      const { getSettings } = await import("../lib/config.js");
+      writeSettings({ baseUrl: "http://global" });
+      const dirA = mkdtempSync(join(tmpdir(), "router-cwd-a-"));
+      const dirB = mkdtempSync(join(tmpdir(), "router-cwd-b-"));
+      try {
+        mkdirSync(join(dirB, ".pi"), { recursive: true });
+        writeFileSync(join(dirB, ".pi", "settings.json"), JSON.stringify({ router: { baseUrl: "http://repo-b/v1" } }));
+        assert.equal(getSettings({ trustProject: true, cwd: dirA }).baseUrl, "http://global", "A has no repo file → global");
+        assert.equal(getSettings({ trustProject: true, cwd: dirB }).baseUrl, "http://repo-b/v1", "B's repo file serves B's session");
+        assert.equal(getSettings({ trustProject: false, cwd: dirB }).baseUrl, "http://global", "untrusted B → global regardless of cwd");
+      } finally {
+        rmSync(dirA, { recursive: true, force: true });
+        rmSync(dirB, { recursive: true, force: true });
+      }
     });
 
     it("trusted: env still beats repo", async () => {
@@ -917,6 +937,31 @@ describe("provider classifier catalog", () => {
       }
       globalThis.fetch = (async () => { throw new Error("ECONNREFUSED"); }) as typeof fetch;
       assert.deepEqual(await fetchSystemoneModels({ baseUrl: "http://h/v1", enableReasoning: true }), []);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+
+  it("classify carries a default 30s deadline — a silent endpoint fails open, never hangs the turn", async () => {
+    const { systemoneClassify } = await import("../lib/systemone.js");
+    const model = {
+      api: "typesafe-system-one",
+      provider: "router",
+      id: "combo/jev",
+      baseUrl: "http://h/v1",
+      cost: { input: 0, output: 0 },
+    } as never;
+    const context = { state: {}, questions: { q: { type: "noul", instructions: "x?", criteria: { yes: "y", no: "n" } } } } as never;
+    const realFetch = globalThis.fetch;
+    // Never-resolving fetch: without the default deadline this promise never
+    // settles (the live 8h hang). AbortSignal.timeout must cut it short.
+    globalThis.fetch = ((_input: unknown, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => reject(new Error("aborted: deadline")));
+    })) as unknown as typeof fetch;
+    try {
+      const result = await systemoneClassify(model, context, { apiKey: "sk" } as never);
+      assert.equal(result.stopReason, "error", "deadline expiry must surface as stopReason error, not a hang");
+      assert.match(result.errorMessage ?? "", /deadline/i);
     } finally {
       globalThis.fetch = realFetch;
     }

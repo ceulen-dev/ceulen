@@ -142,15 +142,21 @@ export function defaultUserRulesDir(): string {
 }
 
 /** `<dir>/.pi/RULES.md` from cwd up to the filesystem root, then the user file. */
-export function discoverRuleFiles(cwd: string, userDir = defaultUserRulesDir()): string[] {
+export function discoverRuleFiles(cwd: string, userDir = defaultUserRulesDir(), trusted = true): string[] {
   const files: string[] = [];
-  let dir = path.resolve(cwd);
-  for (;;) {
-    const candidate = path.join(dir, PROJECT_DIR, RULES_FILE);
-    if (existsSync(candidate)) files.push(candidate);
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+  // Untrusted project: repo-controlled RULES.md (and its @imports) must never
+  // reach the system prompt — the same gate as pi's AGENTS.md context files
+  // and every other project-file consumer here (subagent agents, settings
+  // overlays). Only the user-level file applies.
+  if (trusted) {
+    let dir = path.resolve(cwd);
+    for (;;) {
+      const candidate = path.join(dir, PROJECT_DIR, RULES_FILE);
+      if (existsSync(candidate)) files.push(candidate);
+      const parent = path.dirname(dir);
+      if (parent === dir) break;
+      dir = parent;
+    }
   }
   const user = path.join(userDir, RULES_FILE);
   if (existsSync(user)) files.push(user);
@@ -193,6 +199,13 @@ function expandImports(text: string, baseDir: string, state: ImportState, depth:
         if (state.seen.has(resolved)) return whole;
 
         let content: string;
+        // Track the target even when the read FAILS: a previously-missing
+        // import being CREATED must invalidate the cache — signature() emits
+        // `<file>:missing` for absent entries, so the existence flip changes
+        // the signature and the next load re-reads (live finding, reviewer
+        // 2026-10-06 — creating the file a missing-marker points at is the
+        // most likely user fix, and it silently kept serving the marker).
+        state.read.add(resolved);
         try {
           content = readFileSync(resolved, "utf8");
         } catch {
@@ -202,7 +215,6 @@ function expandImports(text: string, baseDir: string, state: ImportState, depth:
           return `${lead}[import depth limit reached: @${cleaned}]`;
         }
         state.seen.add(resolved);
-        state.read.add(resolved);
         const nested = expandImports(content.trim(), path.dirname(resolved), state, depth + 1);
         return `${lead}${nested}`;
       });
@@ -282,9 +294,9 @@ export function clearRuleCache(): void {
   cache = null;
 }
 
-export function loadRules(cwd = process.cwd(), userDir = defaultUserRulesDir()): RuleModel {
-  const key = `${path.resolve(cwd)}\u0000${userDir}`;
-  const files = discoverRuleFiles(cwd, userDir);
+export function loadRules(cwd = process.cwd(), userDir = defaultUserRulesDir(), trusted = true): RuleModel {
+  const key = `${path.resolve(cwd)}\u0000${userDir}\u0000${trusted ? "t" : "u"}`;
+  const files = discoverRuleFiles(cwd, userDir, trusted);
   // Track RULES.md files AND previously imported files, so editing an imported
   // doc invalidates the cache too.
   const tracked = new Set([...files, ...(cache?.tracked ?? [])]);

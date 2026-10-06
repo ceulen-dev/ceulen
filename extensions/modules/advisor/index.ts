@@ -89,7 +89,6 @@ export default function advisorModule(pi: ExtensionAPI): void {
     // watchEnabled is only updated at the end of this function.
     const willWatch = masterChanged ? next.enabled : watchEnabled;
     const rt = runtime;
-    const wasEmpty = !rt || rt.models.length === 0;
     if (rt) {
       rt.config = next;
       rt.models = next.models;
@@ -98,8 +97,12 @@ export default function advisorModule(pi: ExtensionAPI): void {
         rt.stats.paused = false;
         rt.failures = 0;
       }
-      // Enabling mid-session must not replay history.
-      if (wasEmpty && next.models.length > 0 && willWatch) reseedCursor(rt, ctx);
+      // Enabling mid-session must not replay history: reseed on FIRST
+      // activation (cursor still undefined), which covers BOTH the 0→N chain
+      // transition and the enable-only save on a session that started with
+      // enabled:false + a configured chain (a no-chain or disabled session
+      // never seeds the cursor, so `undefined` is exactly "not yet active").
+      if (willWatch && rt.models.length > 0 && rt.cursor === undefined) reseedCursor(rt, ctx);
     }
     // An explicit master change re-arms/disarms the session; otherwise a
     // /advisor watch-off override stays in place.

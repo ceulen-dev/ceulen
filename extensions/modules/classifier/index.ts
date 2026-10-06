@@ -228,6 +228,26 @@ export default function (pi: ExtensionAPI) {
 
   const cache = createVerdictCache();
 
+  // Failure circuit-breaker (advisor's MAX_CONSECUTIVE_FAILURES precedent):
+  // the bash hot path must never pay the classify deadline per command. With
+  // the transport's 30s deadline, a cataloged-but-dead endpoint would stall
+  // every unique non-risky command ~30s — repeatedly, buying nothing (the
+  // verdict never gates execution). After 3 consecutive failures the hook
+  // fails open instantly for CLASSIFIER_PAUSE_COOLDOWN_MS; a successful
+  // verdict or a settings change re-arms immediately.
+  let consecutiveFailures = 0;
+  let pausedUntil = 0;
+  let pausedSettingsRef = "";
+  const CLASSIFIER_PAUSE_AFTER = 3;
+  const CLASSIFIER_PAUSE_COOLDOWN_MS = 5 * 60_000;
+  // The bash hot path's OWN wait budget. The verdict is annotation-only in
+  // pi 1.0.0 (no approval prompt to skip), so nothing justifies parking a
+  // tool call on a slow Jev: a verdict that misses this budget reads as
+  // "no verdict" (fail open to the normal prompt, audited). The 30s
+  // transport deadline stays as the hard backstop; the circuit breaker
+  // above then stops repeated retries.
+  const CLASSIFIER_HOOK_BUDGET_MS = 2_500;
+
   pi.on("tool_call", async (event, ctx) => {
     if (event.toolName !== "bash") return undefined;
     const command = String(event.input?.command || "");
@@ -235,6 +255,24 @@ export default function (pi: ExtensionAPI) {
 
     const s = getClassifierSettings();
     if (!s.permission.enabled) return undefined;
+
+    // Circuit open → instant fail-open (no network attempt). A changed
+    // settings object re-arms at once: the operator switching the classifier
+    // model mid-pause should not wait out the cooldown.
+    const settingsRef = JSON.stringify([s.model, s.permission.enabled, s.permission.mode, s.permission.threshold]);
+    if (settingsRef !== pausedSettingsRef) {
+      pausedSettingsRef = settingsRef;
+      if (consecutiveFailures >= CLASSIFIER_PAUSE_AFTER) consecutiveFailures = 0; // manual remediation
+    }
+    // Circuit open? Instant fail-open. Else, if the pause window has ELAPSED
+    // (pausedUntil > 0 — 0 means "never paused", which must not reset the
+    // counter), close the circuit and retry.
+    const paused = consecutiveFailures >= CLASSIFIER_PAUSE_AFTER;
+    if (paused && Date.now() < pausedUntil) return undefined;
+    if (paused && pausedUntil > 0 && Date.now() >= pausedUntil) {
+      consecutiveFailures = 0; // cooldown elapsed → retry
+      pausedUntil = 0;
+    }
 
     // static list first — credential-touching / irreversible commands never
     // reach Jev and never leave the normal prompt
@@ -265,6 +303,7 @@ export default function (pi: ExtensionAPI) {
       const started = Date.now();
       try {
         const answers = await askJev(ctx, state, questions);
+        consecutiveFailures = 0;
         const rev = noul(answers, "reversible");
         const serves = state.task ? noul(answers, "serves_task") : rev; // no task → reversibility only
         const ok = rev >= s.permission.threshold && serves >= s.permission.threshold;
@@ -273,12 +312,27 @@ export default function (pi: ExtensionAPI) {
         await audit({ command, ...decision, ms: Date.now() - started, model: s.model || "(auto)" });
         return decision;
       } catch (e) {
+        consecutiveFailures++;
+        if (consecutiveFailures >= CLASSIFIER_PAUSE_AFTER) {
+          pausedUntil = Date.now() + CLASSIFIER_PAUSE_COOLDOWN_MS;
+          await audit({ command, pause: true, failures: consecutiveFailures, cooldown_ms: CLASSIFIER_PAUSE_COOLDOWN_MS });
+        }
         await audit({ command, error: String(e instanceof Error ? e.message : e), ms: Date.now() - started, model: s.model || "(auto)" });
         return null; // fail-safe: fall back to the normal prompt
       }
     };
 
-    const decision = cached !== undefined ? cached : await decide();
+    // Race the verdict against the hook budget — pi awaits this handler
+    // before executing bash, so the budget (not the transport deadline) is
+    // what the user feels. A late verdict is discarded (no cache poison).
+    let decision: { approve: boolean; reversible: number; serves_task: number } | null | undefined = cached;
+    if (decision === undefined) {
+      const budget = AbortSignal.timeout(CLASSIFIER_HOOK_BUDGET_MS);
+      decision = await Promise.race([
+        decide(),
+        new Promise<null>((resolve) => budget.addEventListener("abort", () => resolve(null), { once: true })),
+      ]);
+    }
 
     // Both modes only annotate; neither changes execution (pi 1.0.0 has no
     // approval prompt for tool_call to skip — see module docstring). Enforce

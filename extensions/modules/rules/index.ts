@@ -28,6 +28,16 @@ import { clearRuleCache, loadRules, type RuleModel } from "./lib/rules";
 /** Cap on a single rule body returned by rule_get (chars). */
 const RULE_GET_MAX_CHARS = 20000;
 
+/** Trust gate (AGENTS.md/subagent convention): an untrusted checkout's
+ *  RULES.md must not reach the system prompt or rule_get. Fail closed. */
+function projectTrusted(ctx: { isProjectTrusted?: () => boolean } | undefined): boolean {
+  try {
+    return ctx?.isProjectTrusted?.() === true;
+  } catch {
+    return false;
+  }
+}
+
 function statusLines(model: RuleModel, cwd: string): string {
   if (model.files.length === 0) {
     return [
@@ -54,7 +64,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
   pi.on("before_agent_start", async (event, ctx): Promise<BeforeAgentStartEventResult | undefined> => {
     let model: RuleModel;
     try {
-      model = loadRules(ctx?.cwd ?? process.cwd());
+      model = loadRules(ctx?.cwd ?? process.cwd(), undefined, projectTrusted(ctx));
     } catch {
       return undefined; // never break a turn over rule discovery
     }
@@ -73,7 +83,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
     }),
     defaultActive: !disabledTools.has("rule_get"),
     async execute(_id: string, params: { name: string }, _signal, _onUpdate, ctx) {
-      const model = loadRules(ctx?.cwd ?? process.cwd());
+      const model = loadRules(ctx?.cwd ?? process.cwd(), undefined, projectTrusted(ctx));
       const wanted = (params.name ?? "").trim();
       const rule = model.rules.find((item) => item.name === wanted);
       if (!rule) {
@@ -114,7 +124,7 @@ export default function rulesExtension(pi: ExtensionAPI): void {
         ctx.ui.notify(`[rules] unknown argument "${arg}" — use /rules or /rules reload`, "error");
         return;
       }
-      ctx.ui.notify(statusLines(loadRules(ctx.cwd), ctx.cwd), "info");
+      ctx.ui.notify(statusLines(loadRules(ctx.cwd, undefined, projectTrusted(ctx)), ctx.cwd), "info");
     },
   });
 }

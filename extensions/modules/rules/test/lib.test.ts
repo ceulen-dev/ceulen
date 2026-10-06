@@ -254,6 +254,26 @@ describe("mtime cache", () => {
     assert.ok(loadRules(cwd, userDir).rules[0].body.includes("BODY-V2"));
   });
 
+  it("creating a previously-missing @import target invalidates the cache (no /rules reload)", () => {
+    // Live finding (reviewer 2026-10-06): only successfully-read files were
+    // tracked, so creating the file a [missing import] marker points at
+    // changed no tracked mtime — the marker kept serving until RULES.md
+    // itself was edited. Missing targets are now tracked (existence flip
+    // changes the signature).
+    const { cwd, userDir } = workspace();
+    write(path.join(cwd, ".pi/RULES.md"), "## a\n@later.md\n");
+    assert.ok(loadRules(cwd, userDir).rules[0].body.includes("[missing import: @later.md]"));
+
+    const target = path.join(cwd, ".pi/later.md");
+    writeFileSync(target, "ARRIVED\n", "utf8");
+    const future = new Date(Date.now() + 5000);
+    utimesSync(target, future, future);
+
+    const body = loadRules(cwd, userDir).rules[0].body;
+    assert.ok(body.includes("ARRIVED"), `imported content served without cache drop; got: ${body}`);
+    assert.ok(!body.includes("[missing import"));
+  });
+
   it("returns the cached model unchanged when nothing on disk moved", () => {
     const { cwd, userDir } = workspace();
     write(path.join(cwd, ".pi/RULES.md"), "## a\nstable\n");
