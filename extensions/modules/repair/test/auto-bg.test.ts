@@ -44,6 +44,72 @@ function makeDeps(thresholdSecs = 0.05): { pi: any; deps: AutoBgDeps; messages: 
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
+describe("exit sweep across module reloads (globalThis indirection)", () => {
+  // node:test runs each file in its own process, so no other suite's sweep
+  // can unlink our fixtures. Restore the process's pre-test listener sets
+  // exactly (our handlers are closure-private, unreachable by identity).
+  const sigs = ["exit", "SIGTERM", "SIGINT"] as const;
+  let pre: Map<string, NodeJS.SignalsListener[]>;
+  after(() => {
+    delete (globalThis as any)[Symbol.for("ceulen.repair.bgExitSweep")];
+    delete (globalThis as any)[Symbol.for("ceulen.repair.bgExitSweep.armed")];
+    if (!pre) return;
+    for (const sig of pre.keys()) {
+      // "exit" is not a Signal but the runtime accepts any event name; the
+      // cast is the one place the typed overload can't express that.
+      const event = sig as NodeJS.Signals;
+      for (const l of process.listeners(event)) {
+        if (!pre.get(sig)!.includes(l)) process.removeListener(event, l);
+      }
+    }
+  });
+
+  it("sweeps the CURRENT module instance's job map, not just the first one", async () => {
+    const { writeFileSync, existsSync, mkdtempSync, rmSync } = await import("node:fs");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+
+    pre = new Map(sigs.map((s) => [s, process.listeners(s as NodeJS.Signals)]));
+
+    // Simulate /reload: a second load of the auto-bg module with a FRESH jobs
+    // map. The once-guard keeps listener count flat; the sweep must follow
+    // the slot's indirection instead of the first instance's closure.
+    const preExit = process.listeners("exit");
+    const added = () => process.listeners("exit").filter((l) => !preExit.includes(l));
+    const m1 = await import("../lib/auto-bg.js");
+    m1.installExitSweepForTests();
+    assert.equal(added().length, 1, "first load installs exactly one exit listener");
+
+    // tsx treats the query as part of the specifier (fresh module record);
+    // a non-literal specifier is the one way TS types it.
+    const m2 = await import("../lib/auto-bg.js?reload=2" as string);
+    m2.installExitSweepForTests();
+    assert.equal(added().length, 1, "second load must NOT stack a second listener");
+
+    // Register a live job in the SECOND instance's registry (a post-/reload
+    // job whose tmp log previously leaked at process death).
+    const dir = mkdtempSync(join(tmpdir(), "ceulen-repair-sweep-"));
+    const logPath = join(dir, "ceulen-repair-bg-second.log");
+    writeFileSync(logPath, "leak probe");
+    m2.registerBgJobForTests({ id: "bg-test", logPath, logTruncated: false });
+
+    // The first instance must NOT know about the second's job (proves the
+    // pre-fix bug shape: its closure saw only its own, empty, map).
+    assert.equal(m1.bgJobCount(), 0, "first instance's map is separate");
+
+    try {
+      // Fire ONLY the module's registered 'exit' handler, exactly as Node
+      // would invoke it at process death.
+      for (const l of added() as Array<(c: number) => void>) l(0);
+
+      assert.equal(existsSync(logPath), false, "post-reload job's tmp log swept at exit");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+
 // Logs the lib deliberately KEEPS (truncated ≥5MB) outlive the job by design —
 // track the ones our tests create and remove them at suite end so runs don't
 // leak 5MB files into the shared tmpdir.

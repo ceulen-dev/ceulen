@@ -12,7 +12,7 @@
 // since Node 22.13 < the repo engines floor). Fallback seam: swap
 // `openDatabase` if a runtime refuses (e.g. sqlite3 CLI).
 
-import { readFileSync } from "node:fs";
+import { closeSync, openSync, readSync } from "node:fs";
 import { DatabaseSync } from "node:sqlite";
 
 /** Row cap for raw queries (OMP MAX_RAW_QUERY_ROWS, trimmed). */
@@ -54,13 +54,19 @@ export function parseSqliteSelector(selector: string | undefined): SqliteSelecto
   throw new Error(`invalid sqlite selector "${second}" — use :${table}:<rowid>, :${table}:<key>=<value>, or :?SELECT …`);
 }
 
-/** Sniff: first 16 bytes are the SQLite magic header. */
+/** Sniff: first 16 bytes are the SQLite magic header. Reads ONLY those 16
+ *  bytes (a whole-file read parked multi-GB databases in memory for a sniff). */
 export function isSqliteFile(absPath: string): boolean {
+  let fd: number | undefined;
   try {
-    const fd = readFileSync(absPath);
-    return fd.length >= 16 && fd.subarray(0, 16).equals(Buffer.from("SQLite format 3\0", "utf8"));
+    fd = openSync(absPath, "r");
+    const head = Buffer.alloc(16);
+    const read = readSync(fd, head, 0, 16, 0);
+    return read >= 16 && head.equals(Buffer.from("SQLite format 3\0", "utf8"));
   } catch {
     return false;
+  } finally {
+    if (fd !== undefined) closeSync(fd);
   }
 }
 

@@ -6,6 +6,7 @@
 // budgets, and constants.
 
 import { basename } from "node:path";
+import { statSync } from "node:fs";
 import {
   fileScore,
   grepIndex,
@@ -24,6 +25,7 @@ import {
   type SketchCard,
 } from "./questions.js";
 import {
+  eligibleFile,
   listFiles,
   mergeHeat,
   plainContent,
@@ -197,7 +199,7 @@ class Cascade {
     const keywords = deriveKeywords(query, this.#options.extraKeywords);
 
     onProgress?.("lexical scan");
-    const entries = listFiles(root);
+    const entries = scopeFiles(root);
     const fileMap = new Map(entries.map((e) => [e.rel, e.path]));
     const index: GrepIndex = await grepIndex(root, keywords, { files: fileMap, signal });
     this.stats.listed = entries.length;
@@ -367,6 +369,18 @@ class Cascade {
     hits.sort((a, b) => b.contentScore - a.contentScore);
     return { hits, threshold: THRESHOLD, keywords, stats: this.stats };
   }
+}
+
+/** The lexical/judging cascade runs over a file LIST; a single-file `path`
+ *  scope used to list zero files and report "no hits" silently. Wrap it as a
+ *  one-entry walk so the documented scope works. Exported for tests. */
+export function scopeFiles(root: string): FileEntry[] {
+  const st = statSync(root);
+  if (!st.isDirectory()) {
+    const rel = basename(root);
+    return eligibleFile(rel, st.size, rel.startsWith(".")) ? [{ path: root, rel, size: st.size }] : [];
+  }
+  return listFiles(root);
 }
 
 /** One cascade search. Judge failures degrade coverage and land in

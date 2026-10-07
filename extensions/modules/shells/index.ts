@@ -66,20 +66,30 @@ function renderOutput(session: ShellSession, params: Record<string, unknown>): s
   const since = params.since === "last" ? "last" : "start";
   const out: string[] = [];
   let truncated = false;
-  for (const [label, buf] of [
-    ["stdout", session.stdout],
-    ["stderr", session.stderr],
-  ] as const) {
-    const all = buf.lines();
-    const offset = since === "last" ? session.lastOutputOffset : 0;
-    const fresh = all.slice(Math.max(0, offset));
-    if (fresh.length === 0) continue;
-    const shown = fresh.slice(-max);
-    if (fresh.length > shown.length) truncated = true;
-    out.push(`── ${label}${since === "last" ? " (new)" : ""} ──`, ...shown);
+  // Each stream slices by ITS OWN cursor — one shared offset went stale on
+  // the shorter stream (stderr duplicated when stdout was longer, invisible
+  // when shorter). Cursors are lifetime line counts, not array indices:
+  // a ring-cap trip SHRINKS the visible array, which strands an index
+  // cursor above it forever (permanent "no new output yet" blackout).
+  const cursorOf = { stdout: "lastStdoutOffset", stderr: "lastStderrOffset" } as const;
+  for (const stream of ["stdout", "stderr"] as const) {
+    const buf = session[stream];
+    if (since === "last") {
+      const fresh = buf.linesSince(session[cursorOf[stream]]);
+      if (fresh.length === 0) continue;
+      const shown = fresh.slice(-max);
+      if (fresh.length > shown.length) truncated = true;
+      out.push(`── ${stream} (new) ──`, ...shown);
+      // Advance ONLY on since:"last" reads, and only forward.
+      session[cursorOf[stream]] = Math.max(session[cursorOf[stream]], buf.lifetimeLines());
+    } else {
+      const all = buf.lines();
+      if (all.length === 0) continue;
+      const shown = all.slice(-max);
+      if (all.length > shown.length) truncated = true;
+      out.push(`── ${stream} ──`, ...shown);
+    }
   }
-  // Advance the cursor ONLY on since:"last" reads.
-  if (since === "last") session.lastOutputOffset = Math.max(session.stdout.lines().length, session.lastOutputOffset);
   if (out.length === 0) return `${session.id}: no ${since === "last" ? "new " : ""}output yet`;
   const totalLines = session.stdout.lines().length + session.stderr.lines().length;
   out.push(`── total ${totalLines} line(s)${truncated || session.stdout.isTruncated() || session.stderr.isTruncated() ? ", buffer truncated" : ""} ──`);
@@ -88,10 +98,11 @@ function renderOutput(session: ShellSession, params: Record<string, unknown>): s
 
 export default function shellsModule(pi: ExtensionAPI): void {
   const store = new SessionStore();
+  (shellsModule as unknown as { __storeForTests?: SessionStore }).__storeForTests = store;
 
   pi.on("session_start", () => {
     // A fresh session can't reach children from a replaced one.
-    store.list().length = 0; // ponytail: killAll already ran on shutdown; plain clear
+    store.clear(); // killAll already ran on shutdown; plain clear
   });
 
   pi.on("session_shutdown", () => {
@@ -208,3 +219,9 @@ export default function shellsModule(pi: ExtensionAPI): void {
     },
   });
 }
+
+// ponytail: test seam — a constructor-injected store would be the upgrade
+// path if non-test code ever needs it; one module-scope slot, last load wins.
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const shellsModuleAny = shellsModule as unknown as { __storeForTests?: SessionStore };
+export const getStoreForTests = (): SessionStore | undefined => shellsModuleAny.__storeForTests;

@@ -64,6 +64,14 @@ export function matchMember(members: string[], wanted: string): { member: string
   return { error: `no member matching "${wanted}"` };
 }
 
+/** Refusal for a resolved member whose name tar/unzip would parse as an
+ *  option (leading `-`, listing forms like `./--x` included): a crafted
+ *  archive makes tar EXECUTE that option (GNU --checkpoint-action primitive).
+ *  Such members are unreadable here; bash is the override hatch. */
+function dashOptionError(member: string): string {
+  return `refusing member "${member}" — archive member names beginning with "-" are parsed as tar/unzip options (command-injection primitive); extract via bash instead`;
+}
+
 /** Extract one member's bytes (tar -xOf / unzip -p). Throws on missing. */
 function extractMember(archive: string, kind: ArchiveKind, member: string): Buffer {
   const cmd = kind === "zip" ? "unzip" : "tar";
@@ -89,6 +97,12 @@ export function readArchiveMember(archive: string, kind: ArchiveKind, member: st
   const members = listMembers(archive, kind);
   const match = matchMember(members, member);
   if ("error" in match) return { text: `${displayPath} : ${member}\n${match.error}` };
+  // Option-injection gate: tar/unzip take the member as a positional arg, so
+  // a crafted member named `--checkpoint-action=…` (or `./--…`) executes as a
+  // tar OPTION. Refuse before extractMember ever spawns.
+  if (match.member.replace(/^\.\//, "").startsWith("-")) {
+    return { text: `${displayPath} : ${member}\n${dashOptionError(match.member)}` };
+  }
   const buf = extractMember(archive, kind, match.member);
   if (buf.length > MEMBER_MAX_BYTES) {
     return { text: `${displayPath} : ${match.member}\nmember is ${buf.length} bytes (cap ${MEMBER_MAX_BYTES}) — extract with bash, then read the file.` };

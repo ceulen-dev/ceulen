@@ -157,16 +157,21 @@ export interface GrepIndexOptions {
 }
 
 const SCAN_LIMIT_DEFAULT = 512 * 1024;
+/** ponytail: hard read cap per file — a multi-GB log must not buffer whole.
+ *  The scan only needs counts, not completeness. */
+const SCAN_READ_CAP = 2 * 1024 * 1024;
 
 /**
  * Count keyword occurrences (case-insensitive) per file by scanning each
- * eligible file's first `scanLimitBytes`. ponytail: plain read + regex over
- * matching lines (no native grep) — the cascade's ranking only needs counts,
- * and the walk is already eligibility-bounded. Exported for tests.
+ * eligible file's first `scanLimitBytes`, read as a BOUNDED prefix (open +
+ * read at most SCAN_READ_CAP bytes; a multi-GB log never buffers whole).
+ * ponytail: plain read + regex over matching lines (no native grep) — the
+ * cascade's ranking only needs counts, and the walk is already
+ * eligibility-bounded. Exported for tests.
  */
 export async function grepIndex(rootAbs: string, rawKeywords: readonly string[], options: GrepIndexOptions): Promise<GrepIndex> {
   void rootAbs;
-  const { readFile } = await import("node:fs/promises");
+  const { open } = await import("node:fs/promises");
   const keywordsLower = rawKeywords.map((k) => k.toLowerCase()).filter((k) => k.length > 0);
   const index: GrepIndex = { keywords: keywordsLower, perFileKw: new Map(), filesScanned: 0 };
   if (keywordsLower.length === 0) return index;
@@ -176,8 +181,15 @@ export async function grepIndex(rootAbs: string, rawKeywords: readonly string[],
     index.filesScanned++;
     let text: string;
     try {
-      const buf = await readFile(abs);
-      text = buf.subarray(0, options.scanLimitBytes ?? SCAN_LIMIT_DEFAULT).toString("utf8");
+      const cap = Math.min(options.scanLimitBytes ?? SCAN_LIMIT_DEFAULT, SCAN_READ_CAP);
+      const fh = await open(abs, "r");
+      try {
+        const buf = Buffer.alloc(cap);
+        const { bytesRead } = await fh.read(buf, 0, cap, 0);
+        text = buf.subarray(0, bytesRead).toString("utf8");
+      } finally {
+        await fh.close();
+      }
     } catch {
       continue; // unreadable — just unranked
     }

@@ -25,7 +25,9 @@ import {
 function fakeChild(): { child: any; writes: string[]; killCalls: string[]; emitExit: (code: number | null, signal?: NodeJS.Signals | null) => void } {
   const child = new EventEmitter() as any;
   child.pid = 42_424;
-  child.stdin = { write: (d: string) => child.__writes.push(d), get writable() { return !child.__closed; } };
+  // stdin must be an EventEmitter: createSession registers an 'error'
+  // listener on it (EPIPE containment).
+  child.stdin = Object.assign(new EventEmitter(), { write: (d: string) => child.__writes.push(d) });
   child.stdout = new EventEmitter();
   child.stderr = new EventEmitter();
   child.kill = (sig: NodeJS.Signals = "SIGTERM") => {
@@ -82,6 +84,15 @@ describe("RingBuffer", () => {
   it("truncationMarker formats", () => {
     assert.equal(truncationMarker(5), "[… 5 bytes truncated …]");
   });
+
+  it("keeps the unterminated partial line after the cap trips", () => {
+    const rb = new RingBuffer();
+    rb.push("HEAD-LINE\n");
+    rb.push("x".repeat(TOTAL_BYTES) + "\n"); // cap trips
+    rb.push("spinner…"); // no trailing newline, arrives after capping
+    assert.equal(rb.isTruncated(), true);
+    assert.match(rb.lines().at(-1)!, /^spinner…/);
+  });
 });
 
 // ── ids + resolution ────────────────────────────────────────────────────────
@@ -106,7 +117,7 @@ describe("ids and resolveSession", () => {
       startedAt: Date.now(),
       stdout: new RingBuffer(),
       stderr: new RingBuffer(),
-      lastOutputOffset: 0,
+      lastStdoutOffset: 0, lastStderrOffset: 0,
       ...over,
     };
   }
@@ -128,6 +139,24 @@ describe("ids and resolveSession", () => {
     assert.throws(() => resolveSession(store, "dev"), /ambiguous.*dev/s);
     assert.throws(() => resolveSession(store, "nope"), /no session 'nope'/);
   });
+
+  it("prefers a live match over an exited one with the same name", () => {
+    const store = new SessionStore();
+    const dead = session({ id: "s1", name: "dev", exitedAt: Date.now(), exitCode: 0 });
+    const live = session({ id: "s2", name: "dev" });
+    store.add(dead);
+    store.add(live);
+    assert.equal(resolveSession(store, "dev"), live);
+    // Ambiguity is judged among LIVE sessions only.
+    const live2 = session({ id: "s3", name: "dev" });
+    store.add(live2);
+    assert.throws(() => resolveSession(store, "dev"), /ambiguous \(2 sessions\)/);
+    // All matches exited → fall back to the FULL list (original semantics:
+    // ambiguity is decided over the fallback set).
+    live.exitedAt = Date.now();
+    live2.exitedAt = Date.now();
+    assert.throws(() => resolveSession(store, "dev"), /ambiguous \(3 sessions\)/);
+  });
 });
 
 // ── SessionStore ────────────────────────────────────────────────────────────
@@ -143,7 +172,7 @@ describe("SessionStore", () => {
       startedAt: Date.now(),
       stdout: new RingBuffer(),
       stderr: new RingBuffer(),
-      lastOutputOffset: 0,
+      lastStdoutOffset: 0, lastStderrOffset: 0,
       ...over,
     };
   }
@@ -168,18 +197,26 @@ describe("SessionStore", () => {
     assert.equal(store.list()[0]!.id, "d2"); // oldest two gone
   });
 
+  it("clear drops every session", () => {
+    const store = new SessionStore();
+    store.add(live({ id: "s1" }));
+    store.add(live({ id: "s2" }));
+    store.clear();
+    assert.equal(store.list().length, 0);
+  });
+
   it("killAll skips exited sessions and escalates for live ones", { timeout: 10_000 }, async () => {
     const store = new SessionStore();
     const fc = fakeChild();
     const s = store.list().length; // 0
     store.add({
       id: "s1", pid: fc.child.pid, child: fc.child, cwd: "/", command: "x",
-      startedAt: Date.now(), stdout: new RingBuffer(), stderr: new RingBuffer(), lastOutputOffset: 0,
+      startedAt: Date.now(), stdout: new RingBuffer(), stderr: new RingBuffer(), lastStdoutOffset: 0, lastStderrOffset: 0,
     });
     store.add({
       id: "s2", pid: 1, child: fakeChild().child, cwd: "/", command: "x",
       startedAt: Date.now(), exitedAt: Date.now(), exitCode: 0,
-      stdout: new RingBuffer(), stderr: new RingBuffer(), lastOutputOffset: 0,
+      stdout: new RingBuffer(), stderr: new RingBuffer(), lastStdoutOffset: 0, lastStderrOffset: 0,
     });
     await store.killAll("SIGTERM");
     // Group signal fails (bogus pid) → falls back to child.kill; escalation
@@ -218,6 +255,78 @@ describe("createSession", () => {
     assert.equal(store.list().length, 0);
   });
 
+  it("marks an async spawn failure exited and never signals pi's own group", async () => {
+    const store = new SessionStore();
+    resetIdCounter(0);
+    // Async failure: child emits 'error' with pid undefined (bad cwd etc.).
+    const fc = fakeChild();
+    fc.child.pid = undefined;
+    const s = createSession(store, () => {
+      queueMicrotask(() => fc.child.emit("error", new Error("ENOENT: spawn bad-cwd")));
+      return fc.child as never;
+    }, { command: "x", cwd: "/nonexistent-cwd" });
+    assert.equal(s.pid, 0);
+    await new Promise<void>((r) => setImmediate(r));
+    assert.ok(s.exitedAt !== undefined, "spawn failure marks the session exited");
+    assert.equal(s.exitCode, null);
+
+    // kill on the zombie resolves early — nothing to signal, and never
+    // process.kill(-0) (== kill(0) == SIGTERM for every process in pi's
+    // own group).
+    const origKill = process.kill;
+    const groupCalls: [number | undefined, NodeJS.Signals][] = [];
+    (process as any).kill = (pid: number | undefined, sig?: NodeJS.Signals) => {
+      if (typeof pid === "number" && pid <= 0) groupCalls.push([pid, sig as NodeJS.Signals]);
+      return true;
+    };
+    try {
+      const r = await killSession(s, "SIGKILL", 50);
+      assert.deepEqual(r, { code: null, signal: null }); // early exit, no signal
+      assert.deepEqual(groupCalls, [], "no negative/zero-pid group signal may be issued");
+    } finally {
+      (process as any).kill = origKill;
+    }
+    assert.deepEqual(fc.killCalls, [] as string[], "exited session is not signalled");
+  });
+
+  it("kill on a live pid-0 session falls back to child.kill, not the host group", async () => {
+    const store = new SessionStore();
+    // Race window: session registered, spawn 'error' not yet fired → still
+    // live with pid 0. killSession must reach for child.kill only.
+    const fc = fakeChild();
+    fc.child.pid = undefined;
+    const s = createSession(store, () => fc.child as never, { command: "x", cwd: "/" });
+    assert.equal(s.pid, 0);
+    const origKill = process.kill;
+    const groupCalls: [number | undefined, NodeJS.Signals][] = [];
+    (process as any).kill = (pid: number | undefined, sig?: NodeJS.Signals) => {
+      if (typeof pid === "number" && pid <= 0) groupCalls.push([pid, sig as NodeJS.Signals]);
+      return true;
+    };
+    try {
+      const r = await killSession(s, "SIGTERM", 50);
+      assert.equal(r.signal, "SIGKILL"); // escalated: fake never exits
+      assert.deepEqual(groupCalls, [], "no negative/zero-pid group signal may be issued");
+    } finally {
+      (process as any).kill = origKill;
+    }
+    assert.ok(fc.killCalls.includes("SIGTERM"));
+    assert.ok(fc.killCalls.includes("SIGKILL"), "falls back to child.kill");
+  });
+
+  it("frees the name after an async spawn failure", async () => {
+    const store = new SessionStore();
+    const fc = fakeChild();
+    fc.child.pid = undefined;
+    createSession(store, () => {
+      queueMicrotask(() => fc.child.emit("error", new Error("ENOENT")));
+      return fc.child as never;
+    }, { command: "x", cwd: "/", name: "dev" });
+    await new Promise<void>((r) => setImmediate(r));
+    const again = createSession(store, noopSpawn, { command: "y", cwd: "/", name: "dev" });
+    assert.ok(again.id.length > 0);
+  });
+
   it("killSession escalates to SIGKILL after the wait", async () => {
     const store = new SessionStore();
     const fc = fakeChild(); // never emits exit on its own
@@ -236,6 +345,19 @@ describe("createSession", () => {
     fc.emitExit(3);
     const r = await killSession(s);
     assert.equal(r.code, 3);
+  });
+
+  it("contains a stdin EPIPE that races child exit (no uncaught error)", () => {
+    const store = new SessionStore();
+    const fc = fakeChild();
+    const s = createSession(store, () => fc.child as never, { command: "sh -c 'exit 0'", cwd: "/" });
+    fc.emitExit(0);
+    // A write that raced the exit already EPIPEd: the 'error' event lands on
+    // stdin with no writer left. On a real child that would be an
+    // uncaughtException killing pi; on an EventEmitter, emitting 'error'
+    // with no listener THROWS — so doesNotThrow is the no-crash assertion.
+    assert.doesNotThrow(() => fc.child.stdin.emit("error", new Error("EPIPE")));
+    assert.deepEqual(s.stderr.lines(), ["[shells] stdin write failed (process exited)"]);
   });
 });
 

@@ -9,7 +9,7 @@
 
 import { readFileSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 // ── Shapes ──────────────────────────────────────────────────────────────────
 
@@ -61,7 +61,9 @@ export async function loadPdfEngine(): Promise<PdfEngine> {
   const file = path.join(path.dirname(fileURLToPath(import.meta.url)), "../vendor/pdfjs/pdf.min.mjs");
   // Lazily dynamic-import the vendored module by FILE URL so the bundler /
   // typechecker never sees a static dependency.
-  const mod = (await import(`file://${file}`)) as PdfEngine & Record<string, unknown>;
+  // pathToFileURL (not string concat): spaces/`#` in the install path must
+  // be %-encoded or the lazy pdf.js import resolves a broken URL.
+  const mod = (await import(pathToFileURL(file).href)) as PdfEngine & Record<string, unknown>;
   cachedEngine = mod;
   return mod;
 }

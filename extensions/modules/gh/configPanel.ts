@@ -49,7 +49,7 @@ function writeRunWatchTimeoutSecs(secs: number): string {
   return file;
 }
 
-export function buildGhGroups(runWatchTimeoutSecs: number): PanelGroup[] {
+export function buildGhGroups(working: { value: number }): PanelGroup[] {
   return [
     {
       key: "gh",
@@ -57,8 +57,11 @@ export function buildGhGroups(runWatchTimeoutSecs: number): PanelGroup[] {
       tab: "Tools",
       icon: "🐙",
       rows: [
-        row("gh.runWatchTimeoutSecs", "run_watch budget", "number", runWatchTimeoutSecs, (v) => {
-          runWatchTimeoutSecs = Math.max(10, Math.floor(Number(v)));
+        row("gh.runWatchTimeoutSecs", "run_watch budget", "number", working.value, (v) => {
+          // NaN guard is load-bearing: a garbage inline edit must not write
+          // NaN (JSON null) — leave the working value untouched instead.
+          const n = Math.floor(Number(v));
+          if (Number.isFinite(n)) working.value = Math.max(10, n);
         }, {
           defaultValue: DEFAULT_RUN_WATCH_TIMEOUT_SECS,
           description: "Seconds run_watch keeps polling a workflow run before reporting in-progress (capped at gh's 5-min command deadline).",
@@ -70,13 +73,13 @@ export function buildGhGroups(runWatchTimeoutSecs: number): PanelGroup[] {
 
 /** gh's ModuleConfig for the central /config panel. */
 export function ghConfig(_pi: ExtensionAPI): ModuleConfig {
-  let working = readRunWatchTimeoutSecs();
+  const working = { value: readRunWatchTimeoutSecs() };
   return {
     groups: () => buildGhGroups(working),
     save: async (edited, ctx: ExtensionContext) => {
       if (![...edited].some((k) => k.startsWith("gh."))) return;
-      const file = writeRunWatchTimeoutSecs(working);
-      ctx.ui.notify(`Saved gh.runWatchTimeoutSecs=${working} to ${file} (applies to the next run_watch call).`, "info");
+      const file = writeRunWatchTimeoutSecs(working.value);
+      ctx.ui.notify(`Saved gh.runWatchTimeoutSecs=${working.value} to ${file} (applies to the next run_watch call).`, "info");
     },
   };
 }

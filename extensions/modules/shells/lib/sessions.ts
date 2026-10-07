@@ -39,6 +39,8 @@ export class RingBuffer {
   private partial = ""; // unterminated tail not yet a line
   private totalBytes = 0;
   private lifetimeBytes = 0;
+  private lifetimeLineCount = 0; // complete lines ever pushed — never shrinks
+  private tailStart = 0; // once capped: index of the first tail line (the marker sits at tailStart - 1)
   private capped = false;
 
   push(chunk: string): void {
@@ -47,6 +49,7 @@ export class RingBuffer {
     this.partial = "";
     this.partial = parts.pop() ?? "";
     for (const line of parts) this.linesArr.push(line);
+    this.lifetimeLineCount += parts.length;
     this.totalBytes += Buffer.byteLength(chunk, "utf8");
     this.lifetimeBytes += Buffer.byteLength(chunk, "utf8");
     if (this.totalBytes > TOTAL_BYTES) this.enforceCap();
@@ -82,12 +85,38 @@ export class RingBuffer {
     }
     const droppedBytes = lineBytes(rest);
     this.linesArr = [...head, truncationMarker(Math.max(droppedBytes, 1)), ...tail];
+    this.tailStart = head.length + 1;
     this.totalBytes = lineBytes(this.linesArr);
   }
 
   /** Everything visible so far: complete lines plus the unterminated tail. */
   lines(): string[] {
     return this.capAware();
+  }
+
+  /** Complete lines ever pushed (lifetime — immune to cap shrinks). */
+  lifetimeLines(): number {
+    return this.lifetimeLineCount;
+  }
+
+  /**
+   * Visible lines pushed after lifetime line `seen` — the since:"last"
+   * cursor read. The cursor lives in lifetime space, so a cap shrink can
+   * never strand it above the window: unseen lines are the NEWEST ones,
+   * which the tail region (after the marker) always holds. When more lines
+   * arrived than the window kept, the whole recent region + marker returns
+   * instead of nothing; lines the cap dropped are simply gone.
+   */
+  linesSince(seen: number): string[] {
+    const behind = this.lifetimeLineCount - Math.max(0, seen);
+    if (behind <= 0) return [];
+    const all = this.capAware();
+    const hasPartial = this.partial !== "";
+    const completeCount = all.length - (hasPartial ? 1 : 0);
+    const floor = this.capped ? this.tailStart - 1 : 0; // never re-show the dropped middle / marker
+    const start = Math.max(floor, completeCount - behind);
+    const fresh = all.slice(start, completeCount);
+    return hasPartial ? [...fresh, this.partial] : fresh;
   }
 
   /** Bytes written to this stream over its lifetime (pre-truncation). */
@@ -106,7 +135,9 @@ export class RingBuffer {
   }
 
   private capAware(): string[] {
-    if (this.capped) return [...this.linesArr];
+    // The partial survives capping too: spinner/progress output that hasn't
+    // got its newline yet must stay visible once the head+tail split is on.
+    if (this.capped) return this.partial ? [...this.linesArr, this.partial] : [...this.linesArr];
     const out = this.partial ? [...this.linesArr, this.partial] : [...this.linesArr];
     return out;
   }
@@ -124,8 +155,9 @@ export interface ShellSession {
   exitCode?: number | null;
   stdout: RingBuffer;
   stderr: RingBuffer;
-  /** Output cursor for `since: "last"` — lines already returned by an output call. */
-  lastOutputOffset: number;
+  /** Per-stream output cursors for `since: "last"` — lines already returned by an output call. */
+  lastStdoutOffset: number;
+  lastStderrOffset: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -166,11 +198,17 @@ export function listSessionsLine(s: ShellSession): string {
 export function resolveSession(store: SessionStore, idOrName: string): ShellSession {
   const byId = store.get(idOrName);
   if (byId) return byId;
-  const byName = store.list().filter((s) => s.name === idOrName);
-  if (byName.length === 1) return byName[0]!;
+  // Prefer LIVE matches: restarting a session under the same name must not
+  // make the name ambiguous just because an old exited one lingers. Only
+  // when NO live match exists fall back to the full match list (original
+  // ambiguity semantics over exited sessions).
+  const all = store.list().filter((s) => s.name === idOrName);
+  const live = all.filter((s) => s.exitedAt === undefined);
+  const candidates = live.length > 0 ? live : all;
+  if (candidates.length === 1) return candidates[0]!;
   const listing = store.list().map(listSessionsLine).join("\n") || "(no sessions)";
-  if (byName.length > 1) {
-    throw new Error(`session name '${idOrName}' is ambiguous (${byName.length} sessions):\n${listing}`);
+  if (candidates.length > 1) {
+    throw new Error(`session name '${idOrName}' is ambiguous (${candidates.length} sessions):\n${listing}`);
   }
   throw new Error(`no session '${idOrName}'. Active sessions:\n${listing}`);
 }
@@ -214,6 +252,11 @@ export class SessionStore {
     this.map.delete(id);
   }
 
+  /** Drop every session (session_start: a fresh session can't reach old children). */
+  clear(): void {
+    this.map.clear();
+  }
+
   /** Remove the OLDEST exited session if more than 5 have accumulated. */
   evictOldestExited(): ShellSession | undefined {
     const exited = this.list().filter((s) => s.exitedAt !== undefined);
@@ -246,6 +289,16 @@ function signalProcessGroup(s: ShellSession, signal: NodeJS.Signals): void {
   // detached: true → the child leads its own process group; -pid signals the
   // whole group (the shell AND any grandchildren). Fall back to child.kill
   // when the group is gone (already reaped) or the call fails (Windows).
+  // pid 0 (spawn never succeeded) MUST NOT reach process.kill: kill(-0) ==
+  // kill(0) == SIGTERM for every process in pi's OWN group — host death.
+  if (s.pid <= 0) {
+    try {
+      s.child.kill(signal);
+    } catch {
+      // spawn never succeeded / already dead — exit handling deals with it
+    }
+    return;
+  }
   try {
     process.kill(-s.pid, signal);
   } catch {
@@ -307,7 +360,8 @@ export function createSession(
     startedAt: Date.now(),
     stdout: new RingBuffer(),
     stderr: new RingBuffer(),
-    lastOutputOffset: 0,
+    lastStdoutOffset: 0,
+    lastStderrOffset: 0,
   } as ShellSession); // placeholder so the live-cap check sees THIS session too
   const placeholder = store.list().at(-1)!;
   let child: ChildProcess;
@@ -333,11 +387,25 @@ export function createSession(
   store.replace(placeholder.id, session);
   child.stdout?.on("data", (d: Buffer) => session.stdout.push(d.toString()));
   child.stderr?.on("data", (d: Buffer) => session.stderr.push(d.toString()));
+  // A stdin write that races child exit EPIPEs; with no listener Node turns
+  // that into an uncaughtException killing pi. Contain and record instead.
+  child.stdin?.on("error", () => {
+    session.stderr.push("[shells] stdin write failed (process exited)");
+  });
   child.on("exit", (code) => {
     session.exitedAt = Date.now();
     session.exitCode = code;
   });
   child.on("error", (err: Error) => {
+    // Spawn failure (ENOENT cwd/binary) arrives as 'error' with pid undefined
+    // and NO 'exit'. Mark it exited so kill/killAll never signal a pid-0
+    // "process group" — which would hit pi's own group. Windows quirk:
+    // 'error' can also fire on a LIVE pid-carrying process (kill-EPIPE),
+    // so only the never-spawned case (no pid) counts as exit.
+    if (child.pid === undefined) {
+      session.exitedAt = Date.now();
+      session.exitCode = null;
+    }
     session.stderr.push(`[shells] spawn error: ${err.message}`);
   });
   return session;

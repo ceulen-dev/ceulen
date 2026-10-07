@@ -93,16 +93,59 @@ export function activeBgLogPaths(): string[] {
   return [...jobs.values()].map((j) => j.logPath);
 }
 
+// ponytail: test-only seam for the reload-sweep test (a real second load can't
+// run in one tsx process without re-import machinery); upgrade path is none —
+// delete with the test.
+/** Publish the module's registry on the globalThis slot and install the
+ *  process sweep, exactly as wrapWithAutoBg does at module use time. */
+export function installExitSweepForTests(): void {
+  installExitSweep();
+}
+
+/** Register a live job directly (sweeper fixture — skips the exec plumbing). */
+export function registerBgJobForTests(job: {
+  id: string;
+  logPath: string;
+  logTruncated?: boolean;
+}): void {
+  jobs.set(job.id, {
+    id: job.id,
+    command: "test",
+    controller: new AbortController(),
+    logPath: job.logPath,
+    tail: "",
+    logBytes: 0,
+    logTruncated: job.logTruncated ?? false,
+  });
+}
+
 // Process-death sweep: if pi dies while a job is live (SIGTERM, crash),
 // finishJob never runs and the log file would leak. Sync unlink is the only
 // thing allowed in an 'exit' handler. Hard SIGKILL remains uncleanable (tmp
 // cleaners bound it).
 let exitSweepInstalled = false;
 function installExitSweep(): void {
-  if (exitSweepInstalled) return;
+  // Key the once-guard on a globalThis slot: a module-level flag RESETS on
+  // /reload (fresh module instance) and then stacks duplicate exit/SIGTERM
+  // listeners on the same shared process (the theme-slot pattern).
+  const key = Symbol.for("ceulen.repair.bgExitSweep");
+  const armed = Symbol.for("ceulen.repair.bgExitSweep.armed");
+  // Registry indirection: every module load publishes its OWN jobs map, so the
+  // single installed sweep reads the CURRENT instance's registry. Without it
+  // the closure pins the first load's map and post-/reload jobs leak their
+  // tmp logs at process death. The armed marker lives in its own slot so it
+  // survives the swap (a marker inside the swapped object would re-arm on
+  // every third load).
+  // ponytail: ceiling closed here is /reload-only — a whole-new-process
+  // "reload" (fresh pi) has no shared listeners to reuse, and a KILLED
+  // instance's unswept map would need a tombstone list; neither exists today.
+  (globalThis as any)[key] = jobs;
+  if ((globalThis as any)[armed] || exitSweepInstalled) return;
   exitSweepInstalled = true;
+  (globalThis as any)[armed] = true;
   const sweep = () => {
-    for (const j of jobs.values()) {
+    const cur = (globalThis as any)[key] as Map<string, BgJob> | undefined;
+    for (const j of (cur ?? jobs).values()) {
       if (j.logTruncated) continue;
       try { unlinkSync(j.logPath); } catch {}
     }

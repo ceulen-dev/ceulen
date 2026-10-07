@@ -14,12 +14,13 @@ import {
   mergeHeat,
   plainContent,
   rankedHeat,
+  readTextFile,
   selectWindows,
   sketch,
   windows,
 } from "../lib/tree.js";
 import { entryKey, passageKey, nameBatch, sketchBatch, passageBatch, type Judge, type Request } from "../lib/questions.js";
-import { runCascade, type CascadeOptions } from "../lib/cascade.js";
+import { runCascade, scopeFiles, type CascadeOptions } from "../lib/cascade.js";
 
 const dir = mkdtempSync(path.join(tmpdir(), "ceulen-jfind-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -301,5 +302,59 @@ describe("cascade", () => {
       runCascade({ root: proj, query: "spawn", extraKeywords: [], judge, signal: controller.signal }),
       /aborted/,
     );
+  });
+
+  it("a SINGLE-FILE path scope judges that file (B10 — was a silent no-hits)", async () => {
+    const judge = fakeJudge("src/spawn.ts");
+    const result = await runCascade({
+      root: path.join(proj, "src", "spawn.ts"),
+      query: "spawn a child process",
+      extraKeywords: [],
+      judge,
+    });
+    assert.equal(result.stats.listed, 1, "the file itself is the one entry");
+    assert.ok(result.hits.length >= 1, `hits: ${JSON.stringify(result.hits)}`);
+    assert.equal(result.hits[0]!.rel, "spawn.ts");
+  });
+
+  it("an ineligible single-file scope lists zero files", () => {
+    writeFileSync(path.join(proj, "logo.png"), "not text");
+    assert.deepEqual(scopeFiles(path.join(proj, "logo.png")), []);
+    const one = scopeFiles(path.join(proj, "src", "spawn.ts"));
+    assert.equal(one.length, 1);
+    assert.equal(one[0]!.rel, "spawn.ts");
+  });
+
+  it("grepIndex reads a BOUNDED prefix, not the whole file (B11)", async () => {
+    // 3 MB file: needle within the 2 MB SCAN_READ_CAP, and one beyond it when
+    // the caller raises scanLimitBytes above the cap.
+    const big = path.join(dir, "scan-big.log");
+    const head = Buffer.from("spawn early\n");
+    const filler = Buffer.alloc(1024 * 1024, 0x78); // 'x'
+    writeFileSync(big, Buffer.concat([head, filler, Buffer.from("spawn late\n")]));
+    const files = new Map([["scan-big.log", big]]);
+    // scanLimitBytes 3 MB > the 2 MB read cap: the cap wins, the 2 MB+ hit is NOT counted.
+    const capped = await grepIndex(dir, ["spawn"], { files, scanLimitBytes: 3 * 1024 * 1024 });
+    const counts = capped.perFileKw.get("scan-big.log");
+    assert.ok(counts, "within-cap hit counted");
+    assert.ok(counts![0]! >= 1, "the early spawn counted");
+    assert.equal(capped.filesScanned, 1);
+    // Default 512 KB scan limit on the same file: works, no whole-file read.
+    const small = await grepIndex(dir, ["spawn"], { files });
+    assert.ok(small.perFileKw.get("scan-big.log")![0]! >= 1);
+  });
+
+  it("readTextFile caps its read even when maxBytes is huge (B11)", () => {
+    const big = path.join(dir, "read-big.txt");
+    writeFileSync(big, Buffer.concat([Buffer.from("head\n"), Buffer.alloc(5 * 1024 * 1024, 0x61)]));
+    // maxBytes far above the 4 MB READ_OPEN_CAP: the read is capped and flagged truncated.
+    const huge = readTextFile(big, 8 * 1024 * 1024);
+    assert.equal(huge.truncated, true, "beyond-cap read flags truncation");
+    assert.ok(Buffer.byteLength(huge.text) <= 4 * 1024 * 1024, "text stays within the open cap");
+    assert.match(huge.text, /^head\n/);
+    // Normal path unchanged: 1 KB slice of the same file.
+    const sliced = readTextFile(big, 1024);
+    assert.equal(sliced.truncated, true);
+    assert.ok(Buffer.byteLength(sliced.text) <= 1024 + 8, "slice ends on a line boundary");
   });
 });

@@ -67,7 +67,7 @@ function harness(
   finder: any,
   mode?: string,
   extraFlags: Record<string, unknown> = {},
-  options: { cwd?: string; create?: (params: any) => any; excludedTools?: string[] } = {},
+  options: { cwd?: string; create?: (params: any) => any; excludedTools?: string[]; throwOnTool?: string } = {},
 ) {
   (FileFinder as any).create = (params: any) => ({
     ok: true,
@@ -77,13 +77,17 @@ function harness(
   const commands = new Map<string, any>();
   const events = new Map<string, Function[]>();
   const flags = new Map<string, unknown>(Object.entries(extraFlags));
+  const notifies: string[] = [];
   let activeTools = ["read", "bash", "edit", "write"];
   if (mode) flags.set("fff-mode", mode);
   let flagsReady = false;
   const pi = {
     getFlag: (name: string) => flagsReady ? flags.get(name) : undefined,
     registerFlag: () => {},
-    registerTool: (tool: any) => tools.set(tool.name, tool),
+    registerTool: (tool: any) => {
+      if (tool.name === options.throwOnTool) throw new Error(`ceulen: tool "${tool.name}" already owned by another module`);
+      tools.set(tool.name, tool);
+    },
     registerCommand: (name: string, command: any) => commands.set(name, command),
     on: (name: string, handler: Function) => events.set(name, [...(events.get(name) ?? []), handler]),
     getAllTools: () => [...tools.values()]
@@ -94,9 +98,9 @@ function harness(
   };
   fffExtension(pi as any);
   flagsReady = true;
-  const ctx = { cwd: options.cwd ?? process.cwd(), ui: { notify: () => {}, addAutocompleteProvider: () => {} } };
+  const ctx = { cwd: options.cwd ?? process.cwd(), ui: { notify: (m: string) => notifies.push(m), addAutocompleteProvider: () => {} } };
   const started = events.get("session_start")?.[0]({}, ctx);
-  return { tools, commands, events, flags, started, setActiveTools: (names: string[]) => { activeTools = [...names]; }, get activeTools() { return activeTools; } };
+  return { tools, commands, events, flags, started, notifies, setActiveTools: (names: string[]) => { activeTools = [...names]; }, get activeTools() { return activeTools; } };
 }
 
 async function run(tool: any, params: any) {
@@ -571,6 +575,29 @@ describe("pi-fff tools", () => {
     assert.strictEqual(result.details.truncation.truncated, true);
     assert.ok((text(result)).includes("[Output truncated:"));
     assert.ok(result.details.truncation.outputLines <= 2000);
+  });
+
+  it("override mode degrades per tool when a name is already claimed (guarded collision)", async () => {
+    // registerTool throwing on "grep" simulates the bundle guarded() map:
+    // repair wrapped the builtin first. The throw must cost ONLY grep —
+    // resolve_file / fff_multi_grep / related_files still register and the
+    // session_start handler settles without an init failure.
+    const { tools, started, notifies } = harness(fakeFinder(), "override", {}, { throwOnTool: "grep" });
+    await started;
+    assert.ok(!tools.has("grep"));
+    for (const name of ["find", "resolve_file", "fff_multi_grep", "related_files"]) {
+      assert.ok(tools.has(name), `expected ${name} to register despite the grep collision`);
+    }
+    assert.ok(notifies.some((m) => m.includes("skipped") && m.includes("grep")));
+    assert.ok(!notifies.some((m) => m.includes("init failed")));
+  });
+
+  it("normal mode registers everything and never emits a skipped note", async () => {
+    const { tools, notifies } = harness(fakeFinder());
+    for (const name of ["ffgrep", "fffind", "resolve_file", "fff_multi_grep", "related_files"]) {
+      assert.ok(tools.has(name), `expected ${name} to register`);
+    }
+    assert.ok(!notifies.some((m) => m.includes("skipped")));
   });
 });
 

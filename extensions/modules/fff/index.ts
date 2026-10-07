@@ -427,6 +427,10 @@ export default function fffExtension(pi: ExtensionAPI) {
   let toolsRegistered = false;
   let autocompleteRegistered = false;
   let disabledTools: Set<string> = new Set();
+  // Names registerBoundedTool could not claim this session (another
+  // extension's guarded() owns them). One dim note after the loop instead of
+  // a first-throw unwind — a single collision must not cost the whole toolset.
+  let skippedTools: string[] = [];
 
   function resolveRuntimeConfig() {
     // Pi populates extension flag values only after loading extension factories.
@@ -977,6 +981,9 @@ export default function fffExtension(pi: ExtensionAPI) {
       activeCwd = ctx.cwd;
       resolveRuntimeConfig();
       registerTools();
+      if (skippedTools.length > 0) {
+        ctx.ui.notify(`FFF: skipped ${skippedTools.join(", ")} — name already claimed by another extension.`, "info");
+      }
       if (currentMode === "override") {
         const available = new Set(pi.getAllTools().map((tool) => tool.name));
         const active = pi.getActiveTools();
@@ -1003,6 +1010,7 @@ export default function fffExtension(pi: ExtensionAPI) {
     if (toolsRegistered) return;
     toolsRegistered = true;
     disabledTools = readDisabledTools();
+    skippedTools = [];
 
   // --- Shared render helpers ---
 
@@ -1034,6 +1042,17 @@ export default function fffExtension(pi: ExtensionAPI) {
   };
 
   const registerBoundedTool = (tool: any) => {
+    const name = tool.name as string;
+    try {
+      registerOneBoundedTool(tool);
+    } catch {
+      // Collision (usually repair's guarded() owning the builtin name in
+      // override mode): skip THIS tool, keep registering the rest.
+      skippedTools.push(name);
+    }
+  };
+
+  const registerOneBoundedTool = (tool: any) => {
     const execute = tool.execute;
     // Per-tool kill-switch (ceulen.disabledTools): rows use canonical names
     // (ffgrep/fffind); override mode registers grep/find, so map before the

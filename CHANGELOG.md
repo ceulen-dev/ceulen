@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.14.0 — 2026-10-08
+
+Review-wave hardening across 7 modules (round-3 findings), 8 new regression
+suites, tests now 2792 (was 2750):
+
+- **gh**: the `/config` run_watch row passed its working value BY VALUE — the
+  row setter rebound its parameter and every save wrote the original value
+  back with a false "Saved" notify (the module's only setting was silently
+  unwritable). Now the todo-module `{ value }` box pattern with a load-bearing
+  NaN guard (a garbage inline edit can no longer write JSON `null`);
+  round-trip tests drive row edit → save → settings.json.
+- **fff**: in override mode a `guarded()` collision on `grep`/`find` (repair
+  owns the wrapped builtins) aborted the whole registration loop — override
+  mode lost resolve_file/fff_multi_grep/related_files along with the two
+  colliding names. Registration now degrades PER TOOL with one dim notify
+  naming the skipped tools; normal mode unchanged.
+- **repair** (archive/sqlite/guard hardening): `pkg.tgz:src/x.ts:50-80` peels
+  the trailing lines-selector BEFORE the member lookup (member+range reads
+  were reporting "no member matching"); guard × archive-member reads resolve
+  the real target path; tar option-injection gate (member names starting with
+  `-` are refused); the auto-generated write guard handles relative paths
+  correctly; ascii rename-arrow target paths in read notices.
+- **shells**: `since:"last"` cursors moved to LIFETIME line counts — a
+  ring-cap shrink could strand an index cursor and permanently black out
+  output; per-stream cursors (one shared offset duplicated stderr when stdout
+  was longer); `kill` refuses pid 0 (`kill(-0)` would SIGTERM pi's own
+  process group); session-name resolution prefers LIVE matches over lingering
+  exited ones; session_start clear via `store.clear()`.
+- **jfind**: file reads respect `scanLimitBytes`/`maxBytes` byte caps with
+  truncation flags (a 3 MB file was read whole); a single-file scope that
+  lists zero eligible files surfaces the eligibility refusal instead of a
+  silent "no hits".
+- **a2a**: `A2A_MAX_CONCURRENT` is now read from process env (declared env
+  parity) and a garbage/`0` value falls back to the default instead of
+  zeroing the admission pool (which would reject every inbound task).
+- **web/read_pdf**: the lazy pdf.js engine import goes through `pathToFileURL`
+  — an unencoded `file://` string broke on spaces in the install path.
+- Tests: +8 regression suites/files — gh config row round-trip, fff guarded-
+  collision degrade, repair hardening (A1/A2/A4/A6/A9), repair auto-bg +
+  settings, shells output/store wiring, web pdf pathToFileURL, a2a env parity,
+  jfind caps.
+
 ## 0.13.0 — 2026-10-08
 
 - **Tool-parity wave** (8h OMP/industry survey plan): 4 new modules + 4

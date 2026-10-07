@@ -1,12 +1,15 @@
 // repair's /config contribution — Tools tab, Repair section.
 //
-// The working copy is the EFFECTIVE settings (global agent-dir file, trusted
-// project file over it); saving writes the `repair` section back to the
-// GLOBAL settings.json. The three tool-call-time toggles apply to the next
-// turn (settings are read per tool call); the two bash keys bind at module
-// load, hence the "next session" warning. The config module AUTO-prepends the
-// Enable row and appends the per-tool toggle rows (apply_patch /
-// str_replace_editor from the registry entry) — none of those are declared here.
+// The working copy mirrors the GLOBAL settings.json `repair` section (the
+// file this panel writes); readRepairSettings() without a cwd is exactly the
+// global layer. The trusted-project layer stays visible: the save notify
+// discloses when a project file shadows the global save (projectShadow), the
+// same contract as the other global-writing panels (advisor, subagent, a2a).
+// The three tool-call-time toggles apply to the next turn (settings are read
+// per tool call); the two bash keys bind at module load, hence the "next
+// session" warning. The config module AUTO-prepends the Enable row and
+// appends the per-tool toggle rows (apply_patch / str_replace_editor from the
+// registry entry) — none of those are declared here.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { row, type PanelGroup } from "../../lib/panel.js";
@@ -95,7 +98,7 @@ export function repairConfig(_pi: ExtensionAPI): ModuleConfig {
         notes.push("The bash description + auto-background mechanics bind at session start — that change applies to the next session.");
       }
       const shadowed = projectShadow(ctx.cwd, ctx.isProjectTrusted?.() === true);
-      if (shadowed) notes.push(`This project's .pi/settings.json sets "repair" — the project layer overrides this save.`);
+      if (shadowed) notes.push(`This project's .pi/settings.json sets "repair" — the project layer overrides this save (project values stay authoritative at runtime).`);
       ctx.ui.notify(notes.join(" "), shadowed ? "warning" : "info");
     },
   };

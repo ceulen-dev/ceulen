@@ -7,11 +7,16 @@
 // (autoBg / autoBgSecs) are the exception: the wrapped bash description and
 // the auto-background mechanics bind ONCE at module load, so those rows take
 // effect on the next session.
+//
+// ponytail: the reader used to take a pi ExtensionContext, but every runtime
+// call site lacked one at read time, leaving the trusted-project layer dead;
+// cwd is the minimal honest input (pi's trust semantics come from
+// lib/registry.js isProjectTrusted — the rule the other settings readers use).
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isProjectTrusted } from "../../../lib/registry.js";
 
 export interface RepairSettings {
   /** Schema-driven argument repair (invalid/truncated JSON, param aliases). */
@@ -73,15 +78,21 @@ export function settingsPath(): string {
   return path.join(agentDir(), "settings.json");
 }
 
-/** Effective repair settings: global agent-dir file ⊕ trusted project overlay. */
-export function readRepairSettings(ctx?: ExtensionContext): RepairSettings {
+/** Effective repair settings: global agent-dir file ⊕ trusted project overlay.
+ *  `cwd` opts the caller into the project layer: only when <cwd> is TRUSTED
+ *  does `<cwd>/.pi/settings.json` override the global file field-wise.
+ *  Runtime call sites pass the execute/hook cwd; ctx-less calls (prepareArguments
+ *  has none) read the global layer only. */
+export function readRepairSettings(cwd?: string): RepairSettings {
   const out: RepairSettings = { ...DEFAULT_REPAIR_SETTINGS };
   mergeLayer(out, readJson(settingsPath()));
-  try {
-    if (ctx?.isProjectTrusted?.()) {
-      mergeLayer(out, readJson(path.join(ctx.cwd, ".pi", "settings.json")));
-    }
-  } catch { /* untrusted or ctx without cwd — global only */ }
+  if (cwd) {
+    try {
+      if (isProjectTrusted(cwd)) {
+        mergeLayer(out, readJson(path.join(cwd, ".pi", "settings.json")));
+      }
+    } catch { /* untrusted or unreadable — global only */ }
+  }
   return out;
 }
 

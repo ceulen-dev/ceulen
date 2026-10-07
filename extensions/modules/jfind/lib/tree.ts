@@ -5,7 +5,7 @@
 
 import { lines, clipBytes, countOccurrences } from "./lexical.js";
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // ── eligibility deny-lists (tree.ts, verbatim) ──────────────────────────────
@@ -327,13 +327,33 @@ export interface ReadText {
 }
 
 const BINARY_PROBE_BYTES = 8192;
+/** ponytail: open + read at most this many bytes — a multi-GB file must not
+ *  buffer whole before the maxBytes slice (the binary probe sits inside it). */
+const READ_OPEN_CAP = 4 * 1024 * 1024;
 
-/** Read up to `maxBytes` of a text file; rejects binaries and blank files. */
+/** Read up to `maxBytes` of a text file; rejects binaries and blank files.
+ *  The underlying read is capped at READ_OPEN_CAP bytes regardless of maxBytes
+ *  (beyond-cap callers already ask for ≤ READ_LIMIT, so only the OOM case
+ *  changes); a short read at the cap flags `truncated`. */
 export function readTextFile(absPath: string, maxBytes: number): ReadText {
-  let buf = readFileSync(absPath);
+  const want = Math.min(maxBytes, READ_OPEN_CAP);
+  const fd = openSync(absPath, "r");
+  let buf: Buffer;
+  let total = 0;
+  try {
+    buf = Buffer.alloc(want);
+    while (total < want) {
+      const n = readSync(fd, buf, total, want - total, total);
+      if (n === 0) break;
+      total += n;
+    }
+    buf = buf.subarray(0, total);
+  } finally {
+    closeSync(fd);
+  }
   const probe = buf.subarray(0, Math.min(buf.length, BINARY_PROBE_BYTES));
   if (probe.includes(0)) throw new Error("binary");
-  const truncated = buf.length > maxBytes;
+  const truncated = total >= want && (maxBytes > want || readSizeExceeds(absPath, want));
   if (truncated) {
     buf = buf.subarray(0, maxBytes);
     const newline = buf.lastIndexOf(0x0a);
@@ -342,6 +362,16 @@ export function readTextFile(absPath: string, maxBytes: number): ReadText {
   const text = buf.toString("utf8");
   if (lines(text).every((line) => line.trim().length === 0)) throw new Error("empty");
   return { text, truncated };
+}
+
+/** Size check for the exact-cap edge (read filled `want` — is there more?).
+ *  Only consulted when maxBytes === the read cap. */
+function readSizeExceeds(absPath: string, cap: number): boolean {
+  try {
+    return statSync(absPath).size > cap;
+  } catch {
+    return false;
+  }
 }
 
 /**

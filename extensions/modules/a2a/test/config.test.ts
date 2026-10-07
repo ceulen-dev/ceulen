@@ -347,6 +347,33 @@ childTranscripts: false,
     });
   });
 
+  it("reads A2A_MAX_CONCURRENT from process env (declared env parity)", () => {
+    withIsolatedPiDir((dir) => {
+      const cases: Array<[string | undefined, number]> = [
+        ["6", 6],
+        [undefined, DEFAULTS().server.maxConcurrent],
+        // num() parses "0" as the finite 0 — the admission pool must fall
+        // back to the default rather than zeroing (a 0 pool rejects every
+        // inbound task). Same spirit as the repo-injection guard: garbage
+        // never widens or disables the ceiling.
+        ["abc", DEFAULTS().server.maxConcurrent],
+        ["0", DEFAULTS().server.maxConcurrent],
+      ];
+      for (const [value, expected] of cases) {
+        const saved = process.env.A2A_MAX_CONCURRENT;
+        if (value === undefined) delete process.env.A2A_MAX_CONCURRENT;
+        else process.env.A2A_MAX_CONCURRENT = value;
+        try {
+          const cfg = loadConfig({ cwd: dir });
+          assert.equal(cfg.server.maxConcurrent, expected, `A2A_MAX_CONCURRENT=${value}`);
+        } finally {
+          if (saved === undefined) delete process.env.A2A_MAX_CONCURRENT;
+          else process.env.A2A_MAX_CONCURRENT = saved;
+        }
+      }
+    });
+  });
+
   it("reads settings.json a2a key", () => {
     withIsolatedPiDir((dir) => {
       fs.mkdirSync(path.join(dir, ".pi"), { recursive: true });

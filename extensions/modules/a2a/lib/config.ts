@@ -372,6 +372,13 @@ function num(v: any, fallback: number): number {
   return Number.isFinite(n) ? n : fallback;
 }
 
+/** num() that refuses values < 1 — a zeroed admission pool would reject
+ *  every inbound task, so garbage/0 falls back instead. */
+function numPositive(v: any, fallback: number): number {
+  const n = num(v, fallback);
+  return n >= 1 ? n : fallback;
+}
+
 function bool(v: any, fallback: boolean): boolean {
   if (typeof v === "boolean") return v;
   if (typeof v === "string") return /^(1|true|yes|on)$/i.test(v.trim());
@@ -428,7 +435,14 @@ export function loadConfig(opts: {
   cfg.server.portFallback = num(srv.portFallback ?? env.A2A_PORT_FALLBACK, DEFAULTS.server.portFallback);
   cfg.server.host = String(srv.host ?? env.A2A_HOST ?? DEFAULTS.server.host);
   cfg.server.workspace = String(srv.workspace ?? "");
-  cfg.server.maxConcurrent = num(srv.maxConcurrent, DEFAULTS.server.maxConcurrent);
+  // Env parity with the siblings above (A2A_REPLY_TIMEOUT / A2A_ASYNC_TIMEOUT):
+  // SECURITY_ENV_KEYS + the panel row declare A2A_MAX_CONCURRENT, so the
+  // resolver must read it. numPositive keeps a garbage/"0" value from zeroing
+  // the admission pool.
+  cfg.server.maxConcurrent = numPositive(
+    srv.maxConcurrent ?? env.A2A_MAX_CONCURRENT,
+    DEFAULTS.server.maxConcurrent,
+  );
   cfg.server.replyTimeoutSec = num(srv.replyTimeoutSec ?? env.A2A_REPLY_TIMEOUT, DEFAULTS.server.replyTimeoutSec);
   cfg.server.asyncTimeoutSec = num(srv.asyncTimeoutSec ?? env.A2A_ASYNC_TIMEOUT, DEFAULTS.server.asyncTimeoutSec);
   cfg.server.agentName = String(srv.agentName ?? env.A2A_AGENT_NAME ?? "");

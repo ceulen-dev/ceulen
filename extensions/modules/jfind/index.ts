@@ -28,7 +28,8 @@ export default function jfindModule(pi: ExtensionAPI): void {
     description:
       "Semantic code find: describe a BEHAVIOR (\"where do we parse CLI flags\", \"retry with backoff around provider calls\") and get the files and line ranges that implement it, strongest first. " +
       "A lexical keyword scan ranks candidates, then a System One judge (the router's classifier models) ranks filenames, passage sketches, and full passages in three waves. " +
-      "Use when grep/ffgrep can't phrase the search as a literal pattern; needs a classifier model to be configured (router catalog). Slower than grep (a few seconds of judging).",
+      "Use when grep/ffgrep can't phrase the search as a literal pattern; needs a classifier model to be configured (router catalog). Slower than grep (a few seconds of judging). " +
+      "The `path` scope accepts a directory OR a single file (a deny-listed/binary/secret/empty file is refused with a reason).",
     promptSnippet: "Semantic find: locate code by describing what it does",
     promptGuidelines: [
       "Describe the behavior, not the keywords: jfind judges passages semantically.",
@@ -80,6 +81,14 @@ export default function jfindModule(pi: ExtensionAPI): void {
           throw new Error(`jfind timed out after ${Math.round(FIND_TIMEOUT_MS / 1000)}s — narrow the query or scope (path param)`);
         }
         throw err;
+      }
+      // A single-file scope that lists zero eligible files used to fall through
+      // to a silent "no hits" — surface the eligibility refusal instead.
+      if (result.stats.listed === 0 && scopeInput.length > 0 && statSync(root).isFile()) {
+        return {
+          content: [{ type: "text", text: `not searchable: ${scopeInput} (deny-listed, binary, secret, or empty by jfind's eligibility rules)` }],
+          details: { query },
+        };
       }
       const { stats, threshold, keywords } = result;
       const scope = scopeInput.length > 0 ? ` in ${scopeInput}` : "";

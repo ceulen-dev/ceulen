@@ -4,6 +4,9 @@
 
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import {
   formatGhFailure,
   ghAvailable,
@@ -276,5 +279,63 @@ describe("dispatcher + availability", () => {
       formatGhFailure(["repo", "view"], "", "fatal: not a git repository", { repoProvided: true } satisfies GhCommandOptions),
       "fatal: not a git repository",
     );
+  });
+});
+
+describe("/config row (run_watch budget)", () => {
+  // Round-trip: the row setter mutates a SHARED { value } object (the
+  // todo-module pattern) so the save path persists what was edited — a
+  // by-value parameter made the setting silently unwritable (round-3 P2).
+  it("row.set writes through to the working copy; garbage input keeps it", async () => {
+    const { buildGhGroups } = await import("../configPanel.ts");
+    const working = { value: 600 };
+    const row0 = buildGhGroups(working)[0]!.rows[0]!;
+    assert.equal(row0.key, "gh.runWatchTimeoutSecs");
+    assert.equal(row0.value, 600);
+
+    row0.set("900");
+    assert.equal(working.value, 900);
+    row0.set(1200);
+    assert.equal(working.value, 1200);
+
+    // NaN guard: a garbage inline edit leaves the working value untouched
+    // (a NaN would JSON-serialize to null and silently reset the setting).
+    row0.set("garbage");
+    assert.equal(working.value, 1200);
+    // Floor: sub-10 values clamp to 10.
+    row0.set(5);
+    assert.equal(working.value, 10);
+  });
+
+  it("save() persists the edited working value and notifies; no owned key = no-op", async () => {
+    const { ghConfig } = await import("../configPanel.ts");
+    const home = process.env.PI_CODING_AGENT_DIR;
+    const dir = mkdtempSync(join(tmpdir(), "gh-config-"));
+    process.env.PI_CODING_AGENT_DIR = dir;
+    try {
+      const cfg = ghConfig({} as never);
+      // Drive the row the panel drives it: build groups, edit, save.
+      const row0 = cfg.groups()[0]!.rows[0]!;
+      row0.set("900");
+
+      const notes: string[] = [];
+      await cfg.save(new Set(["gh.runWatchTimeoutSecs"]), {
+        ui: { notify: (m: string) => notes.push(m) },
+      } as never);
+      const persisted = JSON.parse(readFileSync(join(dir, "settings.json"), "utf8"));
+      assert.equal(persisted.gh.runWatchTimeoutSecs, 900);
+      assert.match(notes[0] ?? "", /runWatchTimeoutSecs=900/);
+
+      // No owned edited key → no write.
+      await cfg.save(new Set(["other.key"]), {
+        ui: { notify: (m: string) => notes.push(m) },
+      } as never);
+      assert.equal(JSON.parse(readFileSync(join(dir, "settings.json"), "utf8")).gh.runWatchTimeoutSecs, 900);
+      assert.equal(notes.length, 1);
+    } finally {
+      if (home === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = home;
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });

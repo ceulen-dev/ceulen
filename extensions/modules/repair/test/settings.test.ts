@@ -7,7 +7,6 @@ import { after, beforeEach, describe, it } from "node:test";
 import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
 import {
   DEFAULT_REPAIR_SETTINGS,
   projectShadow,
@@ -29,14 +28,17 @@ async function tempDir(): Promise<string> {
   return dir;
 }
 
-function trustedCtx(cwdPath: string, trusted = true): ExtensionContext {
-  return { cwd: cwdPath, isProjectTrusted: () => trusted } as unknown as ExtensionContext;
+/** The settings reader resolves trust via lib/registry isProjectTrusted —
+ *  <agentDir>/trust.json. Write the trust entry instead of a ctx stub. */
+async function setProjectTrust(trusted: boolean): Promise<void> {
+  await writeFile(join(agentDir, "trust.json"), JSON.stringify({ [cwd]: trusted }));
 }
 
 beforeEach(async () => {
   agentDir = await tempDir();
   cwd = await tempDir();
   process.env.PI_CODING_AGENT_DIR = agentDir;
+  await setProjectTrust(true);
 });
 
 after(async () => {
@@ -56,12 +58,12 @@ async function writeProject(cwdPath: string, repair: unknown): Promise<void> {
 
 describe("readRepairSettings", () => {
   it("defaults: repair on, guards on, autoBg off @120s", () => {
-    assert.deepEqual(readRepairSettings(trustedCtx(cwd)), DEFAULT_REPAIR_SETTINGS);
+    assert.deepEqual(readRepairSettings(cwd), DEFAULT_REPAIR_SETTINGS);
   });
 
   it("reads the global agent-dir `repair` section", async () => {
     await writeGlobal({ arguments: false, autoBg: true, autoBgSecs: 30 });
-    const s = readRepairSettings(trustedCtx(cwd));
+    const s = readRepairSettings(cwd);
     assert.equal(s.arguments, false);
     assert.equal(s.autoBg, true);
     assert.equal(s.autoBgSecs, 30);
@@ -71,7 +73,7 @@ describe("readRepairSettings", () => {
   it("trusted project file overrides the global layer field-wise", async () => {
     await writeGlobal({ guards: false, autoBgSecs: 30 });
     await writeProject(cwd, { guards: true, autoBgSecs: 45, autoBg: true });
-    const s = readRepairSettings(trustedCtx(cwd));
+    const s = readRepairSettings(cwd);
     assert.equal(s.guards, true, "project wins");
     assert.equal(s.autoBgSecs, 45, "project wins");
     assert.equal(s.autoBg, true, "project-only key");
@@ -80,29 +82,36 @@ describe("readRepairSettings", () => {
   it("an UNTRUSTED project file is ignored entirely", async () => {
     await writeGlobal({ guards: false });
     await writeProject(cwd, { guards: true, autoBg: true });
-    const s = readRepairSettings(trustedCtx(cwd, false));
+    await setProjectTrust(false);
+    const s = readRepairSettings(cwd);
     assert.equal(s.guards, false, "global value survives an untrusted project");
     assert.equal(s.autoBg, false);
+    await setProjectTrust(true); // restore for the later suites
+  });
+
+  it("no cwd argument → global layer only (ctx-less callers)", async () => {
+    await writeProject(cwd, { autoBgSecs: 45 });
+    assert.equal(readRepairSettings().autoBgSecs, 120, "project layer skipped without cwd");
   });
 
   it("clamps autoBgSecs: fractional floors to ≥1, garbage falls back", async () => {
     await writeGlobal({ autoBgSecs: 0.5 });
-    assert.equal(readRepairSettings(trustedCtx(cwd)).autoBgSecs, 1, "0.5 → floor 0 → clamped to 1");
+    assert.equal(readRepairSettings(cwd).autoBgSecs, 1, "0.5 → floor 0 → clamped to 1");
     await writeGlobal({ autoBgSecs: -10 });
-    assert.equal(readRepairSettings(trustedCtx(cwd)).autoBgSecs, 1);
+    assert.equal(readRepairSettings(cwd).autoBgSecs, 1);
     await writeGlobal({ autoBgSecs: "abc" });
-    assert.equal(readRepairSettings(trustedCtx(cwd)).autoBgSecs, 120, "non-number → default");
+    assert.equal(readRepairSettings(cwd).autoBgSecs, 120, "non-number → default");
     await writeGlobal({ autoBgSecs: 30.9 });
-    assert.equal(readRepairSettings(trustedCtx(cwd)).autoBgSecs, 30);
+    assert.equal(readRepairSettings(cwd).autoBgSecs, 30);
   });
 
   it("ignores wrong-typed booleans and a corrupt file", async () => {
     await writeGlobal({ arguments: "yes", guards: 0 });
-    let s = readRepairSettings(trustedCtx(cwd));
+    let s = readRepairSettings(cwd);
     assert.equal(s.arguments, true);
     assert.equal(s.guards, true);
     await writeFile(settingsPath(), "{ not json");
-    s = readRepairSettings(trustedCtx(cwd));
+    s = readRepairSettings(cwd);
     assert.deepEqual(s, DEFAULT_REPAIR_SETTINGS);
   });
 });
@@ -130,6 +139,36 @@ describe("projectShadow", () => {
     await writeProject(cwd, { guards: false });
     assert.equal(projectShadow(cwd, true), true);
     assert.equal(projectShadow(cwd, false), false, "untrusted files are ignored (and never load)");
+  });
+});
+
+describe("tool_call honors the trusted-project layer (A5 e2e)", () => {
+  it("project autoGenGuard:false blocks a guarded write through the REAL wrapped tool", async () => {
+    await writeGlobal({}); // global layer silent
+    await writeProject(cwd, { autoGenGuard: false });
+    const { wrapToolDefinition } = await import("../index.js");
+    const { createWriteToolDefinition } = await import("@earendil-works/pi-coding-agent");
+    const wrapped = wrapToolDefinition(createWriteToolDefinition(cwd), createWriteToolDefinition, () => false, () => {});
+    const res: any = await wrapped.execute("t1", { path: join(cwd, "package-lock.json"), content: "{}" }, undefined, undefined, { cwd });
+    assert.equal(res.isError, undefined, "project layer OFF → guard must NOT fire, write lands");
+    assert.match(await readFile(join(cwd, "package-lock.json"), "utf8"), /\{\}/);
+    // And with the project layer silent again, the same write is refused.
+    await rm(join(cwd, ".pi"), { recursive: true, force: true });
+    const res2: any = await wrapped.execute("t2", { path: join(cwd, "package-lock.json"), content: "{}" }, undefined, undefined, { cwd });
+    assert.equal(res2.isError, true);
+    assert.match(res2.content[0].text, /auto-generated/);
+  });
+
+  it("an UNTRUSTED project file never reaches the guard", async () => {
+    await setProjectTrust(false);
+    await writeGlobal({});
+    await writeProject(cwd, { autoGenGuard: false });
+    const { wrapToolDefinition } = await import("../index.js");
+    const { createWriteToolDefinition } = await import("@earendil-works/pi-coding-agent");
+    const wrapped = wrapToolDefinition(createWriteToolDefinition(cwd), createWriteToolDefinition, () => false, () => {});
+    const res: any = await wrapped.execute("t3", { path: join(cwd, "yarn.lock"), content: "{}" }, undefined, undefined, { cwd });
+    assert.equal(res.isError, true);
+    assert.match(res.content[0].text, /auto-generated/, "untrusted project layer ignored — global/default governs");
   });
 });
 
