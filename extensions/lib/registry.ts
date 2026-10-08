@@ -38,6 +38,7 @@ import uxModule, { uxConfig } from "../modules/ux/index.ts";
 import serenaModule from "../modules/serena/index.ts";
 import fffModule from "../modules/fff/index.ts";
 import rtkModule from "../modules/rtk/index.ts";
+import { rtkConfig } from "../modules/rtk/configPanel.ts";
 import muninModule from "../modules/munin/index.ts";
 import { muninConfig } from "../modules/munin/configPanel.ts";
 import webModule from "../modules/web/index.ts";
@@ -213,7 +214,7 @@ export const MODULES: ModuleEntry[] = [
   // serena/web/rtk then append to. rtk (a prompt rewriter — it appends the
   // RTK note) loads BEFORE this entry; nothing after steering touches the
   // prompt — do not move rtk back after it or add a prompt rewriter here.
-  { name: "rtk", category: "Shell", describe: "Route shell commands through RTK for token savings.", load: rtkModule },
+  { name: "rtk", category: "Shell", describe: "Route shell commands through RTK where RTK supports them; chains and unsupported commands pass through.", load: rtkModule, config: rtkConfig },
   { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): first-tool hints, reasoning strip, leak cleaning, error recovery hints, DeepSeek guidance + v4-pro minimal-mode anchor.", load: steeringModule, config: steeringConfig },
   // ── Shell ──────────────────────────────────────────────────────────────
   // Permission after rtk: persistent allow/ask/deny gating. Inert until rules

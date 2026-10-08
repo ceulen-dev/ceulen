@@ -12,6 +12,7 @@ import { firecrawlRequest, type FirecrawlResult } from "./firecrawl";
 import { loadFirecrawlConfig, loadSearxngConfig, type FirecrawlConfig } from "./config";
 import { fetchReadableContent } from "./content";
 import { sanitizeSnippet, sanitizeError } from "./format";
+import { askJev, getLastTask } from "../../classifier/index.js";
 
 export type SearchBackend = "searxng" | "brave" | "firecrawl";
 export type SearchAttemptStatus = "skipped" | "success" | "empty" | "error";
@@ -52,6 +53,9 @@ export interface SearchDiagnostics {
   attempts: SearchAttempt[];
   selectedBackend: SearchBackend | "";
   backendOrder: SearchBackend[];
+  /** How the backend order was picked: an explicit backend/engines param, the
+   *  isPrecisionQuery heuristic, or the classifier's verdict. */
+  router: "explicit" | "heuristic" | "classifier:jev";
 }
 
 interface BackendConfig {
@@ -197,6 +201,110 @@ export function selectSearchBackendOrder(params: SearchParams): SearchBackend[] 
   return ["searxng", "brave", "firecrawl"];
 }
 
+// ── Classifier-routed order (auto mode only) ────────────────────────────────
+
+const CLASSIFIER_ORDER_BUDGET_MS = 2_500; // ponytail: value of classifier's CLASSIFIER_HOOK_BUDGET_MS — module-private state is not imported
+const CLASSIFIER_MIN_CONFIDENCE = 0.6;
+const PRECISION_ORDER: SearchBackend[] = ["brave", "searxng", "firecrawl"];
+const BROAD_ORDER: SearchBackend[] = ["searxng", "brave", "firecrawl"];
+
+/** LRU over query fingerprints — repeated queries must not re-pay Jev.
+ *  ponytail: insertion-order map, cap 200. Value: the resolved order. */
+const orderCache = new Map<string, { order: SearchBackend[]; router: "classifier:jev" | "heuristic" }>();
+
+function fingerprint(query: string): string {
+  return query.toLowerCase().replace(/\d+/g, "#").replace(/\s+/g, " ").trim();
+}
+
+/** Read a choice answer defensively: probabilities[choice], else confidence.
+ *  Anything missing/out-of-range → NaN → the caller falls back. */
+function choiceConfidence(answer: unknown): number {
+  const a = answer && typeof answer === "object" ? (answer as Record<string, unknown>) : {};
+  const p = a.probabilities && typeof a.probabilities === "object" ? (a.probabilities as Record<string, unknown>)[String(a.choice)] : undefined;
+  const v = typeof p === "number" ? p : a.confidence;
+  return typeof v === "number" && v >= 0 && v <= 1 ? v : NaN;
+}
+
+function readNoul(answer: unknown): number {
+  const a = answer && typeof answer === "object" ? (answer as Record<string, unknown>) : {};
+  const v = typeof a.probability === "number" ? a.probability : a.noul;
+  return typeof v === "number" && v >= 0 && v <= 1 ? v : NaN;
+}
+
+/** One Jev round-trip picks brave-first vs searxng-first; a wrong pick costs
+ *  one probe + fallback, never a wrong answer. Low confidence, timeout, or
+ *  any failure → the isPrecisionQuery heuristic, unchanged. */
+async function classifyOrder(params: SearchParams): Promise<{ order: SearchBackend[]; router: "classifier:jev" | "heuristic" }> {
+  const fp = fingerprint(params.query);
+  const cached = orderCache.get(fp);
+  if (cached) {
+    orderCache.delete(fp);
+    orderCache.set(fp, cached);
+    return cached;
+  }
+  const ctx = params._ctx as Parameters<typeof askJev>[0] | undefined;
+  let resolved: { order: SearchBackend[]; router: "classifier:jev" | "heuristic" } | undefined;
+  try {
+    if (ctx && typeof ctx.modelRegistry?.classify === "function") {
+      const task = getLastTask();
+      const state: Record<string, unknown> = { query: params.query };
+      const questions: Record<string, unknown> = {
+        backend_preference: {
+          type: "choice",
+          instructions: "Which search backend should try this web query first?",
+          criteria: {
+            brave_first: "Precision lookup — site/docs/API/error-string search, freshness windows, or inline page content needed.",
+            searxng_first: "Broad multi-engine discovery, ambiguous topic exploration, or general browsing.",
+          },
+        },
+        ...(params.include_content === undefined
+          ? { include_content: { type: "bool", instructions: "Would answering this query benefit from fetching the full page content of results (vs snippets alone)?" } }
+          : {}),
+        ...(task ? { serves_task: { type: "bool", instructions: "Does this query plausibly serve the user's current task?", criteria: { yes: "A reasonable search toward the task.", no: "Unrelated to the task." } } } : {}),
+      };
+      const budget = AbortSignal.timeout(CLASSIFIER_ORDER_BUDGET_MS);
+      const answers = (await Promise.race([
+        askJev(ctx, state, questions, budget),
+        new Promise<never>((_, reject) => budget.addEventListener("abort", () => reject(new Error("classifier budget exceeded")), { once: true })),
+      ])) as Record<string, unknown>;
+      const pref = answers.backend_preference as Record<string, unknown> | undefined;
+      const choice = String(pref?.choice ?? "");
+      const confidence = choiceConfidence(pref);
+      const contentNeeded = params.include_content === undefined && Number.isFinite(readNoul(answers.include_content))
+        ? readNoul(answers.include_content) >= 0.5
+        : false;
+      const servesOk = !answers.serves_task || readNoul(answers.serves_task) >= 0.5;
+      if (servesOk && Number.isFinite(confidence) && confidence >= CLASSIFIER_MIN_CONFIDENCE && (choice === "brave_first" || choice === "searxng_first")) {
+        // include_content influences ORDER only — never turned into a fetch
+        // (a classifier guess must not trigger N page downloads).
+        const order = choice === "brave_first" || contentNeeded ? PRECISION_ORDER : BROAD_ORDER;
+        resolved = { order, router: "classifier:jev" };
+      }
+    }
+  } catch {
+    resolved = undefined; // fail open to the heuristic
+  }
+  if (!resolved) resolved = { order: selectSearchBackendOrder(params), router: "heuristic" };
+  orderCache.set(fp, resolved);
+  if (orderCache.size > 200) orderCache.delete(orderCache.keys().next().value!);
+  return resolved;
+}
+
+/** The order searchWithDiagnostics executes: explicit params keep the legacy
+ *  sync path (router: explicit); auto mode asks the classifier when ≥2
+ *  backends are configured and falls back to the heuristic otherwise. */
+async function resolveBackendOrder(params: SearchParams, backends: BackendConfig): Promise<{ order: SearchBackend[]; router: SearchDiagnostics["router"] }> {
+  if ((params.backend && params.backend !== "auto") || params.engines) {
+    return { order: selectSearchBackendOrder(params), router: "explicit" };
+  }
+  const configured = (["searxng", "brave", "firecrawl"] as SearchBackend[]).filter((b) => isConfigured(b, backends)).length;
+  if (configured < 2) {
+    return { order: selectSearchBackendOrder(params), router: "heuristic" };
+  }
+  const classified = await classifyOrder(params);
+  return classified;
+}
+
 function isConfigured(backend: SearchBackend, backends: BackendConfig): boolean {
   if (backend === "searxng") return backends.searxng.configured;
   if (backend === "brave") return backends.brave.configured;
@@ -211,7 +319,7 @@ async function runBackend(backend: SearchBackend, params: SearchParams, backends
 
 export async function searchWithDiagnostics(params: SearchParams): Promise<SearchDiagnostics> {
   const backends = probeBackends(params._ctx);
-  const backendOrder = selectSearchBackendOrder(params);
+  const { order: backendOrder, router } = await resolveBackendOrder(params, backends);
   const attempts: SearchAttempt[] = [];
 
   for (const backend of backendOrder) {
@@ -223,7 +331,7 @@ export async function searchWithDiagnostics(params: SearchParams): Promise<Searc
       const results = await runBackend(backend, params, backends);
       if (results.length > 0) {
         attempts.push({ backend, status: "success", message: `Selected ${backend}`, resultCount: results.length });
-        return { results, attempts, selectedBackend: backend, backendOrder };
+        return { results, attempts, selectedBackend: backend, backendOrder, router };
       }
       attempts.push({ backend, status: "empty", message: `${backend} returned 0 results`, resultCount: 0 });
     } catch (e) {
@@ -232,6 +340,6 @@ export async function searchWithDiagnostics(params: SearchParams): Promise<Searc
     }
   }
 
-  return { results: [], attempts, selectedBackend: "" as const, backendOrder };
+  return { results: [], attempts, selectedBackend: "" as const, backendOrder, router };
 }
 

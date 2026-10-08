@@ -3,6 +3,7 @@ import { createLocalBashOperations, isToolCallEventType } from "@earendil-works/
 import { hasUnsupportedRtkFind } from "./findFallback.js";
 import { parseSemver, supportsFindPassthrough } from "./version-gate.js";
 import { isSafeRewrite } from "./safe-rewrite.js";
+import { readRtkSettings } from "./lib/settings.js";
 
 const REWRITE_TIMEOUT_MS = 2_000;
 const RTK_UNAVAILABLE_RETRY_MS = 30_000;
@@ -20,12 +21,23 @@ function isAtLeastVersion(current: [number, number, number], minimum: [number, n
 }
 const RTK_SUBCOMMANDS = ["enable", "disable", "status"] as const;
 
+// The honest prompt note: states the POLICY (what RTK can rewrite), not the
+// outcome of any given command. Kept as one constant so every turn injects
+// byte-identical text (prefix-cache head).
+const RTK_NOTE =
+  "Your bash commands are rewritten through RTK where RTK supports them " +
+  "(git, ls, rg, read, test runners as single commands); chains, redirects, " +
+  "inline scripts, and unsupported commands pass through unchanged.";
+
 let sessionEnabled = true;
 let rtkUnavailableNotified = false;
 let rtkAvailable: boolean | undefined;
 let rtkLastCheckedAt = 0;
 let rtkSupportsFindPassthrough = false;
 let rtkVersion: string | null = null;
+// Dedupes the pass-through notify: two identical chains back to back notify
+// once. Reset on session_start.
+let lastPassthroughCommand = "";
 
 function rewritingEnabled(): boolean {
   return sessionEnabled && !isRtkDisabled();
@@ -121,13 +133,53 @@ async function rewriteCommand(pi: ExtensionAPI, command: string, ctx: ExtensionC
 }
 
 
+/** Rewrite decision for one command: the command to execute (null = the
+ *  original passes through) plus whether RTK was CONSULTED — true when the
+ *  gate allowed reaching the binary (enabled, mode on, chain rules passed)
+ *  regardless of the outcome. The tool_call path uses it to surface honest
+ *  pass-through notifies; the user_bash path ignores it. */
 async function maybeRewriteCommand(pi: ExtensionAPI, command: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<string | null> {
-  if (!rewritingEnabled()) return null;
-  if (typeof command !== "string" || command.trim() === "") return null;
-  if (command.trimStart().startsWith("rtk ")) return null;
-  const rewritten = await rewriteCommand(pi, command, ctx, signal);
-  if (rewritten && rewritten !== command && !isSafeRewrite(command, rewritten)) return null;
-  return rewritten;
+  const outcome = await decideRewrite(pi, command, ctx, signal);
+  return outcome.rewritten;
+}
+
+async function decideRewrite(pi: ExtensionAPI, command: string, ctx: ExtensionContext, signal?: AbortSignal): Promise<{ rewritten: string | null; consulted: boolean }> {
+  if (!rewritingEnabled()) return { rewritten: null, consulted: false };
+  if (typeof command !== "string" || command.trim() === "") return { rewritten: null, consulted: false };
+  if (command.trimStart().startsWith("rtk ")) return { rewritten: null, consulted: false };
+  const settings = readRtkSettings();
+  if (settings.mode === "off") return { rewritten: null, consulted: false };
+  // `chained: "never"`: chains (| ; & && ||, unquoted) never rewrite — skip
+  // the spawn entirely; the command executes byte-identical. rtk models few
+  // chains (90% of this repo's measured traffic failed open anyway), so this
+  // saves a wasted process per call.
+  if (settings.chained === "never" && hasUnquotedChainOperator(command)) return { rewritten: null, consulted: false };
+  let rewritten = await rewriteCommand(pi, command, ctx, signal);
+  let consulted = true;
+  if (rewritten && rewritten !== command && !isSafeRewrite(command, rewritten)) {
+    rewritten = null;
+    consulted = false; // unsafe rewrite rejected — the model must not read this as rtk passing judgment
+  }
+  return { rewritten, consulted };
+}
+
+/** True when the command carries a chain/separator operator outside quotes.
+ *  ponytail: quote-scanning split (no full shell grammar) — a false positive
+ *  can only SKIP a rewrite, never rewrite something unsafe. */
+function hasUnquotedChainOperator(command: string): boolean {
+  let quote: "'" | '"' | null = null;
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
+    if (quote) {
+      if (ch === "\\" && quote === '"') i += 1; // escaped char inside double quotes
+      else if (ch === quote) quote = null;
+    } else if (ch === "'" || ch === '"') {
+      quote = ch;
+    } else if (ch === "|" || ch === ";" || ch === "&") {
+      return true;
+    }
+  }
+  return false;
 }
 
 async function showRtkStatus(pi: ExtensionAPI, ctx: ExtensionContext): Promise<void> {
@@ -187,6 +239,7 @@ export default function piRtkExtension(pi: ExtensionAPI) {
     // Reset per-session toggle
     sessionEnabled = true;
     rtkUnavailableNotified = false;
+    lastPassthroughCommand = "";
     await checkRtkAvailable(pi, ctx);
   });
 
@@ -200,10 +253,13 @@ export default function piRtkExtension(pi: ExtensionAPI) {
     // so once the 30s re-probe flips rtkAvailable back to true, the note
     // is injected again on subsequent turns.
     if (rtkAvailable === false) return;
+    // ONE STATIC sentence stating the policy, not the outcome — byte-identical
+    // every turn (the system prompt is the prefix-cache head; per-turn state
+    // here would bust it). Per-command truth rides the [pi-rtk] notifies on
+    // the tool_call path instead.
     return {
       systemPrompt: event.systemPrompt +
-        "\n\nYour bash commands are transparently rewritten through RTK for token savings. " +
-        "Command output reflects the rewritten command; the original command text in your tool calls is replaced before execution.",
+        "\n\n" + RTK_NOTE,
     };
   });
 
@@ -212,13 +268,24 @@ export default function piRtkExtension(pi: ExtensionAPI) {
       if (!isToolCallEventType("bash", event)) return;
 
       const originalCommand = event.input.command;
-      const rewritten = await maybeRewriteCommand(pi, originalCommand, ctx, ctx.signal);
+      const outcome = await decideRewrite(pi, originalCommand, ctx, ctx.signal);
+      const rewritten = outcome.rewritten;
       if (rewritten && rewritten !== originalCommand) {
         // Notify when a command is rewritten so the model sees the discrepancy
         if (ctx.hasUI) {
           ctx.ui.notify(`[pi-rtk] rewrote: ${originalCommand.slice(0, 80)} → ${rewritten.slice(0, 80)}`, "info");
         }
         event.input.command = rewritten;
+      } else if (ctx.hasUI && outcome.consulted) {
+        // Close the phantom-rewrite loop: rtk was consulted (available, not
+        // disabled, command shape allowed the spawn) but returned nothing —
+        // the shell runs the ORIGINAL bytes. Surface it so the model doesn't
+        // argue with its own tool-call echo. Consecutive identical
+        // pass-throughs notify once (repeated test-runner chains).
+        if (originalCommand !== lastPassthroughCommand) {
+          lastPassthroughCommand = originalCommand;
+          ctx.ui.notify(`[pi-rtk] passed through unchanged: ${originalCommand.slice(0, 80)}`, "info");
+        }
       }
     } catch (error) {
       const msg = "[pi-rtk] unexpected rewrite error; passing bash command through unchanged";

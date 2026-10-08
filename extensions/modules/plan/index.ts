@@ -52,6 +52,8 @@ import {
   type ThinkingLevel,
 } from "./lib/settings.js";
 import { getPlanRegistry, planConfig, setPlanBridge, setPlanRegistry, type PlanBridge } from "./configPanel.js";
+import { askJev, audit, getLastTask, isRisky, noul, segments } from "../classifier/index.js";
+import { getClassifierSettings } from "../classifier/lib/settings.js";
 // Sandbox semantics live in ONE place: the subagent module resolves agent
 // frontmatter (user + project + bundled). discoverAgents is a pure fs loader,
 // independent of whether the subagent module itself is enabled.
@@ -62,6 +64,103 @@ export const PLAN_STATUS_KEY = "ceulen-plan";
 export const PLAN_ENTRY_TYPE = "ceulen-plan";
 export const PLAN_TOOL = "write_plan";
 export const ASK_USER_QUESTION_TOOL = "ask_user_question";
+
+// ── planGate (classifier.planGate) ──────────────────────────────────────────
+// The classifier can move a CONFIRM-tier bash command to auto-run when Jev
+// says it clearly doesn't mutate and serves the task. It can never do the
+// reverse: write stays a hard block, read stays auto. Off by default — run
+// `planGate.observe` first and read the ceulen-plan-gate lines in
+// classifier.log before flipping enabled.
+
+// ponytail: value of classifier's CLASSIFIER_HOOK_BUDGET_MS — the constant is
+// module-private and importing it would be module state, not a value.
+const PLAN_GATE_BUDGET_MS = 2_500;
+
+interface PlanGateVerdict {
+  mutates: number;
+  reversible: number;
+  serves: number;
+  safe: boolean;
+}
+
+/** Ask Jev about a confirm-tier command. Returns undefined on any failure —
+ *  the confirm tier is the unchanged fallback. Exported for tests. */
+export async function planGateVerdict(command: string, ctx: ExtensionContext): Promise<PlanGateVerdict | undefined> {
+  const task = getLastTask();
+  const state: Record<string, unknown> = { command, project_path: ctx.cwd, ...(task ? { task } : {}) };
+  const questions: Record<string, unknown> = {
+    mutates_filesystem: {
+      type: "bool",
+      instructions: "Does this command modify files or state outside the shell's own process?",
+      criteria: { yes: "Writes, deletes, moves, installs, or otherwise changes persistent state.", no: "Purely observational — reads, lists, searches, prints." },
+    },
+    reversible: {
+      type: "bool",
+      instructions: "If it DID have an effect, could that effect be undone or discarded without lasting harm?",
+    },
+    ...(task
+      ? {
+          serves_task: {
+            type: "bool",
+            instructions: "Does this command plausibly serve the task the user asked for?",
+            criteria: { yes: "A reasonable step toward the user's stated task.", no: "Unrelated to the task, or only a step the task never needed." },
+          },
+        }
+      : {}),
+  };
+  const started = Date.now();
+  try {
+    const budget = AbortSignal.timeout(PLAN_GATE_BUDGET_MS);
+    const answers = (await Promise.race([
+      askJev(ctx, state, questions, budget),
+      new Promise<never>((_, reject) => budget.addEventListener("abort", () => reject(new Error("plan gate budget exceeded")), { once: true })),
+    ])) as Record<string, unknown>;
+    const mutates = noul(answers, "mutates_filesystem");
+    const reversible = noul(answers, "reversible");
+    const serves = task ? noul(answers, "serves_task") : reversible; // no task → serve check degenerates
+    const { planGate } = getClassifierSettings();
+    const safe = Number.isFinite(mutates) && mutates < 0.2 && Number.isFinite(reversible) && reversible >= planGate.threshold && serves >= planGate.threshold;
+    await audit({
+      tag: "ceulen-plan-gate",
+      command,
+      mutates_filesystem: Number.isFinite(mutates) ? mutates : null,
+      reversible: Number.isFinite(reversible) ? reversible : null,
+      serves_task: Number.isFinite(serves) ? serves : null,
+      safe,
+      observe: planGate.observe,
+      enforcing: planGate.enabled,
+      ms: Date.now() - started,
+    });
+    return { mutates, reversible, serves, safe };
+  } catch (e) {
+    await audit({ tag: "ceulen-plan-gate", command, error: String(e instanceof Error ? e.message : e), ms: Date.now() - started });
+    return undefined;
+  }
+}
+
+/** Returns true when the gate auto-runs the command (only possible when
+ *  planGate.enabled); undefined → fall through to the normal confirm tier. */
+async function planGateAutoRun(command: string, ctx: ExtensionContext): Promise<boolean | undefined> {
+  const { planGate } = getClassifierSettings();
+  if (!planGate.enabled && !planGate.observe) return undefined;
+  // Static risk list first — credential/irreversible shapes never reach Jev
+  // and never leave the normal confirm tier. The whole command AND its
+  // segments: the pipe-to-shell regexes need the unsplit command, while
+  // segments expose risky commands hidden after && / ;.
+  if (isRisky(command) || segments(command).some(isRisky)) return undefined;
+  const verdict = await planGateVerdict(command, ctx);
+  if (verdict?.safe && planGate.enabled) {
+    if (ctx.hasUI) {
+      try {
+        ctx.ui.notify(`plan gate: auto-allowed (${command.slice(0, 80)})`, "info");
+      } catch {
+        /* non-tui */
+      }
+    }
+    return true;
+  }
+  return undefined;
+}
 
 /** Persisted plan-mode session state (branch-scoped via appendEntry). */
 export interface PlanState {
@@ -831,6 +930,10 @@ export default function planModule(pi: ExtensionAPI): void {
           reason: `plan mode: writing to the filesystem is not allowed while planning. "${command}" may modify files. Exit plan mode to run this command, or use ${PLAN_TOOL} to add file content to the plan.`,
         };
       }
+      // planGate (classifier.planGate, off by default): may AUTO-RUN a safe
+      // confirm-tier command. Any other answer → the confirm tier below,
+      // unchanged. Never reached for read (already auto) or write (hard block).
+      if (await planGateAutoRun(command, ctx)) return;
       if (!ctx.hasUI) return { block: true, reason: `plan mode: this command requires confirmation but UI is not available.\nCommand: ${command}` };
       const firstToken = command.trim().split(/\s+/)[0] || "bash";
       const allowKey = INTERPRETER_TOKENS.has(firstToken) ? `bash-cmd:${command.trim()}` : `bash:${firstToken}`;

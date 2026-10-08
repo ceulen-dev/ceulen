@@ -207,4 +207,79 @@ describe("searchWithDiagnostics", () => {
     assert.equal(lengthOf(calls), 1);
   });
 
+  it("auto + >=2 backends routes through the classifier when a model resolves", async () => {
+    // A fake registry whose classify() always answers brave_first with high
+    // confidence — the order flips to precision regardless of the heuristic.
+    const registry = {
+      findOfType: () => ({ id: "combo/jev", provider: "router" }),
+      getModelsOfType: () => [{ id: "combo/jev", provider: "router" }],
+      getAvailableOfType: async () => [{ id: "combo/jev", provider: "router" }],
+      refresh: async () => {},
+      classify: async () => ({
+        stopReason: "stop",
+        answers: {
+          backend_preference: { choice: "brave_first", probabilities: { brave_first: 0.9, searxng_first: 0.1 }, confidence: 0.9 },
+        },
+      }),
+    };
+    const calls = installMockFetch((url) => {
+      if (url.startsWith("https://api.search.brave.com/")) {
+        return jsonResponse({ web: { results: [{ title: "Brave", url: "https://example.com", description: "S" }] } });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    // A broad query the heuristic would send to searxng first (unique string:
+    // the verdict LRU is keyed by query fingerprint and earlier tests run
+    // the same broad query without a ctx, which caches the heuristic order).
+    const result = await searchWithDiagnostics({ query: "homelab ansible ideas 2026", _ctx: { modelRegistry: registry } });
+    assert.equal(result.router, "classifier:jev");
+    assert.equal(result.backendOrder[0], "brave");
+    assert.equal(result.selectedBackend, "brave");
+    assert.ok(lengthOf(calls) >= 1);
+  });
+
+  it("classifier low confidence falls back to the heuristic", async () => {
+    const registry = {
+      findOfType: () => ({ id: "combo/jev", provider: "router" }),
+      getModelsOfType: () => [{ id: "combo/jev", provider: "router" }],
+      getAvailableOfType: async () => [{ id: "combo/jev", provider: "router" }],
+      refresh: async () => {},
+      classify: async () => ({
+        stopReason: "stop",
+        answers: { backend_preference: { choice: "searxng_first", probabilities: { searxng_first: 0.3, brave_first: 0.2 }, confidence: 0.3 } },
+      }),
+    };
+    const calls = installMockFetch((url) => {
+      if (url.startsWith("http://searxng.test/search")) {
+        return jsonResponse({ results: [{ title: "SearXNG", url: "https://example.com", content: "Snippet" }] });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    const result = await searchWithDiagnostics({ query: "homelab ansible ideas", _ctx: { modelRegistry: registry } });
+    assert.equal(result.router, "heuristic", "0.3 confidence < 0.6 → heuristic");
+    assert.equal(result.backendOrder[0], "searxng");
+    assert.ok(includes(calls[0], "searxng.test"));
+  });
+
+  it("explicit backend/engines params report router: explicit and never ask Jev", async () => {
+    let classifyCalls = 0;
+    const registry = {
+      findOfType: () => ({ id: "combo/jev", provider: "router" }),
+      getAvailableOfType: async () => [{ id: "combo/jev", provider: "router" }],
+      refresh: async () => {},
+      classify: async () => { classifyCalls++; throw new Error("must not be called"); },
+    };
+    installMockFetch((url) => {
+      if (url.startsWith("http://searxng.test/search")) {
+        return jsonResponse({ results: [{ title: "SearXNG", url: "https://example.com", content: "Snippet" }] });
+      }
+      throw new Error(`unexpected fetch ${url}`);
+    });
+    const explicit = await searchWithDiagnostics({ query: "homelab ansible", backend: "searxng", _ctx: { modelRegistry: registry } });
+    assert.equal(explicit.router, "explicit");
+    const engines = await searchWithDiagnostics({ query: "homelab ansible", engines: "google,github", _ctx: { modelRegistry: registry } });
+    assert.equal(engines.router, "explicit");
+    assert.equal(classifyCalls, 0);
+  });
+
 });

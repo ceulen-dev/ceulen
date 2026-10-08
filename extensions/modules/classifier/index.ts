@@ -20,10 +20,10 @@
  *
  * Config: `classifier` section of ~/.pi/agent/settings.json (global only —
  * see lib/settings.ts). /config owns the rows (Model tab → Classifier).
- * pi-classifier's planGate is NOT ported and NOT consumed by the plan module:
- * pi 1.0.0's `tool_call` hook can only block, never approve, so a gate could
- * only have trimmed plan-mode confirm prompts (source preserved in
- * pi-extensions git history).
+ * planGate (pi-plan's reserved key) is consumed by the plan module's confirm
+ * tier: the gate can move a confirm-tier command to AUTO-RUN when Jev says
+ * it is clearly reversible and serves the task — never the reverse (write
+ * stays a hard block), and it ships observe-only by default.
  */
 
 import { appendFile, mkdir } from "node:fs/promises";
@@ -91,7 +91,7 @@ export function createVerdictCache(cap = 100) {
 /** Audit line per decision. Best-effort: never throws into the tool path.
  *  0600 — the log records full bash commands and task text, same
  *  permission discipline as pi's settings/auth files. */
-function audit(entry: Record<string, unknown>): Promise<void> {
+export function audit(entry: Record<string, unknown>): Promise<void> {
   try {
     const dir = process.env.PI_CODING_AGENT_DIR || join(homedir(), ".pi", "agent");
     // ponytail: async write so the tool_call hot path never blocks. Never rejects.
@@ -117,7 +117,10 @@ export function resetClassifierRefreshCooldown(): void {
   lastForcedRefresh = 0;
 }
 
-async function askJev(ctx: ExtensionContext, state: Record<string, unknown>, questions: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
+/** Ask the router's decision model (Jev). Exported for sibling modules that
+ *  need a typed verdict (web backend routing, plan mode's confirm trim) —
+ *  callers fail safe around its throws. */
+export async function askJev(ctx: ExtensionContext, state: Record<string, unknown>, questions: Record<string, unknown>, signal?: AbortSignal): Promise<Record<string, unknown>> {
   const resolve = async () => {
     const s = getClassifierSettings();
     let model = s.model ? ctx.modelRegistry.findOfType("classifier", "router", s.model) : undefined;
@@ -152,6 +155,14 @@ async function askJev(ctx: ExtensionContext, state: Record<string, unknown>, que
   const result = await ctx.modelRegistry.classify(model, { state, questions } as Parameters<typeof ctx.modelRegistry.classify>[1], { signal });
   if (result.stopReason !== "stop") throw new Error(result.errorMessage ?? `classifier failed (${result.stopReason})`);
   return result.answers as unknown as Record<string, unknown>;
+}
+
+/** The most recent user message text (≤4000 chars) — "the current task" for
+ *  serves_task verdicts. Exported for the plan module's planGate; the
+ *  classifier's own message_end hook keeps it fresh. */
+let lastTask = "";
+export function getLastTask(): string {
+  return lastTask;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -208,20 +219,26 @@ export default function (pi: ExtensionAPI) {
   });
 
   // ── 2. permission auto-approve hook (ported from pi-classifier) ─────────
-  let lastTask = "";
   pi.on("message_end", (event) => {
     const msg = event.message;
     if (msg?.role !== "user") return;
-    if (typeof msg.content === "string") lastTask = msg.content.slice(0, 4000);
-    // Array-shaped content: join the text parts (images etc. contribute nothing).
-    else if (Array.isArray(msg.content)) {
+    if (typeof msg.content === "string") {
+      lastTask = msg.content;
+    } else if (Array.isArray(msg.content)) {
+      // Array-shaped content: join the text parts (images etc. contribute nothing).
       lastTask = (msg.content as { type?: string; text?: unknown }[])
         .filter((p) => p?.type === "text" && typeof p.text === "string")
         .map((p) => p.text as string)
-        .join("\n")
-        .slice(0, 4000);
+        .join("\n");
+    } else {
+      lastTask = ""; // unrecognized shape — no task, never a stale one
     }
+    lastTask = lastTask.slice(0, 4000);
   });
+
+  // Per-registration reset: a second default() call (test fixtures re-run the
+  // factory) must not inherit the previous registration's task.
+  lastTask = "";
 
   const cache = createVerdictCache();
 

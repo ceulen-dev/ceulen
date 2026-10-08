@@ -11,8 +11,13 @@
 //     }
 //   }
 //
-// `planGate` in the file is left untouched (pi-plan's key; no consumer in
-// ceulen until the pi-plan port).
+// `planGate` (pi-plan's key, now consumed by ceulen's plan module):
+//
+//     "planGate": {
+//       "enabled": false,      // allow the gate to AUTO-RUN confident safe confirm-tier commands
+//       "observe": false,      // log-only audit pass — verdicts land in classifier.log, nothing changes
+//       "threshold": 0.9       // p(reversible) must clear it for an auto-run
+//     }
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -24,6 +29,11 @@ export interface ClassifierSettings {
   permission: {
     enabled: boolean;
     mode: "observe" | "enforce";
+    threshold: number;
+  };
+  planGate: {
+    enabled: boolean;
+    observe: boolean;
     threshold: number;
   };
 }
@@ -38,7 +48,8 @@ function settingsPath(): string {
 
 /** Read the `classifier` settings. Global only — a repo file must not flip
  *  verdict behavior. Defaults match pi-classifier (enabled/enforce/0.9 since
- *  the 0.2.0 live audit). Exported for tests. */
+ *  the 0.2.0 live audit); planGate defaults fully off (observe first, enable
+ *  after a measured false-auto rate). Exported for tests. */
 export function getClassifierSettings(): ClassifierSettings {
   let raw: Record<string, unknown> = {};
   try {
@@ -50,6 +61,7 @@ export function getClassifierSettings(): ClassifierSettings {
   }
   const c = raw.classifier && typeof raw.classifier === "object" ? (raw.classifier as Record<string, unknown>) : {};
   const perm = c.permission && typeof c.permission === "object" ? (c.permission as Record<string, unknown>) : {};
+  const gate = c.planGate && typeof c.planGate === "object" ? (c.planGate as Record<string, unknown>) : {};
   return {
     model: typeof c.model === "string" ? c.model.trim() : "",
     permission: {
@@ -59,6 +71,11 @@ export function getClassifierSettings(): ClassifierSettings {
       enabled: perm.enabled !== false,
       mode: perm.mode === "observe" ? "observe" : "enforce",
       threshold: typeof perm.threshold === "number" && perm.threshold > 0 && perm.threshold < 1 ? perm.threshold : 0.9,
+    },
+    planGate: {
+      enabled: gate.enabled === true,
+      observe: gate.observe === true,
+      threshold: typeof gate.threshold === "number" && gate.threshold > 0 && gate.threshold < 1 ? gate.threshold : 0.9,
     },
   };
 }

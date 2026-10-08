@@ -50,18 +50,22 @@ describe("settings", () => {
   it("defaults to enabled/enforce/0.9, empty model (auto); explicit false wins", async () => {
     const { getClassifierSettings } = await import("../lib/settings.js");
     const s = getClassifierSettings();
-    assert.deepEqual(s, { model: "", permission: { enabled: true, threshold: 0.9, mode: "enforce" } });
+    assert.deepEqual(s, {
+      model: "",
+      permission: { enabled: true, threshold: 0.9, mode: "enforce" },
+      planGate: { enabled: false, observe: false, threshold: 0.9 },
+    });
     writeFileSync(join(TMP_HOME, "settings.json"), JSON.stringify({ classifier: { permission: { enabled: false } } }));
     assert.equal(getClassifierSettings().permission.enabled, false);
   });
 
-  it("reads the global classifier section; bad threshold falls back; planGate untouched", async () => {
+  it("reads the global classifier section; bad threshold falls back; foreign planGate keys ignored", async () => {
     const { getClassifierSettings } = await import("../lib/settings.js");
     writeFileSync(join(TMP_HOME, "settings.json"), JSON.stringify({
       classifier: {
         model: "combo/jev",
         permission: { enabled: true, mode: "enforce", threshold: 7 },
-        planGate: { enabled: true, mode: "observe" }, // foreign key — must survive writes
+        planGate: { enabled: true, mode: "observe" }, // "mode" is a foreign key here — ignored, not consumed
       },
     }));
     const s = getClassifierSettings();
@@ -69,6 +73,7 @@ describe("settings", () => {
     assert.equal(s.permission.enabled, true);
     assert.equal(s.permission.mode, "enforce");
     assert.equal(s.permission.threshold, 0.9); // 7 rejected → default
+    assert.deepEqual(s.planGate, { enabled: true, observe: false, threshold: 0.9 }); // mode dropped, enabled read
   });
 
   it("writer merges without clobbering siblings (router, planGate) and clamps bad input", async () => {
@@ -466,6 +471,8 @@ describe("permission hook", () => {
   });
 
   it("no task captured → reversibility question only", async () => {
+    // Module-level lastTask (shared with the planGate consumer) persists
+    // across the module instance — an array with no text parts clears it.
     let questionCount = 0;
     const fx = await hookFixture(stubRegistry({
       classify: async (_m, context) => {
@@ -474,6 +481,7 @@ describe("permission hook", () => {
       },
     }));
     try {
+      fx.messageEnd([{ type: "image", mimeType: "image/png" }]);
       await fx.call("bun test");
       assert.equal(questionCount, 1);
     } finally { fx.cleanup(); }
@@ -504,7 +512,7 @@ describe("permission hook", () => {
 describe("config contribution", () => {
   it("builds the Model-tab groups over a working copy and routes owned keys", async () => {
     const { buildClassifierGroups, classifierConfig, setClassifierRegistry } = await import("../configPanel.js");
-    const groups = buildClassifierGroups({ model: "", permission: { enabled: true, mode: "enforce", threshold: 0.9 } });
+    const groups = buildClassifierGroups({ model: "", permission: { enabled: true, mode: "enforce", threshold: 0.9 }, planGate: { enabled: false, observe: false, threshold: 0.9 } });
     assert.equal(groups[0].tab, "Model");
     assert.equal(groups[0].label, "Classifier (Jev)");
     assert.deepEqual(groups[0].rows.map((r) => r.key), [

@@ -53,9 +53,11 @@ endpoint and no key code: the `classify` tool and the bash verdict
 and logs, never gates) resolve models via `modelRegistry.getAvailableOfType/findOfType`
 and ask through `modelRegistry.classify()` (never rejects). Settings stay in the
 GLOBAL `classifier` section (`model`, `permission.{enabled,mode,threshold}` —
-same keys/values as pi-classifier, migration-free; `planGate` is left untouched
-and NOT consumed by the plan module — pi 1.0.0's `tool_call` can only block,
-never approve, so the gate would only have trimmed prompts). Replaces the standalone package — if both are
+same keys/values as pi-classifier, migration-free). `planGate` (pi-plan's
+reserved key: `enabled`/`observe`/`threshold`, default all-off) is consumed by
+the PLAN module's confirm tier — see the plan module section. `askJev`,
+`getLastTask`, `isRisky`, `segments`, `noul`, and `audit` are exported for
+consumers (the web module's backend router, the plan gate). Replaces the standalone package — if both are
 installed, first tool registration wins.
 The `systemoneClassify` transport carries a DEFAULT 30s deadline (pi's
 model-runtime passes no timeoutMs — without one, a silent endpoint parks the
@@ -334,10 +336,24 @@ implement→verify→review flow (`/flow`, [verification: pass] loop, workspace
 leases, worktree `flowIsolation` — ceulen's subagent `sandbox:"worktree"` +
 `merge:"3way"` and the advisor reviewer already cover it), `/rewind` +
 checkpoints, `/goal`, `/specs`, `/handoff`, `/btw`, `/doctor`,
-`/plan-fallback` (the advisor module's fallback chain covers overloads), and
-the Jev plan gate — the classifier module's `tool_call` note holds:
-pi 1.0.0's `tool_call` can only block, never approve, so the gate could only
-have trimmed confirm prompts; wire it in only if prompt fatigue shows up.
+`/plan-fallback` (the advisor module's fallback chain covers overloads).
+
+**planGate** (2026-10-08, the one upstream gate that DID port): in the
+`tool_call` bash branch, AFTER `classifyCommand` returns `confirm` and before
+the approval prompt, `planGateAutoRun` may auto-run the command when Jev says
+`p(mutates_filesystem) < 0.2 && p(reversible) >= classifier.planGate.threshold`
+(serves_task only when the classifier module has a current user task;
+2.5s budget, any failure/low-verdict → the confirm tier unchanged). It can
+never do the reverse: `write` stays a hard block, `read` stays auto, the
+static RISKY list (whole command AND segments) skips the gate entirely, and
+every verdict audits to classifier.log under the `ceulen-plan-gate` tag.
+Settings: `classifier.planGate.{enabled,observe,threshold}` — default OFF;
+run `observe: true` first and read the measured false-auto rate before
+flipping `enabled`. No /config rows (nested key, settings.json only).
+
+Originally dropped at port time (pi 1.0.0's `tool_call` can only block, never
+approve, so the gate could only trim confirm prompts) — the trim IS the
+feature and prompt fatigue justified it.
 
 **Plan files**: `<repo>/.pi/plans/<timestamp>-<slug>.md` by default
 (`plan.plansDir`, `{yyyymm}` expands to the UTC month). `plan.savePlans`
@@ -505,6 +521,20 @@ hot four (web_search, web_extract, web_screenshot, web_interact) stay direct
 so WEB_ROUTING_GUIDANCE keeps its active-tool trigger. Standalone
 `@bacnh85/pi-web` must be removed when this module is enabled
 (the conflict guard refuses the duplicate `web_*` names).
+
+**Classifier-routed backend order** (2026-10-08): in auto mode with no
+`backend`/`engines` override and ≥2 backends configured, `web_search` asks
+the classifier module's `askJev` (one round-trip, `backend_preference` choice
+between brave-first = precision/site/docs/error-strings and searxng-first =
+broad discovery, plus a `include_content` noul that influences ORDER only —
+never turned into page fetches) and picks the order; `<0.6` confidence,
+timeout (2.5s budget), no model, or any failure falls back to the untouched
+`isPrecisionQuery` heuristic. Verdicts LRU-cache per query fingerprint
+(lowercase, digits→`#`, whitespace-normalized, cap 200) so repeated queries
+don't re-pay Jev. `SearchDiagnostics.router` (`explicit` |
+`heuristic` | `classifier:jev`) and the `--- Search diagnostics ---` block
+make every choice auditable. A wrong pick costs one probe + fallback, never
+a wrong answer.
 
 ### A2A module (a2a)
 
@@ -742,6 +772,38 @@ via the bundle entry's registry `deferredTools` tier:
 - **notify** (`extensions/modules/notify/`) — ONE `notify` tool:
   darwin osascript / linux notify-send / terminal-bell fallback, always
   resolves, injectable spawn/probe/platform fakes for tests.
+
+### RTK module (rtk)
+
+Ported from pi-rtk (see `extensions/modules/rtk/`): routes bash through
+`rtk rewrite` for token savings — but SELECTIVELY (2026-10-08 empirical
+pass, rtk 0.50.0 probed live): rtk's rewrite FAILS OPEN on anything it does
+not model (`rtk rewrite` returns empty/exit 1 for chains with an unmodeled
+segment, redirects, `$(...)`, inline scripts), so the only commands that ever
+rewrite are single modeled commands and chains whose EVERY segment is
+modeled. Measured on this repo: 90% of real bash calls are chains (top
+repeats: `npm test 2>&1 | tail -8`, `npx tsc --noEmit | head`) — none of
+them rewritable. Consequences baked in:
+
+- The `before_agent_start` note is ONE STATIC sentence stating the policy
+  ("rewritten through RTK where RTK supports them …; chains, redirects,
+  inline scripts, and unsupported commands pass through unchanged") —
+  byte-identical every turn (prefix-cache head). The old unconditional
+  "transparently rewritten" claim was a phantom for chains: the model read
+  rewrites that never executed. Per-command truth rides the `[pi-rtk]`
+  notifies on the tool_call path instead: `rewrote: …` when applied,
+  `passed through unchanged: …` when rtk was consulted but returned nothing
+  (deduped per consecutive identical command, reset on session_start,
+  ctx.hasUI-gated). `isSafeRewrite` stays as the second line of defense.
+- Settings: GLOBAL `rtk` section read per bash call (`lib/settings.ts`, no
+  /reload needed): `rtk.mode` `supported-only` (default) | `off` (kill
+  switch; `RTK_DISABLED=1` stays the env-level bypass, `/rtk disable` the
+  session toggle), `rtk.chained` `only-all-modeled` (default; rtk's own
+  fail-open decides) | `never` (unquoted `| ; &` → return null BEFORE
+  spawning rtk — no wasted process per chain, byte-identical execution
+  guaranteed). /config → Shell → "RTK rewrite" (⚡, two closed-set rows).
+  The availability gate is unchanged (rtk >= 0.23, find-passthrough via
+  >= 0.46 version gate, 30s negative cache).
 
 ### Extended read views (repair module) + read_pdf (web module)
 

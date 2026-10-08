@@ -149,7 +149,7 @@ Opt-in `permission` settings section: allow/ask/deny rules per tool with wildcar
 
 - **serena** — semantic code tools (find symbol, references, rename, diagnostics) via a persistent language-server worker
 - **fff** — fast fuzzy file/content search (`ffgrep`, `fffind`) feeding the built-in grep/find experience and `@`-mention completions
-- **rtk** — transparently rewrites shell commands to save tokens (`/rtk status`, `RTK_DISABLED=1` to bypass)
+- **rtk** — rewrites shell commands through RTK only where RTK supports them (git, ls, rg, test runners); chains, redirects, and inline scripts pass through byte-identical (`/rtk status`, `/config` → Shell → RTK, `RTK_DISABLED=1` to bypass)
 
 ### config — the settings panel
 

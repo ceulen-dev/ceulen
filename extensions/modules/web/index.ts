@@ -210,7 +210,7 @@ export default function piWebExtension(pi: ExtensionAPI) {
         _ctx: ctx,
       });
       const attempts = diagnostics.attempts.map((a) => `${a.backend}: ${a.status}${a.message ? ` (${a.message})` : ""}`).join("\n");
-      const text = `${formatUnifiedSearchResults(diagnostics.results)}\n\n--- Search diagnostics ---\nSelected backend: ${diagnostics.selectedBackend}\n${attempts}`;
+      const text = `${formatUnifiedSearchResults(diagnostics.results)}\n\n--- Search diagnostics ---\nSelected backend: ${diagnostics.selectedBackend}\nRouter: ${diagnostics.router}\n${attempts}`;
       return { content: [{ type: "text" as const, text: truncateText(text) }], details: diagnostics };
     },
   });

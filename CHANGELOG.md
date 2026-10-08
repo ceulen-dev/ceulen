@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.16.0 — 2026-10-09
+
+- **RTK selective rewrite** — the prompt note states the policy honestly
+  (RTK rewrites only what it models; chains, redirects, and inline scripts
+  pass through unchanged, byte-identical every turn for prefix-cache
+  stability), per-command truth moved to `[pi-rtk] passed through unchanged`
+  notifies (deduped per consecutive identical command), and a new global
+  `rtk` settings section (`mode: supported-only|off`, `chained:
+  only-all-modeled|never`) read per bash call — `/config` → Shell → RTK.
+  Measured on rtk 0.50.0: the rewrite fails open on every chain with an
+  unmodeled segment (90% of this repo's real bash traffic), so `chained:
+  never` also skips the wasted spawn per chain.
+- **Web search backend router** — in auto mode with ≥2 backends configured,
+  `web_search` asks the classifier (one Jev round-trip) to pick brave-first
+  (precision/docs/error-strings) vs searxng-first (broad discovery); low
+  confidence, timeout, or failure falls back to the unchanged heuristic.
+  `SearchDiagnostics.router` + the diagnostics block expose which path ran.
+- **planGate ported** — `classifier.planGate.{enabled,observe,threshold}`
+  (default off) lets the plan module's confirm tier auto-run a command when
+  Jev says it clearly won't mutate the filesystem and serves the task;
+  writes stay hard-blocked, the static RISKY list skips the gate, and every
+  verdict audits to classifier.log (`ceulen-plan-gate`). Run
+  `observe: true` first to measure the false-auto rate.
+
 ## 0.15.2 — 2026-10-08
 
 Deferred-tier re-evaluation from live session usage (211 transcripts, 13K tool
