@@ -2,7 +2,8 @@
 //
 // Ported from @bacnh85/pi-munin 0.5.12 extensions/index.ts (SDK vendored to
 // lib/sdk.ts; dotenv dropped — ceulen's bundle env.ts ingests trusted .env).
-// Registers the 8 munin_* tools (all deferred — tool_search loads them),
+// Registers the 8 munin_* tools (search/get direct; the other six deferred —
+// tool_search loads them),
 // /munin-status, the Munin Memory Protocol injection (only when configured),
 // the tool_result error sanitizer, and the munin skill (resources_discover).
 // Config lives at PROJECT level (.pi/settings.json `munin` section) — see
@@ -68,9 +69,8 @@ const MUNIN_PROTOCOL_HEADER = `## Munin Memory Protocol
 
 Use Munin to recover and preserve verified project knowledge, not as a task log.
 If Munin is unavailable, state that briefly when it matters and continue from
-repository evidence. The munin_* tools are deferred: if none are declared yet,
-load them with one tool_search call for "munin" (they stay declared for the
-rest of the session).
+repository evidence. munin_search/munin_get are always declared; the other
+munin_* tools load on demand with one tool_search call for "munin".
 
 ### Before acting
 

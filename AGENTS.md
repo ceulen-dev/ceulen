@@ -34,7 +34,7 @@ themes/                 theme JSONs shipped with the package (declared via the p
   (+ `axios`, which `gemini-reverse` hard-depends on) — see the Web module
   section for what is vendored instead. pi's managed install installs real
   `dependencies` for npm packages.
-- Tool registrations that should be per-tool toggleable list their canonical names on the module's `tools?: string[]` registry entry; names in `ceulen.disabledTools` (helpers in `extensions/lib/tools.ts`) register via `defaultActive: false`, and the config module's tool rows re-activate/deactivate them live with `setActiveTools` (no `/reload`).
+- Tool registrations that should be cold list their canonical names on the module's `deferredTools` registry entry; the bundle entry injects `exposure: "deferred"` (not declared to the model, loadable via `tool_search`, still callable from `ctx.executeTool`/codemode). Everything NOT listed stays `direct` (declared every request). 2026-10-08 usage re-eval moved `munin_search`, `munin_get`, `github`, and `ux_audit` from deferred to direct; the rest of the tier list is unchanged.
 - Tests: `node:test` + tsx, in `extensions/modules/<name>/test/`. The bundle root `package.json` `test` script globs them. Test dirs are excluded from `tsc --noEmit` when they use loose harness stubs (usage, ponytail); they run under tsx.
 - To add a module: create `extensions/modules/<name>/`, append one entry to `MODULES` in `extensions/lib/registry.ts` under its category banner (each entry's `category` field is the OMP tab — the single source for /config tab placement, synthesized Enable-only sections, and /ceulen status grouping; pretty section names live in the config module's `PRETTY_OF` map). Order matters — usage reads the `router` provider, so router loads first; config loads last, it reads the contribution map. Add its test files to the `test` glob if not covered. The conflict guard covers you: a name another module already claimed throws at load.
 
@@ -130,7 +130,9 @@ replaced session. omp's roster / per-advisor tool grants /
 ## Munin module (munin)
 
 Ported from `@bacnh85/pi-munin` 0.5.12 (see `extensions/modules/munin/`). Eight
-`munin_*` tools (all deferred — `tool_search` loads them), `/munin-status`, the Munin Memory
+`munin_*` tools (search/get DIRECT since 2026-10-08 re-eval — the Memory
+Protocol's before-acting rule is a search, and the old deferred tier forced a
+tool_search round-trip in front of it; the other six stay deferred), `/munin-status`, the Munin Memory
 Protocol injection (`before_agent_start`, only when configured), the `tool_result`
 error sanitizer, and the `munin` skill (own `resources_discover` dir). The SDK is
 VENDORED to `lib/sdk.ts` (`// ponytail: vendored from @kalera/munin-sdk 1.5.0`;
@@ -638,7 +640,11 @@ op goes through — tests inject a fake). Read-only ops only: `repo_view`,
 code/commits/repos, with repo:/org:/user: scope detection and since/until date
 qualifiers), and `run_watch` (lean JSON poller, failed-job log tails, budget
 `gh.runWatchTimeoutSecs` default 600s on the /config Tools → GitHub row).
-Registration is FAIL-OPEN on a missing `gh` binary (no tool). Read-only scope is load-bearing: plan mode auto-allows the
+Registration is FAIL-OPEN on a missing `gh` binary (no tool). The tool is
+DIRECT (2026-10-08 re-eval: 61 calls/17 sessions — the top user among the
+deferred tier, but all of them pre-date the deferred pass; since deferral,
+release verification did not discover it via tool_search and fell back to raw
+bash gh). Read-only scope is load-bearing: plan mode auto-allows the
 tool via `READ_ONLY_TOOLS` (plan/lib/plan-tools.ts) — never add a mutating op
 without re-checking that tier. Mutating flows (pr_create/checkout/push) are
 deliberately deferred to bash `gh`.
@@ -843,7 +849,10 @@ Ponytail resolves its default mode from `PONYTAIL_DEFAULT_MODE`, then `~/.config
 
 ## UX config (ux module)
 
-Ported from `@bacnh85/pi-ux` 0.6.6 (see `extensions/modules/ux/UPSTREAM`). Resolves its default mode from `PI_UX_DEFAULT_MODE`, then `~/.config/pi-ux/config.json` (`{"defaultMode": "strict", "quietStartup": false}`; XDG_CONFIG_HOME respected), then `strict`. `PI_UX_QUIET_STARTUP` overrides the saved boolean — same stable-contract policy as ponytail (standalone pi-ux settings carry over). **No status-bar footprint**: the module never calls `setStatus`, and upstream's `hideStatus` setting / `PI_UX_HIDE_STATUS` env are dropped. Bare `/ux` reports status (not upstream's reset-to-default); the default mode is owned by `/config` (Appearance → UX discipline), not a `/ux default` subcommand.
+Ported from `@bacnh85/pi-ux` 0.6.6 (see `extensions/modules/ux/UPSTREAM`).
+`ux_audit` is DIRECT (2026-10-08 re-eval: the ux skills route into it and it
+must run before code; the core module is always loaded, so registration alone
+declares it). Resolves its default mode from `PI_UX_DEFAULT_MODE`, then `~/.config/pi-ux/config.json` (`{"defaultMode": "strict", "quietStartup": false}`; XDG_CONFIG_HOME respected), then `strict`. `PI_UX_QUIET_STARTUP` overrides the saved boolean — same stable-contract policy as ponytail (standalone pi-ux settings carry over). **No status-bar footprint**: the module never calls `setStatus`, and upstream's `hideStatus` setting / `PI_UX_HIDE_STATUS` env are dropped. Bare `/ux` reports status (not upstream's reset-to-default); the default mode is owned by `/config` (Appearance → UX discipline), not a `/ux default` subcommand.
 
 ## Release flow
 

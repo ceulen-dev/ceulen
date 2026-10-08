@@ -48,6 +48,18 @@ describe("isProjectTrusted", () => {
   });
 });
 
+describe("deferredTools tiers", () => {
+  // 2026-10-08 usage re-eval: these four were promoted from deferred to
+  // direct. A registry edit that silently reverts them must fail here.
+  it("keeps the promoted hot tools out of every deferred list", async () => {
+    const { MODULES } = await import("./registry.js");
+    const allDeferred = new Set(MODULES.flatMap((m) => m.deferredTools ?? []));
+    for (const hot of ["munin_search", "munin_get", "github", "ux_audit"]) {
+      assert.equal(allDeferred.has(hot), false, `${hot} must stay direct`);
+    }
+  });
+});
+
 describe("MODULES load order", () => {
   // The steering entry must stay behind every before_agent_start prompt
   // rewriter (its ds-anchor bootstrap REPLACES the final prompt; a rewriter

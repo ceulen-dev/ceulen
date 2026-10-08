@@ -174,7 +174,7 @@ In `~/.pi/agent/settings.json` or a trusted project's `.pi/settings.json` — a 
 
 The core set — router, usage, ux, classifier, composer, advisor, and the `/config` panel itself — is always on and never appears in the kill-switch list.
 
-**Tool loading**: most tools register *deferred* — not declared to the model, loaded on demand by `tool_search` (pi activates it for you). Only the hot core (subagent, todo, web search/extract/screenshot/interact, fffgrep/fffind, plan/repair tools, advisor, classify, think) is declared every request, keeping the standing token cost small no matter how many tools ceulen ships.
+**Tool loading**: most tools register *deferred* — not declared to the model, loaded on demand by `tool_search` (pi activates it for you). Declared every request: the hot core (subagent, herdr, todo, write_plan, ask_user_question, apply_patch, str_replace_editor, web_search/extract/screenshot/interact, ffgrep/fffind, advisor, classify, think) plus four tools promoted in the 2026-10-08 usage re-eval — `munin_search`, `munin_get`, `github`, `ux_audit`. Everything else stays discover-only, keeping the standing token cost small no matter how many tools ceulen ships.
 
 ## License
 

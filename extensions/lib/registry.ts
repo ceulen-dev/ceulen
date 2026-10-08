@@ -124,10 +124,20 @@ export const MODULES: ModuleEntry[] = [
   // ── Appearance ─────────────────────────────────────────────────────────
   { name: "usage", core: true, category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
   { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },
-  { name: "ux", core: true, category: "Appearance", describe: "Anti-slop UI/UX design discipline: /ux modes, ux_audit tool, design skills. No status-bar footprint.", load: uxModule, config: uxConfig, deferredTools: ["ux_audit"] },
+  // ux_audit is DIRECT (2026-10-08 usage re-eval): every ux_* skill routes to
+  // it, it must run pre-code in the ux workflow, and it has no fs/network side
+  // effects. The ux module is CORE (always loaded), so registration alone
+  // declares it — no tool_search detour to start the UX discipline.
+  { name: "ux", core: true, category: "Appearance", describe: "Anti-slop UI/UX design discipline: /ux modes, ux_audit tool, design skills. No status-bar footprint.", load: uxModule, config: uxConfig },
   // ── Memory ─────────────────────────────────────────────────────────────
+  // munin_search + munin_get are DIRECT (2026-10-08 usage re-eval): the Memory
+  // Protocol is injected into every configured session and its before-acting
+  // rule is a search — forcing a tool_search round-trip first was pure
+  // latency. The remaining six stay deferred: store/list/recent/delete/
+  // capabilities/share are needed only after search/get evidence is in hand
+  // (and store/delete/share stay behind plan mode's BLOCKED_TOOLS).
   { name: "munin", category: "Memory", describe: "Munin long-term memory tools (search/get/store/list/recent/delete/capabilities/share) + memory protocol. Config at project level.", load: muninModule, config: muninConfig, deferredTools: [
-    "munin_search", "munin_get", "munin_store", "munin_list", "munin_recent", "munin_delete", "munin_capabilities", "munin_share",
+    "munin_store", "munin_list", "munin_recent", "munin_delete", "munin_capabilities", "munin_share",
   ] },
   // ── Tasks ──────────────────────────────────────────────────────────────
   { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
@@ -179,7 +189,12 @@ export const MODULES: ModuleEntry[] = [
   // gh after web: same class of external-fetch tooling; fail-open on a missing
   // gh binary (registers nothing until installed). Read-only ops only, so
   // plan mode auto-allows it (plan-tools.ts READ_ONLY_TOOLS).
-  { name: "gh", category: "Tools", describe: "GitHub tool over the gh CLI: repo/file/PR views, PR diff, five search flavors, Actions run_watch. Read-only; mutating flows stay on bash gh.", load: ghModule, config: ghConfig, deferredTools: ["github"] },
+  // github is DIRECT (2026-10-08 usage re-eval): 61 calls across 17 sessions
+  // made it the top deferred-tool user — and every one of them happened in the
+  // pre-deferral direct era. After the deferred pass, release verification did
+  // not discover it via tool_search at all and fell back to raw bash gh,
+  // forfeiting the wrapper's deadline, output cap, and read-only guardrails.
+  { name: "gh", category: "Tools", describe: "GitHub tool over the gh CLI: repo/file/PR views, PR diff, five search flavors, Actions run_watch. Read-only; mutating flows stay on bash gh.", load: ghModule, config: ghConfig },
   // sg after gh: the same external-binary fail-open shape, for ast-grep.
   { name: "sg", category: "Tools", describe: "Structural search & rewrite via the ast-grep CLI: ast_grep search, ast_edit dry-run-default rewrites. Registers nothing until ast-grep/sg is installed.", load: sgModule, deferredTools: ["ast_grep", "ast_edit"] },
   // notify: harmless desktop ping (bell fallback), herdr multi-pane ergonomics.

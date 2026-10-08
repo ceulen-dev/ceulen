@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.15.2 — 2026-10-08
+
+Deferred-tier re-evaluation from live session usage (211 transcripts, 13K tool
+calls). Four tools promoted from `tool_search`-only back to always-declared:
+
+- **munin_search / munin_get** — the Memory Protocol is injected into every
+  configured session and its before-acting rule is a search; the old deferred
+  tier forced a discovery round-trip in front of the protocol's own workflow.
+- **github** — the top user among deferred tools (61 calls/17 sessions, all
+  pre-dating the deferred pass). Since deferral, release verification did not
+  discover it via tool_search and fell back to raw bash gh, forfeiting the
+  wrapper's deadline, output cap, and read-only guardrails.
+- **ux_audit** — every ux_* skill routes into it pre-code; the ux module is
+  always loaded, so the deferred tier was a pure-latency detour.
+
+52 tools stay discover-only (serena, a2a, web cold tools, sg, fff extras,
+munin store/list/…, jfind, cron, shell, notify, rule_get). Declared block goes
+~438 → ~507 tokens, still ~47% below the pre-deferral ~955. Docs swept
+(AGENTS.md module-convention + module sections, README tool-loading, stale
+defaultTools docstring); +registry tier guard test.
+
 ## 0.15.1 — 2026-10-08
 
 pi 1.1.0 compatibility (audit found the API diff purely additive — SettingsManager,

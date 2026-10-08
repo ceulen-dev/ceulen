@@ -2,8 +2,7 @@
  * Pi's built-in tools as /config toggles over the `defaultTools` setting.
  *
  * Rows live on the Tools tab ("Built-in tools" section): one toggle per
- * built-in tool plus the two built-in extension tools (codemode,
- * tool_search). The stock four (read, bash, edit, write) default on — pi
+ * built-in tool plus codemode (the built-in extension tool). The stock four (read, bash, edit, write) default on — pi
  * enables exactly those unless `defaultTools` changes them. A plain-list
  * write only replaces the BUILT-IN startup selection; extension tools with
  * `defaultActive: true` still self-activate, so ceulen's tools are never
