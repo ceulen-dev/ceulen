@@ -47,6 +47,7 @@
 // reasoning-truncation budget is a function argument.
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { isPlanActive } from "../../lib/plan-bridge.ts";
 import { detectFamily, type ModelFamily } from "./lib/family.js";
 import {
   applyPatchPreferenceGuidance,
@@ -199,6 +200,13 @@ export default function steeringModule(pi: ExtensionAPI): void {
     // a live a2a gateway session. anchorReady is display-only here.
     const target = anchorTarget(model);
     if (target && !anchorReady) anchorReady = true;
+    // Plan mode hard-blocks the mutator tools (str_replace_editor is in
+    // plan's BLOCKED_TOOLS), so the DSH pair can never reach the payload.
+    // Defer — not fail-open — so the session stays anchorable and the
+    // fail-open warning never fires: plan-mode replies promote naturally via
+    // the entries scan, and with no replies the bootstrap engages on the
+    // first post-exit turn (permission-module precedent: plan-bridge).
+    if (isPlanActive()) return false;
     return target && !anchorPromoted;
   }
 
@@ -209,6 +217,7 @@ export default function steeringModule(pi: ExtensionAPI): void {
       const anchorActive = anchorTarget(cmdCtx.model); // includes sessionModel fallback
       const anchorState = !anchorActive || !anchorReady
         ? "off"
+        : isPlanActive() && !anchorPromoted ? "deferred (plan mode)"
         : anchorPromoted ? "promoted" : "bootstrapping";
       const totalErrors = [...errorHistory.values()].reduce((sum, e) => sum + e.count, 0);
       const status = [
@@ -349,7 +358,9 @@ export default function steeringModule(pi: ExtensionAPI): void {
       // normal path: full prompt + full catalog.
       anchorTracePush("bootstrap skipped: durable signal found (resume)");
     } else if (anchorTarget(ctx.model)) {
-      anchorTracePush(`bootstrap skipped: already promoted=${anchorPromoted}`);
+      anchorTracePush(isPlanActive() && !anchorPromoted
+        ? "bootstrap deferred: plan mode active (mutator tools blocked)"
+        : `bootstrap skipped: already promoted=${anchorPromoted}`);
     }
 
     remindedThisTurn = false;
