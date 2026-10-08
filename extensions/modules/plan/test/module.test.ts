@@ -200,6 +200,20 @@ describe("plan mode — prompt + approval flow", () => {
     assert.match(h.userMessages[0].content, /Execute the approved plan/);
   });
 
+  it("auto-approve never fires off an aborted settle; the plan still approves on a clean one", async () => {
+    setPlanSettings(agent.dir, { autoApprove: true });
+    const h = await start();
+    await h.commands.plan.handler("", h.ctx({ cwd: REPO }));
+    await h.tools.write_plan.execute("tc1", { title: "T", content: "body" }, undefined, undefined, h.ctx({ cwd: REPO }));
+    // User hit Escape after write_plan → no autonomous execution.
+    await h.fire("agent_settled", { aborted: true }, h.ctx({ cwd: REPO }));
+    assert.equal(h.userMessages.length, 0, "aborted settle does not execute");
+    // The plan stays pending: the next clean settle approves it.
+    await h.fire("agent_settled", {}, h.ctx({ cwd: REPO }));
+    assert.equal(h.userMessages.length, 1);
+    assert.match(h.userMessages[0].content, /Execute the approved plan/);
+  });
+
   it("/plan-approve without a plan warns", async () => {
     const h = await start();
     await h.commands["plan-approve"].handler("current", h.ctx({ cwd: REPO }));

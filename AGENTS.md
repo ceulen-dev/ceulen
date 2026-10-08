@@ -4,7 +4,7 @@ Agent-facing guide to this repo.
 
 ## What ceulen is
 
-One **Pi bundle extension** (npm: `ceulen`): a single install whose feature modules are loaded by one entry (the `ceulen.disabled` settings key is a settings-only escape hatch; cold tools are `deferred` — `tool_search` loads them on demand). Users install with `pi install npm:ceulen` — never `npm install -g`. Every module registers only through Pi's public extension API (peer dep `@earendil-works/pi-coding-agent >=0.99.1 <1.1.0`), so upstream Pi upgrades stay drop-in.
+One **Pi bundle extension** (npm: `ceulen`): a single install whose feature modules are loaded by one entry (the `ceulen.disabled` settings key is a settings-only escape hatch; cold tools are `deferred` — `tool_search` loads them on demand). Users install with `pi install npm:ceulen` — never `npm install -g`. Every module registers only through Pi's public extension API (peer dep `@earendil-works/pi-coding-agent >=0.99.1 <1.2.0`), so upstream Pi upgrades stay drop-in.
 
 ## Layout
 

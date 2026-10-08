@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.15.1 — 2026-10-08
+
+pi 1.1.0 compatibility (audit found the API diff purely additive — SettingsManager,
+ProviderConfig, jiti loader, composer/editor duck-typing, `defaultTools` semantics
+and all root exports unchanged):
+
+- **Peer deps widened** to `>=0.99.1 <1.2.0` for both `@earendil-works/pi-coding-agent`
+  and `@earendil-works/pi-tui` — the old range excluded 1.1.0 semver-wise. Dev lockfile
+  refreshed; typecheck + full suite now run against 1.1.0 types (2767 pass).
+- **advisor**: the background review skips `agent_settled` events flagged `aborted`
+  (pi 1.1.0; user hit Escape) — no isolated review of a half-finished transcript.
+  Absent flag on older pi → unchanged behavior.
+- **plan**: auto-approve never fires off an aborted settle; `planReadyForReview`
+  stays set, so the plan still approves/executes on the next clean settle.
+
 ## 0.15.0 — 2026-10-08
 
 Deferred-exposure pass + config kill-switch removal (net −660 lines):

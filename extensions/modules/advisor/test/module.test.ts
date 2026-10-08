@@ -93,9 +93,9 @@ function fakeCtx(entries: any[], sessionId = "test-session"): any {
   return ctx;
 }
 
-async function fire(_pi: any, state: any, channel: string, ctx: any): Promise<void> {
+async function fire(_pi: any, state: any, channel: string, ctx: any, event: any = {}): Promise<void> {
   const handlers = state.eventHandlers.get(channel) ?? [];
-  for (const h of handlers) await h({}, ctx);
+  for (const h of handlers) await h(event, ctx);
   // agent_settled schedules the review fire-and-forget (never blocks the
   // settle) — drain the event loop so a floating review settles before
   // assertions.
@@ -200,6 +200,22 @@ describe("advisor module wiring", () => {
     assert.deepEqual(readSettings().advisor.models, [MODEL, "test/backup-model"]);
     await fire(pi, state, "agent_settled", step(available(fakeCtx(toolCalls(4))), "tui"));
     assert.equal(calls, 1, "review resumed after re-enabling");
+  });
+
+  it("skips the review when the run settled aborted (pi 1.1.0 Escape flag)", async () => {
+    const { pi, state } = createFakePi();
+    advisorModule(pi);
+    writeSettings({ advisor: { models: [MODEL] } });
+    await fire(pi, state, "session_start", available(fakeCtx([])));
+    let calls = 0;
+    __setIsolatedForTest(async (_c, models) => { calls++; return { text: '{"severity":"nit","note":"live"}', model: models[0], usage: NO_USAGE }; });
+    const settled = step(available(fakeCtx(toolCalls(4))), "tui");
+    // User cancelled the run → no review of a half-finished transcript.
+    await fire(pi, state, "agent_settled", settled, { aborted: true });
+    assert.equal(calls, 0, "aborted settle does not burn a review");
+    // A clean settle (field absent — older pi passes nothing) still reviews.
+    await fire(pi, state, "agent_settled", settled);
+    assert.equal(calls, 1, "clean settle reviews as before");
   });
 
   it("/advisor on re-syncs tool availability after the model becomes available again", async () => {

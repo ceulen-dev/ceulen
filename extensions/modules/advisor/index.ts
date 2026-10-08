@@ -176,8 +176,13 @@ export default function advisorModule(pi: ExtensionAPI): void {
   pi.on("session_compact", (_event, ctx) => resetForRewrite(ctx));
   pi.on("session_before_switch", (_event, ctx) => resetForRewrite(ctx));
 
-  pi.on("agent_settled", async (_event, ctx) => {
+  pi.on("agent_settled", async (event, ctx) => {
     if (!runtime || !watchEnabled || runtime.stats.paused) return;
+    // pi 1.1.0 flags runs the user cancelled (Escape). A half-finished
+    // transcript is not worth an isolated review — and reviewing it would
+    // steer on work the user deliberately stopped. Absent on older pi →
+    // undefined → falsy → today's behavior.
+    if ((event as { aborted?: boolean }).aborted) return;
     // Only TUI: a floating review would die at process exit in headless
     // modes, and a note there fired an unrequested follow-up run. Fail-safe:
     // unknown/mode-less contexts skip too (missed review < surprise run).

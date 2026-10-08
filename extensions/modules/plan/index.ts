@@ -889,8 +889,12 @@ export default function planModule(pi: ExtensionAPI): void {
 
   /** Plan written → prefill /plan-approve, or execute immediately under
    *  auto-approve. */
-  pi.on("agent_settled", async (_event, ctx) => {
+  pi.on("agent_settled", async (event, ctx) => {
     if (!planModeEnabled || !planReadyForReview) return;
+    // pi 1.1.0 flags runs the user cancelled (Escape): never approve off a
+    // settle they aborted. Leave planReadyForReview set — a later clean
+    // settle still picks the plan up.
+    if ((event as { aborted?: boolean }).aborted) return;
     planReadyForReview = false;
     persistState();
     if (settings.autoApprove && ctx.mode !== "print") {

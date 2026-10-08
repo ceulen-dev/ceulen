@@ -1,6 +1,6 @@
 {
   "name": "ceulen",
-  "version": "0.15.0",
+  "version": "0.15.1",
   "description": "Ceulen — the Pi coding agent, fully dressed: one bundle extension carrying the full toolkit with a single /ceulen config command.",
   "type": "module",
   "license": "MIT",
@@ -52,8 +52,8 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": ">=0.99.1 <1.1.0",
-    "@earendil-works/pi-tui": ">=0.99.1 <1.1.0",
+    "@earendil-works/pi-coding-agent": ">=0.99.1 <1.2.0",
+    "@earendil-works/pi-tui": ">=0.99.1 <1.2.0",
     "typebox": "*"
   },
   "devDependencies": {
