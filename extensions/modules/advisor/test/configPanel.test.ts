@@ -143,7 +143,7 @@ describe("buildAdvisorGroups", () => {
 describe("advisorConfig save", () => {
   it("no-ops unless an advisor. key was edited", async () => {
     const m = advisorConfig();
-    await m.save(new Set(["ceulen.disabledTools.advisor"]), ctx());
+    await m.save(new Set(["router.baseUrl"]), ctx());
     assert.deepEqual(notes, []);
     assert.equal(existsSync(join(home, "settings.json")), false);
   });

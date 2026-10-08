@@ -47,7 +47,6 @@ import {
   type WidgetTheme,
 } from "./lib/render.ts";
 import { readLingerSecs } from "./lib/settings.ts";
-import { readDisabledTools } from "../../lib/tools.js";
 
 export const TODO_TOOL = "todo";
 export const TODO_ENTRY_TYPE = "ceulen-todo";
@@ -394,7 +393,6 @@ export default function todoModule(pi: ExtensionAPI): void {
       "External waits (user, another agent, a service): block with the blocker ids, which suppresses the stop reminder; unblock when actionable, and append a clearing phase when the blocker is agent-actionable.",
       "Phase ids are stable for the list's lifetime; when the board loses text, view it — never guess.",
     ],
-    defaultActive: !readDisabledTools().has(TODO_TOOL),
     parameters: todoSchema,
     // TUI-only: the colored board (status colors, strikethrough on done).
     // The LLM-facing text content stays the plain board — this only swaps

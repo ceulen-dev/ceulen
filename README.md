@@ -114,7 +114,7 @@ Registers a `zai-anthropic` provider serving GLM through Z.ai's Anthropic endpoi
 
 `web_search` (adaptive SearXNG → Brave → Firecrawl), `web_extract`, `web_map`, `web_crawl`, `web_screenshot`, `web_pdf`, `web_interact` (real headless-Chrome click/type/evaluate for verifying UI behaviour), `web_research` (Gemini web + Deep Research), `web_image`, `web_chat`, `web_status`. Backend-routing guidance is injected only while a web tool is active.
 
-- Config: `/config` → Tools → **Web** — 16 provider rows (endpoints, keys, timeouts, Gemini cookie, image/chat providers). Written to the global `web` settings section and read per tool call, so saves apply without `/reload`; `BRAVE_API_KEY`, `SEARXNG_BASE_URL`, `FIRECRAWL_*`, `CRAWL4AI_*`, `GEMINI_WEB_*`, `ZAI_API_KEY`, `WEB_IMAGE_*`, `WEB_CHAT_*` env vars still win. Secrets are masked. Individual tools toggle from the same section.
+- Config: `/config` → Tools → **Web** — 16 provider rows (endpoints, keys, timeouts, Gemini cookie, image/chat providers). Written to the global `web` settings section and read per tool call, so saves apply without `/reload`; `BRAVE_API_KEY`, `SEARXNG_BASE_URL`, `FIRECRAWL_*`, `CRAWL4AI_*`, `GEMINI_WEB_*`, `ZAI_API_KEY`, `WEB_IMAGE_*`, `WEB_CHAT_*` env vars still win. Secrets are masked. Cold tools load on demand via `tool_search`.
 - Static extraction uses vendored readability/turndown (no extra install); `jsdom` and `gemini-reverse` are the module's only runtime dependencies.
 
 ### a2a — Agent2Agent protocol
@@ -155,7 +155,7 @@ Opt-in `permission` settings section: allow/ask/deny rules per tool with wildcar
 
 `/config` opens one fullscreen panel covering **pi core settings and every ceulen module**, organized in tabs (Appearance · Model · Interaction · Memory · Context · Shell · Tasks · Providers · Plugins).
 
-- Theme and composer changes preview live while you browse; tool toggles apply immediately
+- Theme and composer changes preview live while you browse; pi built-in tool toggles apply immediately
 - Module on/off switches and pi-core rows take effect after `/reload`
 - Type any text to fuzzy-search every tab; `Esc` saves and closes
 - Non-TUI contexts get a text summary: `/config show`
@@ -170,9 +170,11 @@ Opt-in `permission` settings section: allow/ask/deny rules per tool with wildcar
 { "ceulen": { "disabled": ["munin", "ponytail"] } }
 ```
 
-In `~/.pi/agent/settings.json` or a trusted project's `.pi/settings.json`. `/ceulen` lists what's active; `/config` toggles the same list. Individual tools can be toggled too (Tools tab). Disabled modules register nothing.
+In `~/.pi/agent/settings.json` or a trusted project's `.pi/settings.json` — a settings-only escape hatch for a broken module (no UI). `/ceulen` lists what's active. Disabled modules register nothing.
 
 The core set — router, usage, ux, classifier, composer, advisor, and the `/config` panel itself — is always on and never appears in the kill-switch list.
+
+**Tool loading**: most tools register *deferred* — not declared to the model, loaded on demand by `tool_search` (pi activates it for you). Only the hot core (subagent, todo, web search/extract/screenshot/interact, fffgrep/fffind, plan/repair tools, advisor, classify, think) is declared every request, keeping the standing token cost small no matter how many tools ceulen ships.
 
 ## License
 

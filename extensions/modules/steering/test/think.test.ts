@@ -54,9 +54,6 @@ describe("think tool", () => {
       assert.match((plain as unknown as { render(w: number): string[] }).render(80).join(""), /· think \(1 chars\)/);
     });
 
-    it("defaultActive is true unless the kill-switch names think", () => {
-      assert.equal(thinkTool().defaultActive, true, "isolated dir has no ceulen.disabledTools");
-    });
   });
 
   describe("module gating", () => {
@@ -66,12 +63,11 @@ describe("think tool", () => {
       assert.equal(pi.tools.length, 0, "no tool when the gate is off");
     });
 
-    it("thinkTool: true registers the think tool, active unless disabled", () => {
+    it("thinkTool: true registers the think tool", () => {
       setSteeringSettings(iso.dir, { thinkTool: true });
       const pi = createFakePi();
       assert.equal(pi.tools.length, 1);
       assert.equal(pi.tools[0]!.name, "think");
-      assert.equal(pi.tools[0]!.defaultActive, true);
     });
   });
 });

@@ -5,7 +5,6 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { readDisabledTools } from "../../lib/tools.js";
 import { realSg, sgAvailable, type SgRunner } from "./lib/sg-cli.js";
 import { buildRunArgs, formatMatches, mergeMatches, parseSearch } from "./lib/ops.js";
 
@@ -22,12 +21,9 @@ export default function sgModule(pi: ExtensionAPI): void {
   // (install + /reload activates).
   if (!sgAvailable()) return;
 
-  const disabled = readDisabledTools();
-
   pi.registerTool({
     name: "ast_grep",
     label: "AST Grep",
-    defaultActive: !disabled.has("ast_grep"),
     description:
       "Structural code search via the ast-grep CLI: match AST patterns with meta-variables ($VAR = one node, $$$ALL = many) instead of regex — `$FUNC($$$ARGS)` finds every call. " +
       "Patterns are snippets of real code in the target language. Use for syntax-aware searches regex mangles (calls, imports, JSX). Returns path:line:col + matched text.",
@@ -70,7 +66,6 @@ export default function sgModule(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "ast_edit",
     label: "AST Edit",
-    defaultActive: !disabled.has("ast_edit"),
     description:
       "Structural code rewrite via the ast-grep CLI: one pattern → rewrite pair applied across files (the rewrite reuses $VAR / $$$ALL meta-variables). " +
       "DRY-RUN BY DEFAULT: returns the per-file diff without touching disk. Pass write:true to apply (files are rewritten in place; NOT atomic across files). " +

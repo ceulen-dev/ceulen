@@ -114,7 +114,6 @@ describe("advisor module wiring", () => {
     const { pi, state } = createFakePi();
     advisorModule(pi);
     assert.ok(state.tools.has("advisor"), "advisor tool registered");
-    assert.equal(state.tools.get("advisor").defaultActive, false, "registered inactive — sync() owns availability");
     assert.ok(state.commands.has("advisor"), "/advisor command registered");
     assert.ok(state.entryRenderers.has("ceulen-advisor"), "card entry renderer registered under the ceulen- prefix");
     assert.ok(state.messageRenderers.has("ceulen-advisor"), "deferred-aside message renderer registered");
@@ -151,16 +150,6 @@ describe("advisor module wiring", () => {
     assert.equal(readDisabled().includes("advisor"), false, "advisor is filtered out of the kill-switch list");
   });
 
-  it("honors ceulen.disabledTools across session_start and model_select (per-tool kill-switch wins)", async () => {
-    const { pi, state } = createFakePi();
-    advisorModule(pi);
-    writeSettings({ advisor: { models: [MODEL] }, ceulen: { disabledTools: ["advisor"] } });
-    const ctx = available(fakeCtx([]));
-    await fire(pi, state, "session_start", ctx);
-    assert.equal(state.activeTools.has("advisor"), false, "user-disabled tool is never re-activated by sync()");
-    await fire(pi, state, "model_select", ctx);
-    assert.equal(state.activeTools.has("advisor"), false, "model_select does not undo the kill-switch");
-  });
 
   it("reads the legacy pi-advisor section at session_start, then migrates it on the first /config save", async () => {
     const { pi, state } = createFakePi();

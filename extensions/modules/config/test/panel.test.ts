@@ -19,7 +19,7 @@ after(() => {
 
 const settingsPath = () => join(TMP_HOME, "settings.json");
 
-// ── registry: kill-switch read/write + layer precedence ─────────────────────
+// ── registry: kill-switch read + layer precedence (write side deleted with the /config rows) ──
 
 describe("registry kill-switch", () => {
   it("readDisabled returns [] when no settings file exists", async () => {
@@ -28,34 +28,10 @@ describe("registry kill-switch", () => {
     assert.deepEqual(readDisabled(), []);
   });
 
-  it("writeDisabled round-trips through the same file readDisabled resolves", async () => {
-    try { unlinkSync(settingsPath()); } catch { /* ignore */ }
-    const { readDisabled, writeDisabled, disabledSource } = await import("../../../lib/registry.js");
-    const written = writeDisabled(["ponytail"]);
-    assert.equal(written, settingsPath());
+  it("readDisabled honors a hand-written settings escape hatch and maps the deprecated sub alias", async () => {
+    writeFileSync(settingsPath(), JSON.stringify({ ceulen: { disabled: ["sub", "ponytail"] } }));
+    const { readDisabled } = await import("../../../lib/registry.js");
     assert.deepEqual(readDisabled(), ["ponytail"]);
-    assert.equal(disabledSource().isProject, false);
-  });
-
-  it("writeDisabled merges — unrelated keys survive, tmp residue cleaned", async () => {
-    writeFileSync(settingsPath(), JSON.stringify({ theme: "dark", ceulen: { disabled: ["usage"] } }));
-    const inoBefore = statSync(settingsPath()).ino;
-    const { writeDisabled } = await import("../../../lib/registry.js");
-    writeDisabled(["ponytail"]);
-    const json = JSON.parse(readFileSync(settingsPath(), "utf8"));
-    assert.equal(json.theme, "dark");
-    assert.deepEqual(json.ceulen.disabled, ["ponytail"]);
-    assert.notEqual(inoBefore, statSync(settingsPath()).ino); // tmp+rename atomic
-    assert.ok(!existsSync(settingsPath() + ".tmp"));
-  });
-
-  it("writeDisabled refuses to clobber a corrupt settings.json", async () => {
-    writeFileSync(settingsPath(), '{ "ceulen": { "disabled": ["usage"] }\nOOPS');
-    const before = readFileSync(settingsPath(), "utf8");
-    const { writeDisabled } = await import("../../../lib/registry.js");
-    assert.throws(() => writeDisabled(["ponytail"]), /not valid JSON/);
-    assert.equal(readFileSync(settingsPath(), "utf8"), before);
-    assert.ok(!existsSync(settingsPath() + ".tmp"));
   });
 
   it("deprecated \"sub\" alias still maps (to the now-core usage module, so it disables nothing)", async () => {
@@ -78,29 +54,22 @@ describe("registry kill-switch", () => {
       writeFileSync(join(TMP_HOME, "trust.json"), JSON.stringify({ [projectCwd]: true }));
     });
 
-    it("project ceulen section wins the read AND captures the write", async () => {
+    it("project ceulen section wins the read", async () => {
       writeFileSync(settingsPath(), JSON.stringify({ ceulen: { disabled: ["usage"] } }));
       writeFileSync(projectSettings, JSON.stringify({ ceulen: { disabled: ["ponytail"] } }));
-      const { readDisabled, writeDisabled, disabledSource } = await import("../../../lib/registry.js");
+      const { readDisabled, disabledSource } = await import("../../../lib/registry.js");
 
       assert.deepEqual(readDisabled(projectCwd), ["ponytail"]); // project wins
       const source = disabledSource(projectCwd);
       assert.equal(source.path, projectSettings);
       assert.equal(source.isProject, true);
-
-      const written = writeDisabled(["munin"], projectCwd);
-      assert.equal(written, projectSettings, "write lands where the read resolves — never shadowed");
-      assert.deepEqual(readDisabled(projectCwd), ["munin"]);
-      // Global file untouched by the project-scoped write.
-      assert.deepEqual(JSON.parse(readFileSync(settingsPath(), "utf8")).ceulen.disabled, ["usage"]);
     });
 
-    it("project file WITHOUT a ceulen section does not capture the write", async () => {
+    it("project file WITHOUT a ceulen section does not claim the key", async () => {
       writeFileSync(projectSettings, JSON.stringify({ router: { baseUrl: "http://x" } }));
       try { unlinkSync(settingsPath()); } catch { /* ignore */ }
-      const { writeDisabled, disabledSource } = await import("../../../lib/registry.js");
+      const { disabledSource } = await import("../../../lib/registry.js");
       assert.equal(disabledSource(projectCwd).isProject, false);
-      assert.equal(writeDisabled(["usage"], projectCwd), settingsPath());
     });
   });
 });
@@ -127,37 +96,6 @@ describe("config module", () => {
       } as never,
     };
   };
-
-  it("moduleEnableRow toggles mutate the working set; nextDisabled inverts it", async () => {
-    const { moduleEnableRow, nextDisabled } = await import("../index.js");
-    const { MODULES } = await import("../../../lib/registry.js");
-    const working = new Set(MODULES.map((m) => m.name));
-    const enable = moduleEnableRow("ponytail", "Lazy mode.", working);
-    assert.equal(enable.key, "ceulen.disabled.ponytail");
-    assert.equal(enable.defaultValue, true);
-
-    // Toggle "ponytail" off via its row setter.
-    assert.equal(enable.value, true);
-    enable.set(false);
-    assert.equal(working.has("ponytail"), false);
-    assert.deepEqual(nextDisabled(working), ["ponytail"]);
-
-    enable.set(true);
-    assert.deepEqual(nextDisabled(working), []);
-  });
-
-  it("withEnableRow prepends the Enable row to the module's FIRST section only", async () => {
-    const { withEnableRow } = await import("../index.js");
-    const { MODULES } = await import("../../../lib/registry.js");
-    const working = new Set(MODULES.map((m) => m.name));
-    const groups = [
-      { key: "a", label: "Ponytail", tab: "Tasks", rows: [{ key: "ponytail.defaultMode" }] },
-      { key: "b", label: "Models", tab: "Tasks", rows: [{ key: "ponytail.quietStartup" }] },
-    ] as never;
-    const out = withEnableRow(groups, "ponytail", "Lazy mode.", working);
-    assert.deepEqual(out[0]!.rows.map((r) => r.key), ["ceulen.disabled.ponytail", "ponytail.defaultMode"]);
-    assert.deepEqual(out[1]!.rows.map((r) => r.key), ["ponytail.quietStartup"], "second section untouched");
-  });
 
   it("saveContributions: only edited-key owners are invoked, and a thrower doesn't block siblings", async () => {
     const { saveContributions } = await import("../index.js");
@@ -249,9 +187,8 @@ describe("config module", () => {
       registerCommand: (_name: string, opts: { handler: typeof handler }) => { handler = opts.handler; },
     } as never;
     const factories = new Map<string, () => never>([
-      // Router is core, so its Providers section comes from its OWN
-      // contribution (there is no synthesized Enable-only section).
       [
+
         "router",
         () => ({
           groups: () => [

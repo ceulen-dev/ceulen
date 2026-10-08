@@ -19,7 +19,6 @@
 import { Text } from "@earendil-works/pi-tui";
 import { Type } from "typebox";
 
-import { readDisabledTools } from "../../../lib/tools.js";
 
 /** The dim marker shown in place of the thoughts. */
 export const THINK_MARKER = "·";
@@ -46,7 +45,6 @@ export function thinkTool() {
     promptGuidelines: ["Use the think tool to plan before complex multi-step work."],
     // kill-switch: ceulen.disabledTools names it → registers inactive (the
     // config module's tool rows flip it live via setActiveTools).
-    defaultActive: !readDisabledTools().has("think"),
     parameters: Type.Object(
       { thoughts: Type.String({ description: "private scratchpad; not shown to user" }) },
       { additionalProperties: false },

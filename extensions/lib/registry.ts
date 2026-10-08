@@ -7,7 +7,7 @@
  */
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { PanelGroup } from "./panel.js";
@@ -89,9 +89,12 @@ export interface ModuleEntry {
   /** One-line module purpose — rendered as the kill-switch row's description
    *  and reused by /ceulen status output. */
   describe?: string;
-  /** Canonical tool names the module registers — drives the per-tool
-   *  enable/disable toggle rows in /config (ceulen.disabledTools). */
-  tools?: string[];
+  /** The module's tools registered `exposure: "deferred"` — NOT declared to
+   *  the model; `tool_search` loads them on demand (they stay callable via
+   *  ctx.executeTool/codemode meanwhile). Single source for the tier list;
+   *  every tool a module registers that is NOT listed here stays `direct`.
+   *  The bundle entry injects the exposure at registration (see index.ts). */
+  deferredTools?: string[];
   load: (pi: ExtensionAPI, deps?: ModuleLoadDeps) => void;
   /** Central-config contribution factory, called with the module's OWN guarded
    *  pi once per /config open. Optional — purely additive. */
@@ -112,18 +115,18 @@ export const MODULES: ModuleEntry[] = [
   // Classifier right after router: its classify tool resolves decision models
   // from the router provider's registry catalog (needs router registered, not
   // the module object itself — order is for /config grouping readability).
-  { name: "classifier", core: true, category: "Model", describe: "System One decision models (Jev): classify tool + bash permission auto-approve, via router-discovered models.", load: classifierModule, config: classifierConfig, tools: ["classify"] },
+  { name: "classifier", core: true, category: "Model", describe: "System One decision models (Jev): classify tool + bash permission auto-approve, via router-discovered models.", load: classifierModule, config: classifierConfig },
   // Advisor right after classifier: second-model reviewer (turn-end notes +
   // the on-demand `advisor` tool) with a catalogue-backed model picker in /config.
   // CORE: the advisor is always loaded — its real off-switch is the model chain
   // (an empty `Primary model` row), so it needs no kill-switch row.
-  { name: "advisor", core: true, category: "Model", describe: "Second-model reviewer: reviews each settled turn, injects severity-routed notes, plus an on-demand consult tool.", load: advisorModule, config: advisorConfig, tools: ["advisor"] },
+  { name: "advisor", core: true, category: "Model", describe: "Second-model reviewer: reviews each settled turn, injects severity-routed notes, plus an on-demand consult tool.", load: advisorModule, config: advisorConfig },
   // ── Appearance ─────────────────────────────────────────────────────────
   { name: "usage", core: true, category: "Appearance", describe: "Subscription-usage footer (5h/weekly/monthly windows + credits).", load: usageModule },
   { name: "composer", core: true, category: "Appearance", describe: "Composer shape for the input editor — pick one in /config with a live preview. Core: always on.", load: composerModule, config: composerConfig },
-  { name: "ux", core: true, category: "Appearance", describe: "Anti-slop UI/UX design discipline: /ux modes, ux_audit tool, design skills. No status-bar footprint.", load: uxModule, config: uxConfig, tools: ["ux_audit"] },
+  { name: "ux", core: true, category: "Appearance", describe: "Anti-slop UI/UX design discipline: /ux modes, ux_audit tool, design skills. No status-bar footprint.", load: uxModule, config: uxConfig, deferredTools: ["ux_audit"] },
   // ── Memory ─────────────────────────────────────────────────────────────
-  { name: "munin", category: "Memory", describe: "Munin long-term memory tools (search/get/store/list/recent/delete/capabilities/share) + memory protocol. Config at project level.", load: muninModule, config: muninConfig, tools: [
+  { name: "munin", category: "Memory", describe: "Munin long-term memory tools (search/get/store/list/recent/delete/capabilities/share) + memory protocol. Config at project level.", load: muninModule, config: muninConfig, deferredTools: [
     "munin_search", "munin_get", "munin_store", "munin_list", "munin_recent", "munin_delete", "munin_capabilities", "munin_share",
   ] },
   // ── Tasks ──────────────────────────────────────────────────────────────
@@ -131,24 +134,24 @@ export const MODULES: ModuleEntry[] = [
   // Subagent after ponytail: ponytail's tool_call hook injects into the
   // `subagent` tool's instructions param — hooks resolve at call time, so
   // order is not load-bearing; this is grouping readability.
-  { name: "subagent", category: "Tasks", describe: "In-process subagents: scout/tester/worker/planner/reviewer agents, role-based model pools, classifier tier+thinking routing, background tasks with liveness, herdr delegation.", load: subagentModule, config: subagentConfig, tools: ["subagent", "herdr"] },
+  { name: "subagent", category: "Tasks", describe: "In-process subagents: scout/tester/worker/planner/reviewer agents, role-based model pools, classifier tier+thinking routing, background tasks with liveness, herdr delegation.", load: subagentModule, config: subagentConfig },
   // Plan after subagent: its tool gating reads subagent agent frontmatter
   // (sandbox: read-only) and its before_agent_start must compose BEFORE
   // steering (the last prompt rewriter — see its entry below).
-  { name: "plan", category: "Tasks", describe: "Read-only plan mode: /plan toggle, tool gating, write_plan + ask_user_question, plan model/thinking, approval handoff.", load: planModule, config: planConfig, tools: ["write_plan", "ask_user_question"] },
+  { name: "plan", category: "Tasks", describe: "Read-only plan mode: /plan toggle, tool gating, write_plan + ask_user_question, plan model/thinking, approval handoff.", load: planModule, config: planConfig },
   // A2A after plan: cross-agent delegation (the remote sibling of subagent).
   // No before_agent_start → no prompt-rewrite ordering constraint; its
   // child sessions reuse the host-only session guards in the module.
-  { name: "a2a", category: "Tasks", describe: "A2A Protocol v1.0 peer: call remote agents (a2a_call…), be called by them (opt-in inbound server), local/mDNS/gateway discovery.", load: a2aModule, config: a2aConfig, tools: ["a2a_call", "a2a_status", "a2a_discover", "a2a_list", "a2a_history", "a2a_orchestrate", "a2a_peers"] },
-  { name: "todo", category: "Tasks", describe: "Phased task board: the `todo` tool (init/start/done/block/unblock) with session persistence, blockers, an above-editor HUD, and a status-segment progress readout.", load: todoModule, config: todoConfig, tools: ["todo"] },
+  { name: "a2a", category: "Tasks", describe: "A2A Protocol v1.0 peer: call remote agents (a2a_call…), be called by them (opt-in inbound server), local/mDNS/gateway discovery.", load: a2aModule, config: a2aConfig, deferredTools: ["a2a_call", "a2a_status", "a2a_discover", "a2a_list", "a2a_history", "a2a_orchestrate", "a2a_peers"] },
+  { name: "todo", category: "Tasks", describe: "Phased task board: the `todo` tool (init/start/done/block/unblock) with session persistence, blockers, an above-editor HUD, and a status-segment progress readout.", load: todoModule, config: todoConfig },
   // Cron after todo: scheduled prompts into the live session (the clock-driven
   // sibling of the task board). No before_agent_start → no ordering constraint.
-  { name: "cron", category: "Tasks", describe: "Scheduled jobs firing prompts into the live session: add/remove/list/run/enable/disable/test/logs/export, headless pinned runs, crontab export.", load: cronModule, config: cronConfig, tools: ["cron"] },
+  { name: "cron", category: "Tasks", describe: "Scheduled jobs firing prompts into the live session: add/remove/list/run/enable/disable/test/logs/export, headless pinned runs, crontab export.", load: cronModule, config: cronConfig, deferredTools: ["cron"] },
   // ── Tools ─────────────────────────────────────────────────────────────
   // Repair first in the section: it wraps the built-in tools; serena/fff ride
   // on top (no load-order dependency — hooks resolve at call time).
-  { name: "repair", category: "Tools", tools: ["apply_patch", "str_replace_editor"], describe: "Tool-call hardening: schema argument repair, edit mismatch retry, destructive-command guard. Wraps the built-in tools once; adds apply_patch + str_replace_editor.", load: repairModule, config: repairConfig },
-  { name: "serena", category: "Tools", describe: "Serena semantic code tools via a persistent Python worker.", load: serenaModule, tools: [
+  { name: "repair", category: "Tools", describe: "Tool-call hardening: schema argument repair, edit mismatch retry, destructive-command guard. Wraps the built-in tools once; adds apply_patch + str_replace_editor.", load: repairModule, config: repairConfig },
+  { name: "serena", category: "Tools", describe: "Serena semantic code tools via a persistent Python worker.", load: serenaModule, deferredTools: [
     "serena_status", "serena_list_tools", "serena_get_symbols_overview", "serena_find_symbol",
     "serena_find_referencing_symbols", "serena_find_declaration", "serena_find_implementations",
     "serena_replace_symbol_body", "serena_insert_before_symbol", "serena_insert_after_symbol",
@@ -157,30 +160,30 @@ export const MODULES: ModuleEntry[] = [
     "serena_get_current_config", "serena_check_onboarding_performed", "serena_onboarding",
     "serena_get_diagnostics_for_file",
   ] },
-  { name: "fff", category: "Tools", describe: "FFF fuzzy file/content search (ffgrep, fffind) + @-mention completions.", load: fffModule, tools: [
-    "ffgrep", "ffind", "fff_multi_grep", "resolve_file", "related_files",
+  { name: "fff", category: "Tools", describe: "FFF fuzzy file/content search (ffgrep, fffind) + @-mention completions.", load: fffModule, deferredTools: [
+    "fff_multi_grep", "resolve_file", "related_files",
   ] },
   // jfind after fff: the semantic sibling of the lexical search pair (its
   // judge resolves through the router's classifier models at execute time).
-  { name: "jfind", category: "Tools", describe: "Semantic code find: describe what code does, get files + line ranges (lexical prior + System One judge cascade).", load: jfindModule, tools: ["jfind"] },
+  { name: "jfind", category: "Tools", describe: "Semantic code find: describe what code does, get files + line ranges (lexical prior + System One judge cascade).", load: jfindModule, deferredTools: ["jfind"] },
   // Web after fff: same class of append-only before_agent_start guidance
   // (conditional on web_* tools being active) — no prompt-rewrite contract
   // beyond fff's shipped precedent.
-  { name: "web", category: "Tools", describe: "Unified web tools: search (SearXNG/Brave/Firecrawl), extract & crawl (JSDOM/Firecrawl/Crawl4AI/agy), screenshot/PDF, CDP browser interaction, Gemini research, image generation, one-off chat.", load: webModule, config: webConfig, tools: [
-    "web_search", "web_extract", "web_map", "web_crawl", "web_screenshot", "web_pdf", "web_interact", "web_research", "web_image", "web_chat", "web_status", "web_a11y", "read_pdf",
+  { name: "web", category: "Tools", describe: "Unified web tools: search (SearXNG/Brave/Firecrawl), extract & crawl (JSDOM/Firecrawl/Crawl4AI/agy), screenshot/PDF, CDP browser interaction, Gemini research, image generation, one-off chat.", load: webModule, config: webConfig, deferredTools: [
+    "web_map", "web_crawl", "web_pdf", "web_research", "web_image", "web_chat", "web_status", "web_a11y", "read_pdf",
   ] },
-  { name: "rules", category: "Context", describe: "Sticky RULES.md constraints carried in every request + a rulebook of on-demand rules served by rule_get. Nearest-first project walk over user-level.", load: rulesModule, tools: ["rule_get"] },
+  { name: "rules", category: "Context", describe: "Sticky RULES.md constraints carried in every request + a rulebook of on-demand rules served by rule_get. Nearest-first project walk over user-level.", load: rulesModule, deferredTools: ["rule_get"] },
   // Attachments: paste/drop files become real attachments. No tools/commands —
   // input hook + widget + shortcut only; no load-order constraint.
   { name: "attachments", category: "Files", describe: "Real attachments from pasted/dropped files: [[attach:]] tokens + 📎 chips, image ImageContent parts, large-paste collapse, clipboard file paste.", load: attachmentsModule, config: attachmentsConfig },
   // gh after web: same class of external-fetch tooling; fail-open on a missing
   // gh binary (registers nothing until installed). Read-only ops only, so
   // plan mode auto-allows it (plan-tools.ts READ_ONLY_TOOLS).
-  { name: "gh", category: "Tools", describe: "GitHub tool over the gh CLI: repo/file/PR views, PR diff, five search flavors, Actions run_watch. Read-only; mutating flows stay on bash gh.", load: ghModule, config: ghConfig, tools: ["github"] },
+  { name: "gh", category: "Tools", describe: "GitHub tool over the gh CLI: repo/file/PR views, PR diff, five search flavors, Actions run_watch. Read-only; mutating flows stay on bash gh.", load: ghModule, config: ghConfig, deferredTools: ["github"] },
   // sg after gh: the same external-binary fail-open shape, for ast-grep.
-  { name: "sg", category: "Tools", describe: "Structural search & rewrite via the ast-grep CLI: ast_grep search, ast_edit dry-run-default rewrites. Registers nothing until ast-grep/sg is installed.", load: sgModule, tools: ["ast_grep", "ast_edit"] },
+  { name: "sg", category: "Tools", describe: "Structural search & rewrite via the ast-grep CLI: ast_grep search, ast_edit dry-run-default rewrites. Registers nothing until ast-grep/sg is installed.", load: sgModule, deferredTools: ["ast_grep", "ast_edit"] },
   // notify: harmless desktop ping (bell fallback), herdr multi-pane ergonomics.
-  { name: "notify", category: "Tools", describe: "Desktop notification tool: ping the user when long work settles or input is needed (osascript / notify-send / bell).", load: notifyModule, tools: ["notify"] },
+  { name: "notify", category: "Tools", describe: "Desktop notification tool: ping the user when long work settles or input is needed (osascript / notify-send / bell).", load: notifyModule, deferredTools: ["notify"] },
   // rtk is a PROMPT REWRITER (its before_agent_start appends the RTK note), so
   // it must load BEFORE steering — during a ds-anchor bootstrap, steering's
   // minimal prompt replaces everything, including this note (byte-identity);
@@ -196,14 +199,14 @@ export const MODULES: ModuleEntry[] = [
   // RTK note) loads BEFORE this entry; nothing after steering touches the
   // prompt — do not move rtk back after it or add a prompt rewriter here.
   { name: "rtk", category: "Shell", describe: "Route shell commands through RTK for token savings.", load: rtkModule },
-  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): first-tool hints, reasoning strip, leak cleaning, error recovery hints, DeepSeek guidance + v4-pro minimal-mode anchor.", load: steeringModule, config: steeringConfig, tools: ["think"] },
+  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): first-tool hints, reasoning strip, leak cleaning, error recovery hints, DeepSeek guidance + v4-pro minimal-mode anchor.", load: steeringModule, config: steeringConfig },
   // ── Shell ──────────────────────────────────────────────────────────────
   // Permission after rtk: persistent allow/ask/deny gating. Inert until rules
   // exist; defers to plan mode via the shared plan-bridge flag (order-free).
   { name: "permission", category: "Shell", describe: "Persistent allow/ask/deny permission rules per tool (wildcards, external-directory boundary, doom-loop guard) — opt-in via the `permission` settings section; inert until configured.", load: permissionModule },
   // Background shell sessions (the bash-escape-hatch tool is BLOCKED in plan
   // mode via plan-tools.ts — keep that in sync when renaming).
-  { name: "shells", category: "Shell", describe: "Background shell sessions: start/list/output/stdin/kill over persistent processes (dev servers, watchers). Killed on session shutdown; blocked in plan mode.", load: shellsModule, tools: ["shell"] },
+  { name: "shells", category: "Shell", describe: "Background shell sessions: start/list/output/stdin/kill over persistent processes (dev servers, watchers). Killed on session shutdown; blocked in plan mode.", load: shellsModule, deferredTools: ["shell"] },
   // ── Plugins ────────────────────────────────────────────────────────────
   // Config last: it owns /config and reads the contrib map. CORE: the panel is
   // the only in-app way back from a misconfiguration — it can never be the
@@ -233,7 +236,7 @@ export function agentDirs(): string[] {
     : [path.join(os.homedir(), ".pi", "agent"), path.join(os.homedir(), ".pi", "agents")];
 }
 
-/** The file `readDisabled`/`writeDisabled` resolve: the first candidate that
+/** The file `readDisabled` resolves: the first candidate that
  *  exists and carries a `ceulen` section (a project file configuring only other
  *  keys must not shadow the kill-switch). Falls back to the agent-dir file
  *  (`~/.pi/agent/settings.json`), the documented home for `ceulen.disabled`,
@@ -256,7 +259,7 @@ export function disabledSource(cwd = process.cwd()): { path: string; isProject: 
 
 /** Read the `ceulen.disabled` module list. The project scope is only eligible
  *  when trusted (an untrusted checkout must not re-enable or disable modules).
- *  Resolves through `disabledSource` — the same file `writeDisabled` targets. */
+ *  Resolves through `disabledSource`. */
 export function readDisabled(cwd = process.cwd()): string[] {
   const { path: file } = disabledSource(cwd);
   if (!existsSync(file)) return [];
@@ -271,30 +274,6 @@ export function readDisabled(cwd = process.cwd()): string[] {
   } catch {
     return []; // malformed → defaults (all modules on)
   }
-}
-
-/** Write `ceulen.disabled` into the SAME file readDisabled resolves, so a
- *  toggle can never be shadowed by a project-level section. Atomic (tmp +
- *  rename); a corrupt file refuses to clobber (same data-loss guard as
- *  writeRouterSection). Returns the written path for the caller's disclosure. */
-export function writeDisabled(list: string[], cwd = process.cwd()): string {
-  const { path: file } = disabledSource(cwd);
-  let settings: Record<string, unknown> = {};
-  if (existsSync(file)) {
-    try {
-      settings = JSON.parse(readFileSync(file, "utf8")) as Record<string, unknown>;
-    } catch {
-      throw new Error(`${file} is not valid JSON — fix or remove it before saving.`);
-    }
-  }
-  const ceulen = (settings.ceulen ?? {}) as Record<string, unknown>;
-  ceulen.disabled = list.filter((n) => !isCore(n));
-  settings.ceulen = ceulen;
-  mkdirSync(path.dirname(file), { recursive: true });
-  const tmp = file + ".tmp";
-  writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
-  renameSync(tmp, file);
-  return file;
 }
 
 /** Project trust: read <agentDir>/trust.json ({ "<path>": true|false }),

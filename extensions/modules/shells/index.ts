@@ -8,7 +8,6 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { Type } from "typebox";
-import { readDisabledTools } from "../../lib/tools.js";
 import {
   createSession,
   killSession,
@@ -114,7 +113,6 @@ export default function shellsModule(pi: ExtensionAPI): void {
   pi.registerTool({
     name: "shell",
     label: "Shell",
-    defaultActive: !readDisabledTools().has("shell"),
     description: [
       "Run a shell command as a PERSISTENT background session and interact with it across tool calls (dev servers, watchers, long builds). Actions:",
       '- start: {command, name?, cwd?} — spawn in its own process group; returns an id ("s1"…).',

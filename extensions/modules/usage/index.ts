@@ -1688,7 +1688,7 @@ export interface ContextBreakdown {
   /** Human-readable model name, e.g. "GLM-5.3". */
   modelName?: string;
   systemPrompt: { total: number; sections: Record<string, number> };
-  tools: { total: number; activeCount: number; registeredCount: number; bySource: Record<string, { tokens: number; count: number }> };
+  tools: { total: number; activeCount: number; registeredCount: number; deferred: { count: number; tokens: number }; bySource: Record<string, { tokens: number; count: number }> };
   /** Per-tool costs, descending — powers the "top tools" list. */
   toolCosts: { name: string; tokens: number; source: string }[];
   skills: { total: number; count: number };
@@ -1751,14 +1751,24 @@ export function computeContextBreakdown(input: ContextBreakdownInput): ContextBr
   const bySource: Record<string, { tokens: number; count: number }> = {};
   const toolCosts: { name: string; tokens: number; source: string }[] = [];
   let toolsTotal = 0;
+  // Deferred/inactive tools are NOT in the prompt (pi only declares active
+  // `direct` tools); count their schemas separately so the report reflects
+  // what the model actually receives.
+  let deferredCount = 0;
+  let deferredTokens = 0;
   for (const t of tools) {
     const cost = toolTokens(t);
-    toolsTotal += cost;
-    const src = t.sourceInfo?.source ?? "unknown";
-    const bucket = (bySource[src] ??= { tokens: 0, count: 0 });
-    bucket.tokens += cost;
-    bucket.count += 1;
-    toolCosts.push({ name: t.name, tokens: cost, source: src });
+    if (activeSet.has(t.name)) {
+      toolsTotal += cost;
+      const src = t.sourceInfo?.source ?? "unknown";
+      const bucket = (bySource[src] ??= { tokens: 0, count: 0 });
+      bucket.tokens += cost;
+      bucket.count += 1;
+      toolCosts.push({ name: t.name, tokens: cost, source: src });
+    } else {
+      deferredCount += 1;
+      deferredTokens += cost;
+    }
   }
   toolCosts.sort((a, b) => b.tokens - a.tokens);
 
@@ -1826,7 +1836,7 @@ export function computeContextBreakdown(input: ContextBreakdownInput): ContextBr
     modelLabel: model && "provider" in model && model.provider ? `${model.provider}/${model.id ?? "?"}` : undefined,
     modelName: model && "name" in model ? model.name : undefined,
     systemPrompt: { total: systemTotal, sections },
-    tools: { total: toolsTotal, activeCount: activeSet.size, registeredCount: tools.length, bySource },
+    tools: { total: toolsTotal, activeCount: activeSet.size, registeredCount: tools.length, deferred: { count: deferredCount, tokens: deferredTokens }, bySource },
     toolCosts,
     skills: { total: sections.skills ?? 0, count: countSkills(skillsRaw) },
     memoryFiles: {
@@ -1898,7 +1908,7 @@ export function renderContextPanel(b: ContextBreakdown): string[] {
     for (const name of sectionNames) lines.push(`  ${name}: ${k(b.systemPrompt.sections[name])}`);
   }
   if (b.toolCosts.length > 0) {
-    lines.push("", `Tools (${b.tools.registeredCount}${b.tools.activeCount !== b.tools.registeredCount ? ` · ${b.tools.activeCount} active` : ""}):`);
+    lines.push("", `Tools (${b.tools.activeCount} active · ${k(b.tools.total)} tokens in prompt${b.tools.deferred.count > 0 ? ` · ${b.tools.deferred.count} deferred not in prompt (${k(b.tools.deferred.tokens)})` : ""}):`);
     for (const t of b.toolCosts.slice(0, 5)) lines.push(`  ${t.name}: ${k(t.tokens)}`);
     const top = Object.entries(b.tools.bySource).sort((x, y) => y[1].tokens - x[1].tokens).slice(0, 3);
     for (const [src, s] of top) lines.push(`  ${shortSource(src)}: ${k(s.tokens)} · ${s.count} tool${s.count === 1 ? "" : "s"}`);

@@ -2,7 +2,7 @@
 //
 // Ported from @bacnh85/pi-munin 0.5.12 extensions/index.ts (SDK vendored to
 // lib/sdk.ts; dotenv dropped — ceulen's bundle env.ts ingests trusted .env).
-// Registers the 8 munin_* tools (per-tool kill-switch via ceulen.disabledTools),
+// Registers the 8 munin_* tools (all deferred — tool_search loads them),
 // /munin-status, the Munin Memory Protocol injection (only when configured),
 // the tool_result error sanitizer, and the munin skill (resources_discover).
 // Config lives at PROJECT level (.pi/settings.json `munin` section) — see
@@ -35,7 +35,6 @@ import {
   type Remediation,
 } from "./lib/helpers.js";
 import { withRetry } from "./lib/retry.js";
-import { readDisabledTools } from "../../lib/tools.js";
 import { skillsRoot } from "../../lib/skill-path.js";
 
 // Shared schemas — per-call overrides (params win over env/settings).
@@ -69,7 +68,9 @@ const MUNIN_PROTOCOL_HEADER = `## Munin Memory Protocol
 
 Use Munin to recover and preserve verified project knowledge, not as a task log.
 If Munin is unavailable, state that briefly when it matters and continue from
-repository evidence.
+repository evidence. The munin_* tools are deferred: if none are declared yet,
+load them with one tool_search call for "munin" (they stay declared for the
+rest of the session).
 
 ### Before acting
 
@@ -576,11 +577,8 @@ export default function muninExtension(pi: ExtensionAPI) {
     skillPaths: [path.join(skillsRoot(), "munin")],
   }));
 
-  // Per-tool kill-switch (ceulen.disabledTools): listed tools register
-  // inactive — /config re-activates them live via setActiveTools.
-  const disabled = readDisabledTools();
   for (const tool of makeTools()) {
-    pi.registerTool({ ...tool, defaultActive: !disabled.has(tool.name) } as AnyTool);
+    pi.registerTool(tool as AnyTool);
   }
 
   pi.registerCommand("munin-status", {

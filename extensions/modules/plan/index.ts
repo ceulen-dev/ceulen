@@ -52,7 +52,6 @@ import {
   type ThinkingLevel,
 } from "./lib/settings.js";
 import { getPlanRegistry, planConfig, setPlanBridge, setPlanRegistry, type PlanBridge } from "./configPanel.js";
-import { readDisabledTools } from "../../lib/tools.js";
 // Sandbox semantics live in ONE place: the subagent module resolves agent
 // frontmatter (user + project + bundled). discoverAgents is a pure fs loader,
 // independent of whether the subagent module itself is enabled.
@@ -165,10 +164,7 @@ export default function planModule(pi: ExtensionAPI): void {
   let planReadyForReview = false;
   let applyingStoredModel = false;
   let writePlanInProgress = false;
-  /** Per-tool kill-switch re-read per call: a live /config toggle must never
-   *  be silently undone by entering plan mode. */
-  const planToolsAvailable = (): string[] =>
-    [PLAN_TOOL, ASK_USER_QUESTION_TOOL].filter((t) => !readDisabledTools().has(t));
+  const planToolsAvailable = (): string[] => [PLAN_TOOL, ASK_USER_QUESTION_TOOL];
 
   // ── State / settings ────────────────────────────────────────
 
@@ -594,7 +590,6 @@ export default function planModule(pi: ExtensionAPI): void {
       `Use ${PLAN_TOOL} in plan mode after exploration. No edit/write until the plan is approved.`,
       `Don't call ${PLAN_TOOL} while blocking questions remain; use ${ASK_USER_QUESTION_TOOL} first.`,
     ],
-    defaultActive: !readDisabledTools().has(PLAN_TOOL),
     parameters: Type.Object({
       title: Type.Optional(Type.String({ description: "Short plan title. Optional: derived from the first '# Heading' in content when omitted." })),
       content: Type.String({ description: "Markdown plan content" }),
@@ -617,7 +612,6 @@ export default function planModule(pi: ExtensionAPI): void {
       "Provide a recommended option when one choice is clearly preferable.",
       `Never issue multiple ${ASK_USER_QUESTION_TOOL} calls in the same turn — ask one question, await the answer, then decide.`,
     ],
-    defaultActive: !readDisabledTools().has(ASK_USER_QUESTION_TOOL),
     parameters: Type.Object({
       question: Type.String({ description: "Question to ask the user" }),
       options: Type.Array(

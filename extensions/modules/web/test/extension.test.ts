@@ -1,6 +1,7 @@
-// ceulen integration contract: per-tool kill-switch (ceulen.disabledTools →
-// defaultActive:false), skill contributed via resources_discover, and the
-// before_agent_start guidance hook gated on active web_* tools.
+// ceulen integration contract: 13 registered tools (9 deferred by the bundle
+// entry's registry tier list — the module itself registers plain), skill
+// contributed via resources_discover, and the before_agent_start guidance
+// hook gated on active web_* tools.
 
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
@@ -16,8 +17,8 @@ const ALL_TOOLS = [
   "read_pdf",
 ];
 
-function harness(opts: { disabledTools?: string[]; activeTools?: string[] } = {}) {
-  const tools: Record<string, { name: string; defaultActive?: boolean }> = {};
+function harness(opts: { activeTools?: string[] } = {}) {
+  const tools: Record<string, { name: string }> = {};
   const handlers: Record<string, Function[]> = {};
   const discoverResults: { skillPaths: string[] }[] = [];
   const pi: any = {
@@ -44,9 +45,6 @@ function harness(opts: { disabledTools?: string[]; activeTools?: string[] } = {}
   // + a settings file carrying the disabled list.
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "web-ext-"));
   process.env.PI_CODING_AGENT_DIR = dir;
-  if (opts.disabledTools?.length) {
-    fs.writeFileSync(path.join(dir, "settings.json"), JSON.stringify({ ceulen: { disabledTools: opts.disabledTools } }));
-  }
   try {
     webExtension(pi);
   } finally {
@@ -77,17 +75,9 @@ describe("web module ceulen contract", () => {
     assert.deepEqual(Object.keys(tools).sort(), [...ALL_TOOLS].sort());
   });
 
-  it("ceulen.disabledTools → defaultActive:false (inactive at registration)", () => {
-    const { tools } = harness({ disabledTools: ["web_search", "web_image"] });
-    assert.equal(tools.web_search!.defaultActive, false);
-    assert.equal(tools.web_image!.defaultActive, false);
-    assert.equal(tools.web_extract!.defaultActive, true);
-    assert.equal(tools.web_status!.defaultActive, true);
-  });
-
-  it("all tools default-active when the kill-switch list is empty", () => {
+  it("registers every tool plain (the bundle entry injects the deferred exposure)", () => {
     const { tools } = harness();
-    for (const name of ALL_TOOLS) assert.equal(tools[name]!.defaultActive, true, name);
+    for (const name of ALL_TOOLS) assert.ok(tools[name], name);
   });
 
   it("contributes exactly one skill: skills/web (kill-switch gated by factory load)", () => {

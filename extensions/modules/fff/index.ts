@@ -32,7 +32,6 @@ import { closeSync, fstatSync, openSync, readSync, statSync } from "node:fs";
 import path from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { buildQuery, normalizeExcludes, normalizePathConstraint } from "./lib/query";
-import { readDisabledTools } from "../../lib/tools";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -426,7 +425,6 @@ export default function fffExtension(pi: ExtensionAPI) {
   let enableFsRootScanning = false;
   let toolsRegistered = false;
   let autocompleteRegistered = false;
-  let disabledTools: Set<string> = new Set();
   // Names registerBoundedTool could not claim this session (another
   // extension's guarded() owns them). One dim note after the loop instead of
   // a first-throw unwind — a single collision must not cost the whole toolset.
@@ -1009,7 +1007,6 @@ export default function fffExtension(pi: ExtensionAPI) {
   function registerTools() {
     if (toolsRegistered) return;
     toolsRegistered = true;
-    disabledTools = readDisabledTools();
     skippedTools = [];
 
   // --- Shared render helpers ---
@@ -1054,13 +1051,8 @@ export default function fffExtension(pi: ExtensionAPI) {
 
   const registerOneBoundedTool = (tool: any) => {
     const execute = tool.execute;
-    // Per-tool kill-switch (ceulen.disabledTools): rows use canonical names
-    // (ffgrep/fffind); override mode registers grep/find, so map before the
-    // defaultActive check. /config re-activates disabled tools live.
-    const canonical = tool.name === "grep" ? "ffgrep" : tool.name === "find" ? "fffind" : tool.name;
     pi.registerTool({
       ...tool,
-      defaultActive: !disabledTools.has(canonical),
       async execute(...args: any[]) {
         const result = await execute(...args);
         let truncation: TruncationResult | undefined;

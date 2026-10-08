@@ -4,14 +4,14 @@ Agent-facing guide to this repo.
 
 ## What ceulen is
 
-One **Pi bundle extension** (npm: `ceulen`): a single install whose feature modules are loaded by one entry, each kill-switchable via the `ceulen.disabled` settings key. Users install with `pi install npm:ceulen` — never `npm install -g`. Every module registers only through Pi's public extension API (peer dep `@earendil-works/pi-coding-agent >=0.99.1 <1.1.0`), so upstream Pi upgrades stay drop-in.
+One **Pi bundle extension** (npm: `ceulen`): a single install whose feature modules are loaded by one entry (the `ceulen.disabled` settings key is a settings-only escape hatch; cold tools are `deferred` — `tool_search` loads them on demand). Users install with `pi install npm:ceulen` — never `npm install -g`. Every module registers only through Pi's public extension API (peer dep `@earendil-works/pi-coding-agent >=0.99.1 <1.1.0`), so upstream Pi upgrades stay drop-in.
 
 ## Layout
 
 ```
 extensions/
-  index.ts               bundle entry: guarded() conflict guard, kill-switch, /ceulen command, module load loop
-  lib/                   shared code (registry.ts — MODULES list + kill-switch settings I/O; panel.ts —
+  index.ts               bundle entry: guarded() conflict guard, deferred-exposure injection, /ceulen command, module load loop
+  lib/                   shared code (registry.ts — MODULES list + deferredTools tiers + kill-switch read; panel.ts —
                          config-panel kernel, forked in-repo from @bacnh85/pi-config-panel 0.1.10:
                          split layout + row descriptions/warnings + enum rows + type-to-search;
                          env.ts — trust-gated .env ingestion)
@@ -110,11 +110,9 @@ or `pi-advisor` is disclosed as shadowing the global save.
 model_select, `/advisor on|off`): the `advisor` tool follows the CHAIN — a
 configured advisor is always consultable on demand, also while `Review settled
 turns`/`/advisor watch-off` has the background review off (pi-advisor's
-semantics) — and it honors `ceulen.disabledTools` (its row is relabeled
-`Consult tool` by the config module's `TOOL_PRETTY` map, since the bare name
-`advisor` would sit right under the section of the same name). The per-tool
-kill-switch always wins, so a toggle is never silently undone. The advisor
-module is `core: true` (always loaded, no Enable row, `ceulen.disabled`
+semantics) — no per-tool kill-switch (that surface is deleted; the tool is
+always registered). The advisor
+module is `core: true` (always loaded, `ceulen.disabled`
 ignores it): its real off-switch is an empty `Primary model`.
 
 **Isolated calls** go through the PUBLIC `ctx.modelRegistry.streamSimple`
@@ -132,7 +130,7 @@ replaced session. omp's roster / per-advisor tool grants /
 ## Munin module (munin)
 
 Ported from `@bacnh85/pi-munin` 0.5.12 (see `extensions/modules/munin/`). Eight
-`munin_*` tools (per-tool kill-switchable), `/munin-status`, the Munin Memory
+`munin_*` tools (all deferred — `tool_search` loads them), `/munin-status`, the Munin Memory
 Protocol injection (`before_agent_start`, only when configured), the `tool_result`
 error sanitizer, and the `munin` skill (own `resources_discover` dir). The SDK is
 VENDORED to `lib/sdk.ts` (`// ponytail: vendored from @kalera/munin-sdk 1.5.0`;
@@ -318,10 +316,7 @@ Settings: the `repair` section (`arguments`, `editRetry`, `guards` — read PER
 TOOL CALL; `autoBg`, `autoBgSecs` — bind at module LOAD because the wrapped
 bash description sits in the cache-safe request head, so those rows take
 effect next session; `/repair` status discloses the load-bound values).
-Layering: defaults → global settings.json → trusted project file. Per-tool
-kill-switch: wrapped tools honor `ceulen.disabledTools` at registration
-(`defaultActive: false`), so /config's live tool toggles work over the
-wrapped built-ins too.
+Layering: defaults → global settings.json → trusted project file.
 
 ### Plan module (plan)
 
@@ -463,7 +458,7 @@ lifecycle; same-origin iframes only, cross-origin frames are the documented
 ceiling; READ_ONLY in plan mode). Plus the
 conditional `WEB_ROUTING_GUIDANCE` injection (`before_agent_start`, only when
 a `web_*` tool is active — append-only, the fff precedent) and the `web`
-skill via its own `resources_discover` dir (kill-switch gated). No slash
+skill via its own `resources_discover` dir (module-load gated). No slash
 command — `web_status` covers status.
 
 **Dependencies** — this module is ceulen's SECOND sanctioned dependency
@@ -502,9 +497,11 @@ The two timeout rows are a CLOSED SET (15s/30s/1m/2m/5m) because pi-web's
 loaders reject a value < 1000 ms by throwing — a free-text row could brick
 every Firecrawl/Crawl4AI-backed tool.
 
-Per-tool kill-switch: all 11 tools register `defaultActive` from
-`ceulen.disabledTools` (registry `tools` list) — /config re-activates them
-live. Standalone `@bacnh85/pi-web` must be removed when this module is enabled
+Cold tools (web_map, web_crawl, web_pdf, web_research, web_image, web_chat,
+web_status, web_a11y, read_pdf) are deferred via the registry tier list — the
+hot four (web_search, web_extract, web_screenshot, web_interact) stay direct
+so WEB_ROUTING_GUIDANCE keeps its active-tool trigger. Standalone
+`@bacnh85/pi-web` must be removed when this module is enabled
 (the conflict guard refuses the duplicate `web_*` names).
 
 ### A2A module (a2a)
@@ -641,8 +638,7 @@ op goes through — tests inject a fake). Read-only ops only: `repo_view`,
 code/commits/repos, with repo:/org:/user: scope detection and since/until date
 qualifiers), and `run_watch` (lean JSON poller, failed-job log tails, budget
 `gh.runWatchTimeoutSecs` default 600s on the /config Tools → GitHub row).
-Registration is FAIL-OPEN on a missing `gh` binary (no tool; the Enable row
-stays reachable). Read-only scope is load-bearing: plan mode auto-allows the
+Registration is FAIL-OPEN on a missing `gh` binary (no tool). Read-only scope is load-bearing: plan mode auto-allows the
 tool via `READ_ONLY_TOOLS` (plan/lib/plan-tools.ts) — never add a mutating op
 without re-checking that tier. Mutating flows (pr_create/checkout/push) are
 deliberately deferred to bash `gh`.
@@ -707,9 +703,9 @@ nested blob edited in settings.json by design (OpenCode convention).
 
 ### Tool-parity modules (shells, sg, jfind, notify)
 
-Four OMP/industry-parity ports (2026-10-06 survey plan), all non-core with
-per-tool kill-switches, no prompt rewriting (steering order contract
-untouched):
+Four OMP/industry-parity ports (2026-10-06 survey plan), all non-core, no
+prompt rewriting (steering order contract untouched) — each tool registers
+via the bundle entry's registry `deferredTools` tier:
 
 - **shells** (`extensions/modules/shells/`) — ONE `shell` tool over
   persistent background processes (Claude Code BashOutput/KillShell + Codex
@@ -820,7 +816,7 @@ half):
 
 ## Settings / kill-switch
 
-`ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). `/config` writes to whichever file currently carries the `ceulen` section (see the config-module section) — never a shadowed layer. The deprecated `"sub"` key is still treated as `"usage"`. **CORE modules** (`ModuleEntry.core: true`, today `composer`, `advisor`, `router`, `classifier`, `usage`, `ux`, `config`) are always loaded: `readDisabled`/`writeDisabled` filter them (a stale entry can't disable one), `nextDisabled` never lists them, and the config panel adds no Enable row. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
+`ceulen.disabled: string[]` in `~/.pi/agent/settings.json`, or `.pi/settings.json` in a **trusted** project (trust is read from `<agentDir>/trust.json`, walking up like pi; untrusted repos can't toggle modules). This is a SETTINGS-ONLY escape hatch for a broken module — `/config` carries no Enable rows. The deprecated `"sub"` key is still treated as `"usage"`. **CORE modules** (`ModuleEntry.core: true`, today `composer`, `advisor`, `router`, `classifier`, `usage`, `ux`, `config`) are always loaded: `readDisabled` filters them out (a stale entry can't disable one). The per-tool `ceulen.disabledTools` key + `extensions/lib/tools.ts` are DELETED (2026-10): cold tools are deferred (registry `deferredTools`) and cost ~0 until loaded, so per-tool toggles had nothing to save. Note: Pi's SDK `ExtensionAPI` has no `getSetting` — `extensions/lib/registry.ts` reads settings.json directly.
 
 ## Secrets policy
 
@@ -891,7 +887,7 @@ Mechanism (registry + loader):
   summary (config/index.ts masks in summaryLines; panel.ts:369 only blanks it
   for search filterText) — edit starts EMPTY, never prefills the secret,
   empty submit is a no-op).
-  `ModuleEntry.describe` gives the module one-liner used by its kill-switch row.
+  `ModuleEntry.describe` gives the module one-liner used by `/ceulen` status.
 - Panel layout (v4, fullscreen BOXED frame + OMP's tab → section → rows
   hierarchy):
   the panel opens as a 100%×100% top-left OVERLAY (`ctx.ui.custom` with
@@ -997,13 +993,12 @@ Mechanism (registry + loader):
   (toggle, menu pick, inline submit) the groups are rebuilt from `build` and
   swapped in — that is how per-model override rows appear/disappear on commit.
   `/config` turns it on; static row sets leave it off.
-- `/config` builds the panel per open: pi-settings groups + every module's
-  groups (Enable row prepended to the module's first section) + plugins, sorted
-  by `PI_TAB_ORDER`. Every contribution renders even while its module is
-  DISABLED — the Enable row must stay reachable; only bundle load honors the
-  kill-switch (after /reload). On save it writes the kill-switch first, flushes
-  the pi SettingsManager, saves plugins, then runs each contribution's `save()`
-  in its own try/catch — one failure never blocks the others.
+- `/config` builds the panel per open: pi-settings groups + every contributing
+  module's groups (functional rows only — no Enable/tool toggle rows; modules
+  without a contribution render nothing) + plugins, sorted by `PI_TAB_ORDER`.
+  On save it flushes the pi SettingsManager, saves plugins, then runs each
+  contribution's `save()` in its own try/catch — one failure never blocks the
+  others.
 
 Plugins group (`extensions/modules/config/plugins.ts`) — Pi-package on/off,
 the "whole PI plugins" tab. Pi stores installed packages in the `packages`
@@ -1070,16 +1065,16 @@ tokens follow the same rule (`A2A_GATEWAY_TOKEN`, `A2A_GATEWAY_<KEY>_TOKEN` /
 `migrateSecretsFromSettings` (bundle session_start) moves any pre-fix
 plaintext secrets out of settings.json into .env.local once, idempotently.
 Router's API key already lived only in auth.json — that contract is now repo-
-wide: settings.json carries URLs and switches, never credentials). A NON-CORE module
-without a contribution factory gets
-a synthesized Enable-only section (serena → **Tools** · `Serena`, fff →
-**Tools** · `FFF search`, rtk → **Shell** · `RTK`). The per-module kill-switch
-rows are
-NOT a standalone tab: `withEnableRow()` prepends the module's Enable row (key
-`ceulen.disabled.<name>`, warning "Takes effect after /reload") to its own
-section — a feature is turned on where it is configured. **composer**
-(bundle-level, not a module contribution): Pi-package enable/disable, see
-above.
+wide: settings.json carries URLs and switches, never credentials). A module
+without a contribution factory (serena, fff, rtk, usage, …) has NO /config
+presence — there are no synthesized Enable-only sections and no per-module
+kill-switch rows (the `ceulen.disabled` settings key is the only off-switch).
+The Built-in tools section (defaultTools.ts) offers 9 rows — `tool_search` is
+deliberately ABSENT: the bundle entry re-activates it every session_start
+whenever a deferred tier exists (ceulen owns the switch, the
+MCP-activates-codemode precedent), so a toggle would be silently overridden.
+**composer** (bundle-level, not a module contribution): Pi-package
+enable/disable, see above.
 
 Adding a contribution (the ONLY supported mechanism — there is no
 `describeConfig()`; the loader wires this one):

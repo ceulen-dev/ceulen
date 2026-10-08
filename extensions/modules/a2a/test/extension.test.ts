@@ -58,7 +58,7 @@ describe("a2a extension surface (ceulen port)", () => {
     for (const d of tmpDirs.splice(0)) fs.rmSync(d, { recursive: true, force: true });
   });
 
-  it("registers the 7 outbound tools, ALL defaultActive by default (kill-switch off)", () => {
+  it("registers the 7 outbound tools", () => {
     const dir = makeTempDir("pi-a2a-ext-");
     process.env.PI_CODING_AGENT_DIR = dir;
     const { pi, tools } = stubPi();
@@ -67,24 +67,6 @@ describe("a2a extension surface (ceulen port)", () => {
       tools.map((t) => t.name).sort(),
       ["a2a_call", "a2a_discover", "a2a_history", "a2a_list", "a2a_orchestrate", "a2a_peers", "a2a_status"],
     );
-    assert.isTrue(tools.every((t) => t.defaultActive === true), "all tools active when ceulen.disabledTools is empty");
-  });
-
-  it("ceulen.disabledTools registers the listed tools inactive (defaultActive: false)", () => {
-    const dir = makeTempDir("pi-a2a-ext-");
-    fs.mkdirSync(dir, { recursive: true });
-    process.env.PI_CODING_AGENT_DIR = dir;
-    // registry.readDisabledTools reads ceulen.disabledTools from the PI-dir settings.json
-    fs.writeFileSync(
-      path.join(dir, "settings.json"),
-      JSON.stringify({ ceulen: { disabledTools: ["a2a_call", "a2a_peers"] } }),
-    );
-    const { pi, tools } = stubPi();
-    a2aExtension(pi);
-    const byName = new Map(tools.map((t) => [t.name, t]));
-    assert.isFalse(byName.get("a2a_call")!.defaultActive, "disabledTools-listed tool registers inactive");
-    assert.isFalse(byName.get("a2a_peers")!.defaultActive, "disabledTools-listed tool registers inactive");
-    assert.isTrue(byName.get("a2a_status")!.defaultActive, "unlisted tools stay active");
   });
 
   it("contributes the a2a skill via resources_discover (kill-switch gated by module load)", () => {

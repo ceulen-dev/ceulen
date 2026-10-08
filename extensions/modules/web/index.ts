@@ -17,7 +17,6 @@ import { resolve as resolvePath } from "node:path";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 
-import { readDisabledTools } from "../../lib/tools.js";
 import { skillsRoot } from "../../lib/skill-path.js";
 
 import { formatA11ySummary, runA11yAudit } from "./lib/a11y";
@@ -173,14 +172,6 @@ export default function piWebExtension(pi: ExtensionAPI) {
     // realpath needed; a throw here would kill the whole module load.
     skillPaths: [path.join(skillsRoot(), "web")],
   }));
-
-  // Per-tool kill-switch (ceulen.disabledTools): listed tools register
-  // inactive — /config re-activates them live via setActiveTools. Wrapping
-  // registerTool keeps the 11 definitions below untouched (munin pattern).
-  const disabledTools = readDisabledTools();
-  const registerTool = pi.registerTool.bind(pi);
-  pi.registerTool = ((tool: Parameters<typeof pi.registerTool>[0]) =>
-    registerTool({ ...tool, defaultActive: !disabledTools.has((tool as { name: string }).name) })) as typeof pi.registerTool;
 
   // ── web_search ────────────────────────────────────────────────────────
   pi.registerTool({

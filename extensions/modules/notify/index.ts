@@ -5,11 +5,9 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { readDisabledTools } from "../../lib/tools.js";
 import { notify } from "./lib/notify.js";
 
 export default function notifyModule(pi: ExtensionAPI): void {
-  const disabled = readDisabledTools();
   pi.registerTool({
     name: "notify",
     label: "Notify",
@@ -28,6 +26,5 @@ export default function notifyModule(pi: ExtensionAPI): void {
       if (r.note) text += `\n${r.note}`;
       return { content: [{ type: "text", text }], details: { via: r.via } };
     },
-    defaultActive: !disabled.has("notify"),
   });
 }

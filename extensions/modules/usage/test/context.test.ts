@@ -161,12 +161,16 @@ test("computeContextBreakdown splits sections, groups tools by source, reserves 
   assert.equal(b.systemPrompt.sections.preamble, 100);
   assert.equal(b.systemPrompt.sections.project_context, 2000);
   assert.equal(b.systemPrompt.sections.rules, undefined);
-  // Tools: (400 + ~22)/4=106, (800 + ~43)/4=211, 800/4=200 → grouped by source.
+  // Tools: (400+~20)/4=105, (800+~40)/4=210, 800/4=201. Only the two
+  // ACTIVE tools count toward the prompt; web_extract (inactive) is deferred.
   assert.equal(b.tools.registeredCount, 3);
   assert.equal(b.tools.activeCount, 2);
-  assert.equal(b.tools.bySource["@bacnh85/pi-web"].count, 2);
+  assert.equal(b.tools.deferred.count, 1);
+  assert.equal(b.tools.deferred.tokens, 201);
+  assert.equal(b.tools.bySource["@bacnh85/pi-web"].count, 1);
   assert.equal(b.tools.bySource.pi.count, 1);
   assert.equal(b.tools.total, b.tools.bySource.pi.tokens + b.tools.bySource["@bacnh85/pi-web"].tokens);
+  assert.equal(b.tools.total, 105 + 210);
   // Skills parsed from the skills section.
   assert.equal(b.skills.count, 2);
   assert.ok(b.skills.total > 0 && b.skills.total < 300);
@@ -177,7 +181,7 @@ test("computeContextBreakdown splits sections, groups tools by source, reserves 
   assert.equal(b.messages.count, 2);
   assert.equal(b.messages.total, 50 + 100);
   // Per-tool costs, descending (powers the top-tools list).
-  assert.deepEqual(b.toolCosts.map((t) => t.name), ["web_search", "web_extract", "read"]);
+  assert.deepEqual(b.toolCosts.map((t) => t.name), ["web_search", "read"]);
   // Reserved is the compaction slice only; free space excludes it (pi's trigger:
   // tokens > window - reserveTokens). Model output is NOT reserved.
   assert.deepEqual(b.reserved, { compaction: 16384 });
@@ -258,16 +262,23 @@ test("renderContextPanel lays the legend beside a 20x10 grid (OMP geometry)", ()
 });
 
 test("renderContextPanel fires recommendations above thresholds", () => {
-  // Tiny-ish window so the 516-token tool fixture crosses the 40% recommendation threshold.
-  const b = computeContextBreakdown(fixtureInput({ ctx: fixtureCtx(), model: { maxTokens: 8192, contextWindow: 1200 } }));
+  // Tiny-ish window so the 315-token active-tool fixture crosses the 40% recommendation threshold.
+  const b = computeContextBreakdown(fixtureInput({ ctx: fixtureCtx(), model: { maxTokens: 8192, contextWindow: 700 } }));
   const lines = renderContextPanel(b);
-  assert.ok(lines.some((l) => l.includes("5.0K/1.2K tokens (416.7%)")), lines.join("\n"));
+  assert.ok(lines.some((l) => l.includes("5.0K/700 tokens (714.3%)")), lines.join("\n"));
   assert.ok(lines.some((l) => l.includes("pi-web:")), lines.join("\n"));
   assert.ok(!lines.some((l) => l.includes("@bacnh85/")), "package labels are shortened");
   assert.ok(lines.some((l) => l.includes("project_context: 2.0K")));
-  // tools (516) > 40% of the 1200-token window → recommendation fires.
+  // active tools (317) > 40% of the 700-token window → recommendation fires.
   assert.ok(lines.some((l) => l.startsWith("- ") && l.includes("setActiveTools")), lines.join("\n"));
   assert.ok(!lines.some((l) => l.includes("trimming AGENTS.md")));
+});
+
+test("renderContextPanel discloses the deferred tier separately", () => {
+  const b = computeContextBreakdown(fixtureInput());
+  const lines = renderContextPanel(b);
+  assert.ok(lines.some((l) => l.includes("2 active ·") && l.includes("tokens in prompt")), lines.join("\n"));
+  assert.ok(lines.some((l) => l.includes("1 deferred not in prompt (201)")), lines.join("\n"));
 });
 
 test("renderContextPanel fires memory + skills recommendations above thresholds", () => {

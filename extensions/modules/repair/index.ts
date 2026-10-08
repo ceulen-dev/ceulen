@@ -41,7 +41,6 @@ import {
   defineTool,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { readDisabledTools } from "../../lib/tools.js";
 import { abortAllBgJobs, bashAutoBgClause, setBgDeliveryEnabled, wrapWithAutoBg } from "./lib/auto-bg.js";
 import {
   computeRetryEdit,
@@ -654,10 +653,6 @@ export default function repairModule(pi: ExtensionAPI) {
   const autoBgOn = settings.autoBg;
   const autoBgSecs = settings.autoBgSecs;
 
-  // Per-tool kill-switch: a tool named in ceulen.disabledTools registers
-  // inactive, so /config's live tool toggles keep working over the wrapped
-  // built-ins too. The persisted list re-applies on every load.
-  const disabled = readDisabledTools();
   const repairCounts = new Map<string, number>();
   // Per-file edit-mismatch counters — escalate to apply_patch after repeated
   // unresolvable misses on the same file (26% retry-fail tail).
@@ -699,7 +694,6 @@ export default function repairModule(pi: ExtensionAPI) {
         () => pi.getActiveTools(),
         (cwd: string) => readRepairSettings(cwd).editRetry,
       ),
-      defaultActive: !disabled.has(template.name),
     });
   }
 
@@ -754,7 +748,6 @@ export default function repairModule(pi: ExtensionAPI) {
         }
       },
     }),
-    defaultActive: !disabled.has("apply_patch"),
   });
 
   // ── str_replace_editor: DSH Minimal-pair editor (byte-faithful schema) ──
@@ -772,7 +765,6 @@ export default function repairModule(pi: ExtensionAPI) {
       }
       return result;
     },
-    defaultActive: !disabled.has("str_replace_editor"),
   });
 
   // ── Session lifecycle ──

@@ -1,5 +1,4 @@
 import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
-import { readDisabledTools } from "../../lib/tools";
 import { Type, type TSchema } from "typebox";
 import { withFileMutationQueue } from "@earendil-works/pi-coding-agent";
 import path from "node:path";
@@ -200,12 +199,8 @@ export function shouldRetryAfterTimeout(
 }
 
 export default function serenaToolsExtension(pi: ExtensionAPI) {
-  // Per-tool kill-switch: tools listed in ceulen.disabledTools register
-  // inactive (defaultActive: false) — /config re-activates them live via
-  // setActiveTools; the persisted list re-applies on every load.
-  const disabled = readDisabledTools();
   const reg = <P extends TSchema, D = unknown>(tool: ToolDefinition<P, D>) =>
-    pi.registerTool({ ...tool, defaultActive: !disabled.has(tool.name) });
+    pi.registerTool(tool);
 
   const getWorker = () => {
     if (!worker) {

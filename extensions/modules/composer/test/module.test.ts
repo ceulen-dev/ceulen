@@ -296,26 +296,4 @@ describe("core module contract", () => {
     writeFileSync(settingsFile(), "{}", "utf8");
   });
 
-  it("writeDisabled never persists a core module", async () => {
-    const { writeDisabled } = await import("../../../lib/registry.js");
-    writeDisabled(["composer", "munin"]);
-    assert.deepEqual((readSettings().ceulen as { disabled: string[] }).disabled, ["munin"]);
-    writeFileSync(settingsFile(), "{}", "utf8");
-  });
-
-  it("nextDisabled excludes core modules; withEnableRow adds no row for them", async () => {
-    const { nextDisabled, withEnableRow } = await import("../../config/index.js");
-    // working = enabled set; nextDisabled lists the NOT-enabled non-core modules.
-    assert.deepEqual(nextDisabled(new Set(["munin"])), ["zai", "ponytail", "subagent", "plan", "a2a", "todo", "cron", "repair", "serena", "fff", "jfind", "web", "rules", "attachments", "gh", "sg", "notify", "rtk", "steering", "permission", "shells"]);
-    assert.deepEqual(nextDisabled(new Set(["router", "classifier", "ux", "munin", "usage", "ponytail", "subagent", "plan", "a2a", "todo", "cron", "repair", "serena", "fff", "jfind", "web", "gh", "sg", "notify", "rules", "steering", "zai", "rtk", "config", "attachments", "permission", "shells"])), [], "all-on → nothing disabled");
-    for (const core of ["composer", "advisor", "router", "classifier", "usage", "ux", "config"]) {
-      assert.ok(!nextDisabled(new Set()).includes(core), `core (${core}) is never disableable`);
-    }
-    const groups = [{ key: "composer", label: "Composer Shape", rows: [{ key: "composer.shape" }] }] as never;
-    const out = withEnableRow(groups, "composer", "Composer shape.", new Set(["composer"]));
-    assert.deepEqual(out[0]!.rows.map((r: { key: string }) => r.key), ["composer.shape"], "no Enable row for core");
-    const nonCore = [{ key: "ponytail", label: "Ponytail", rows: [{ key: "ponytail.defaultMode" }] }] as never;
-    const out2 = withEnableRow(nonCore, "ponytail", "Lazy mode.", new Set(["ponytail"]));
-    assert.deepEqual(out2[0]!.rows.map((r: { key: string }) => r.key), ["ceulen.disabled.ponytail", "ponytail.defaultMode"]);
-  });
 });

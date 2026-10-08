@@ -6,13 +6,14 @@
  * and the pi-package (plugins) groups — all categorized under OMP's settings
  * taxonomy (Appearance, Model, Interaction, Context, Tasks, Providers, …).
  *
- * The bundle-level kill-switch is no longer a standalone "Modules" tab: each
- * module's Enable row is prepended to its own functional section (Router →
- * Providers, Ponytail → Tasks, …) so a feature is turned on/off where it is
- * configured. Save routes edited row keys to their owner: `ceulen.disabled.*`
- * → the kill-switch file, `pi.*` → SettingsManager.flush(), `ceulen.plugins.*`
- * → the packages file, `<module>.<key>` → the module's `save()` — each in its
- * own try/catch, so one failure never blocks the others.
+ * Modules are always loaded; the `ceulen.disabled` settings key is a
+ * settings.json-only escape hatch read by the bundle entry, never edited here.
+ * Cold tools register `exposure: "deferred"` (registry `deferredTools`), so
+ * there is no per-module Enable row and no per-tool toggle — /config carries
+ * only functional settings. Save routes edited row keys to their owner:
+ * `pi.*` → SettingsManager.flush(), `ceulen.plugins.*` → the packages file,
+ * `<module>.<key>` → the module's `save()` — each in its own try/catch, so
+ * one failure never blocks the others.
  *
  * Naming note: `/settings` is a Pi builtin — an extension command with that
  * name is skipped in autocomplete and renamed (`/settings:1`), never an
@@ -22,104 +23,9 @@
 import { SettingsManager, type ExtensionAPI, type ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { builtinToolRows, DEFAULT_TOOLS_PREFIX, nextDefaultTools, startupToolSet, writeDefaultTools } from "./defaultTools.js";
 import { openConfigPanel, row, type PanelGroup } from "../../lib/panel.js";
-import { agentDirs, isCore, MODULES, disabledSource, readDisabled, writeDisabled, type ModuleConfig, type ModuleLoadDeps } from "../../lib/registry.js";
-import { readDisabledTools, writeDisabledTools } from "../../lib/tools.js";
+import { agentDirs, MODULES, type ModuleConfig, type ModuleLoadDeps } from "../../lib/registry.js";
 import { buildPiSettingsGroups, isPiKey, PI_TAB_ORDER, type PiMenuLookup } from "./piSettings.js";
 import { buildPluginsGroups, isPluginsKey, openPluginsWorking, savePlugins } from "./plugins.js";
-
-export const KILL_SWITCH_PREFIX = "ceulen.disabled.";
-export const TOOL_SWITCH_PREFIX = "ceulen.disabledTools.";
-
-/** Display overrides for tool rows whose bare name would not explain itself
- *  (the row IS the tool's kill-switch, so it must say what on/off means).
- *  Tools without an entry keep the bare tool name — the identity the model
- *  sees — with the generic registration description. */
-const TOOL_PRETTY: Record<string, { label: string; description: string }> = {
-  advisor: {
-    label: "Consult tool",
-    description: "Registers the advisor tool so the agent can ask for a second opinion on demand. Off = not registered; the background review is unaffected.",
-  },
-};
-
-/** Read the current kill-switch state as a Set of ENABLED module names. */
-function enabledModules(): Set<string> {
-  const disabled = new Set(readDisabled());
-  // Core modules are always enabled, whatever a stale settings file says.
-  return new Set(MODULES.map((m) => m.name).filter((n) => !disabled.has(n)));
-}
-
-/** The module's Enable kill-switch row over a live working Set (toggles
- *  mutate it; save diffs it against the persisted state). Lives at the top of
- *  the module's own section — the feature is turned on where it is
- *  configured. When the effective settings file is the project's, the
- *  description discloses where writes land. */
-export function moduleEnableRow(name: string, describe: string, working: Set<string>): ReturnType<typeof row> {
-  const where = disabledSource().isProject ? "this project's .pi/settings.json" : "the global settings.json";
-  return row(`${KILL_SWITCH_PREFIX}${name}`, "Enabled", "toggle", working.has(name), (v) => {
-    if (v) working.add(name);
-    else working.delete(name);
-  }, {
-    description: `${describe} Writes ${where}.`,
-    // Sole warning rows: the kill-switch does NOT apply on save — the ⚠
-    // marks "needs /reload" against the instant-apply rest.
-    warning: "Takes effect after /reload (or restart).",
-    defaultValue: true,
-  });
-}
-
-/** Prepend a module's Enable row to the FIRST group of its contribution. */
-export function withEnableRow(groups: PanelGroup[], name: string, describe: string, working: Set<string>): PanelGroup[] {
-  // Core modules are always on — no kill-switch row (nothing to toggle).
-  if (isCore(name)) return groups;
-  const [first, ...rest] = groups;
-  if (!first) return groups;
-  return [{ ...first, rows: [moduleEnableRow(name, describe, working), ...first.rows] }, ...rest];
-}
-
-/** The kill-switch list that results from toggling `working` (enabled set).
- *  Pure — exported for tests. Core modules are excluded (never disableable). */
-export function nextDisabled(working: Set<string>): string[] {
-  return MODULES.filter((m) => !m.core).map((m) => m.name).filter((n) => !working.has(n));
-}
-
-/** One per-tool toggle row (key `ceulen.disabledTools.<tool>` over the given
- *  working set of ENABLED tool names). Applied live on save — no /reload. */
-export function moduleToolRow(tool: string, working: Set<string>): ReturnType<typeof row> {
-  const pretty = TOOL_PRETTY[tool];
-  return row(`${TOOL_SWITCH_PREFIX}${tool}`, pretty?.label ?? tool, "toggle", working.has(tool), (v) => {
-    if (v) working.add(tool);
-    else working.delete(tool);
-  }, {
-    description: pretty?.description ?? "Registers the tool inactive when off — applied to this session immediately on save.",
-    defaultValue: true,
-  });
-}
-
-/** Toggle rows for every tool a module declares. Exported for tests. */
-export function moduleToolRows(tools: string[] | undefined, working: Set<string>): ReturnType<typeof row>[] {
-  return (tools ?? []).map((t) => moduleToolRow(t, working));
-}
-
-/** Append the module's tool rows after its (first-section) rows. A no-op for
- *  modules without a `tools` list. Exported for tests. */
-export function withToolRows(groups: PanelGroup[], tools: string[] | undefined, working: Set<string>): PanelGroup[] {
-  const rows = moduleToolRows(tools, working);
-  if (rows.length === 0) return groups;
-  const [first, ...rest] = groups;
-  if (!first) return groups;
-  return [{ ...first, rows: [...first.rows, ...rows] }, ...rest];
-}
-
-/** The disabled-tools list that results from toggling `working` (enabled set)
- *  across every ceulen-declared tool. Pure — exported for tests. */
-export function nextDisabledTools(working: Set<string>): string[] {
-  return MODULES.flatMap((m) => m.tools ?? []).filter((n) => !working.has(n));
-}
-
-/** Every tool name ceulen modules declare. */
-export function allDeclaredTools(): string[] {
-  return MODULES.flatMap((m) => m.tools ?? []);
-}
 
 /** Apply the disabled-tools list to the LIVE session: drop newly disabled
  *  tools, re-activate newly enabled ones (registered tools only — unknown
@@ -190,12 +96,7 @@ export async function saveContributions(
 }
 
 function summaryLines(groups: PanelGroup[]): string[] {
-  const enabled = enabledModules();
-  const lines = [
-    "── Ceulen config ──",
-    `Modules: ${MODULES.map((m) => `${m.name}${enabled.has(m.name) ? "" : " (off)"}`).join(", ")}`,
-    "",
-  ];
+  const lines = ["── Ceulen config ──"];
   // Generic row dump per tab/section (label: value) — stays in lockstep with
   // the panel's assembly, pi settings and plugins included.
   let lastTab = "";
@@ -224,7 +125,7 @@ function summaryLines(groups: PanelGroup[]): string[] {
     "  /ceulen            Module status",
     "  /ponytail status   Ponytail mode + default",
     "",
-    "Kill-switch: `ceulen.disabled` in settings.json; /reload (or restart) applies.",
+    "Escape hatch: `ceulen.disabled` in settings.json (no UI); /reload applies.",
   );
   return lines;
 }
@@ -235,47 +136,11 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
   // so a save that re-registers a provider stays the owner's claim.
   const factories = deps?.configContribs ?? new Map<string, () => ModuleConfig>();
 
-  // Where each module's section lives in OMP's taxonomy — pretty section
-  // names + icons only; the TAB comes from the registry's `category` (one
-  // source: adding a module = one registry entry, no second map to touch).
-  // A module WITHOUT a contribution factory (usage, config) renders an
-  // Enable-only section here; unknown modules fall back to their own tab so
-  // a new module still renders.
-  const PRETTY_OF: Record<string, { section: string; icon?: string }> = {
-    router: { section: "Router", icon: "🌐" },
-    classifier: { section: "Classifier (Jev)", icon: "⚖" },
-    advisor: { section: "Advisor", icon: "🧭" },
-    steering: { section: "Steering", icon: "🎯" },
-    zai: { section: "Z.AI (Anthropic)", icon: "⚡" },
-    usage: { section: "Usage footer", icon: "📊" },
-    munin: { section: "Munin", icon: "🪶" },
-    composer: { section: "Composer", icon: "🎨" },
-    ux: { section: "UX discipline", icon: "📐" },
-    ponytail: { section: "Ponytail", icon: "🦥" },
-    plan: { section: "Plan mode", icon: "🗺️" },
-    todo: { section: "Todo", icon: "☑" },
-    cron: { section: "Cron", icon: "⏰" },
-    attachments: { section: "Attachments", icon: "📎" },
-    permission: { section: "Permissions", icon: "🛡" },
-    serena: { section: "Serena" },
-    repair: { section: "Repair", icon: "🔧" },
-    fff: { section: "FFF search" },
-    web: { section: "Web", icon: "🌍" },
-    gh: { section: "GitHub", icon: "🐙" },
-    a2a: { section: "A2A", icon: "📡" },
-    rtk: { section: "RTK" },
-    config: { section: "Ceulen config", icon: "🧩" },
-  };
-  const SECTION_OF: Record<string, { tab: string; section: string; icon: string | undefined }> = Object.fromEntries(
-    MODULES.map((m) => [m.name, { tab: m.category, section: PRETTY_OF[m.name]?.section ?? m.name, icon: PRETTY_OF[m.name]?.icon }]),
-  );
 
   pi.registerCommand("config", {
     description: "Central settings panel for all ceulen modules.",
     handler: async (args, ctx) => {
       const sub = String(args ?? "").trim().toLowerCase();
-      const workingEnabled = new Set(enabledModules());
-      const workingTools = new Set(allDeclaredTools().filter((t) => !readDisabledTools().has(t)));
       const pluginsWorking = openPluginsWorking();
       // Pi core settings: an OWN SettingsManager instance over the same files
       // (typed setters persist to global settings.json with pi's own locking;
@@ -289,39 +154,16 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
       const initialStartup = startupToolSet(piSettings);
       const workingStartup = new Set(initialStartup);
 
-      // A DISABLED module has no registered factory (the loader skips it), so
-      // its section collapses to the Enable row below — settings are moot
-      // while off, and the row must stay reachable to turn it back on.
+      // The loader skips a module named in the `ceulen.disabled` settings
+      // escape hatch, so its factory (and section) never renders here — the
+      // settings.json key is the only way back, by design (no UI toggles).
       const contributions = [...factories.entries()].map(([name, factory]) => ({ name, cfg: factory() }));
 
       // Assemble in OMP taxonomy order: pi settings first (they own the
       // Appearance/Model/Interaction/Context/Shell spine), then ceulen module
-      // sections with their Enable row, then plugins.
+      // sections (functional rows only — no Enable/tool toggles), then plugins.
       const assemble = (): PanelGroup[] => {
-        const seen = new Set(contributions.map((c) => c.name));
-        const modGroups = contributions.flatMap((c) => {
-          const section = SECTION_OF[c.name];
-          const groups = c.cfg.groups();
-          if (!section) return groups;
-          const module = MODULES.find((m) => m.name === c.name);
-          return withToolRows(withEnableRow(groups, c.name, module?.describe ?? "", workingEnabled), module?.tools, workingTools);
-        });
-        // Modules with no contribution factory still need their Enable row
-        // reachable (usage, config itself) — and a disabled module needs the
-        // same synthesized section to be switchable back on. Core modules are
-        // always on: no synthesized Enable-only section (their contribution,
-        // if any, renders without one).
-        for (const m of MODULES) {
-          const section = SECTION_OF[m.name];
-          if (!section || seen.has(m.name) || m.core) continue;
-          modGroups.push({
-            key: `ceulen-${m.name}`,
-            label: section.section,
-            tab: section.tab,
-            icon: section.icon,
-            rows: [moduleEnableRow(m.name, m.describe ?? "", workingEnabled), ...moduleToolRows(m.tools, workingTools)],
-          });
-        }
+        const modGroups = contributions.flatMap((c) => c.cfg.groups());
         // Plugins' package sections precede the config module's own switch.
         const piGroups = buildPiSettingsGroups(piSettings, piMenuLookup(ctx));
         // Built-in tools lead the Tools tab (before the extension-dirs rows).
@@ -356,34 +198,6 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
         onSave: async (_saved, edited) => {
           const keys = edited ?? new Set<string>();
 
-          // Kill-switch first: compare the working Set against what's persisted.
-          if ([...keys].some((k) => k.startsWith(KILL_SWITCH_PREFIX))) {
-            try {
-              const file = writeDisabled(nextDisabled(workingEnabled));
-              ctx.ui.notify(`Module kill-switch saved to ${file} — /reload (or restart) to apply.`, "info");
-            } catch (e) {
-              ctx.ui.notify(`Kill-switch save failed: ${e instanceof Error ? e.message : e}`, "error");
-            }
-          }
-
-          if ([...keys].some((k) => k.startsWith(TOOL_SWITCH_PREFIX))) {
-            try {
-              const before = new Set(allDeclaredTools().filter((t) => !readDisabledTools().has(t)));
-              const after = workingTools;
-              const file = writeDisabledTools(nextDisabledTools(after));
-              applyToolSwitches(pi, before, after);
-              const changed = allDeclaredTools().filter((t) => before.has(t) !== after.has(t));
-              ctx.ui.notify(
-                changed.length > 0
-                  ? `Tools ${changed.map((t) => (after.has(t) ? `+${t}` : `-${t}`)).join(" ")} — saved to ${file}, applied live.`
-                  : `Tool toggles saved to ${file}.`,
-                "info",
-              );
-            } catch (e) {
-              ctx.ui.notify(`Tool toggle save failed: ${e instanceof Error ? e.message : e}`, "error");
-            }
-          }
-
           // Pi packages (plugins): writes land in the file each entry came from.
           if ([...keys].some(isPluginsKey)) {
             try {
@@ -396,8 +210,8 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
             }
           }
 
-          // Module contributions: each isolated — one module's failure must not
-          // block the others (nor the kill-switch above).
+          // Module contributions: each isolated — one module's failure must
+          // never block the others.
           await saveContributions(contributions, keys, ctx);
 
           // Pi's built-in tools: persist the selection (stock-equal deletes

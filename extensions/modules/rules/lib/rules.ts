@@ -354,7 +354,7 @@ export function composeRulesBlock(model: RuleModel, cwd: string): string | undef
   }
   if (model.rulebook.length > 0) {
     const lines = model.rulebook.map((rule) => `- ${rule.name}: ${rule.description}`).join("\n");
-    sections.push(`Rulebook — read the full body with rule_get("<name>") before applying one:\n${lines}`);
+    sections.push(`Rulebook — read the full body with rule_get("<name>") before applying one (rule_get is deferred: if not yet declared, load it with one tool_search call for "rule_get"):\n${lines}`);
   }
   return `<user-rules>\n${sections.join("\n\n")}\n</user-rules>`;
 }

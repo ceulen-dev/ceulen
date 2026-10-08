@@ -26,8 +26,11 @@ import { agentDirs } from "../../lib/registry.js";
 export const STOCK_DEFAULT_TOOLS = ["read", "bash", "edit", "write"] as const;
 
 /** Every built-in tool the panel offers, in render order. Blurbs from pi's
- *  CLI docs. codemode/tool_search are built-in EXTENSION tools, off by
- *  default; MCP activates codemode automatically when a server needs it. */
+ *  CLI docs. codemode is a built-in EXTENSION tool, off by default; MCP
+ *  activates it automatically when a server needs it. tool_search is NOT
+ *  offered: ceulen's deferred tool tier depends on it, and the bundle entry
+ *  re-activates it every session_start — a toggle here would be silently
+ *  overridden (ceulen owns the switch, MCP-activates-codemode precedent). */
 const BUILTIN_TOOLS: readonly { name: string; blurb: string }[] = [
   { name: "read", blurb: "Read text files and supported images." },
   { name: "bash", blurb: "Run shell commands." },
@@ -38,7 +41,6 @@ const BUILTIN_TOOLS: readonly { name: string; blurb: string }[] = [
   { name: "find", blurb: "Find paths using glob patterns." },
   { name: "ls", blurb: "List directory contents." },
   { name: "codemode", blurb: "Run JavaScript that calls the other tools. MCP turns it on when needed." },
-  { name: "tool_search", blurb: "Search tools not declared to the model and declare the matches." },
 ];
 
 export const DEFAULT_TOOLS_PREFIX = "pi.defaultTools.";

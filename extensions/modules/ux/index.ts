@@ -28,7 +28,6 @@ import {
 } from "./lib/config.js";
 import { getUxInstructions } from "./lib/instructions.js";
 import { row, type PanelGroup } from "../../lib/panel.js";
-import { readDisabledTools } from "../../lib/tools.js";
 import { skillsRoot } from "../../lib/skill-path.js";
 import type { ModuleConfig } from "../../lib/registry.js";
 
@@ -293,9 +292,6 @@ export default function uxExtension(pi: ExtensionAPI) {
     currentMode = normalized;
   };
 
-  // Per-tool kill-switch (ceulen.disabledTools): ux_audit registers inactive
-  // when listed — /config re-activates it live via setActiveTools.
-  const disabled = readDisabledTools();
   const auditTool: AuditToolDefinition = {
     name: "ux_audit",
     label: "UX Slop Audit",
@@ -331,7 +327,7 @@ export default function uxExtension(pi: ExtensionAPI) {
       };
     },
   };
-  pi.registerTool({ ...auditTool, defaultActive: !disabled.has("ux_audit") });
+  pi.registerTool(auditTool);
 
   pi.registerCommand("ux", {
     description: `Set mode: ${RUNTIME_MODES.join("|")}, or status`,

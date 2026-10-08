@@ -15,7 +15,6 @@ import os from "node:os";
 import path from "node:path";
 
 import rulesExtension from "../index.ts";
-import { readDisabledTools } from "../../../lib/tools";
 
 const temps: string[] = [];
 const envBackup = process.env.PI_CODING_AGENT_DIR;
@@ -27,7 +26,6 @@ after(() => {
   for (const dir of temps) rmSync(dir, { recursive: true, force: true });
   if (envBackup !== undefined) process.env.PI_CODING_AGENT_DIR = envBackup;
   else delete process.env.PI_CODING_AGENT_DIR;
-  clearDisabled();
 });
 
 function tmp(prefix: string): string {
@@ -77,16 +75,6 @@ function context(cwd: string, notes: Harness["notes"] = []): any {
   return { cwd, ui: { notify: (message: string, level?: string) => notes.push({ message, level }) }, isProjectTrusted: () => true };
 }
 
-/** Point the kill-switch at the temp agent dir (readDisabledTools has no cwd arg). */
-function disableTools(names: string[]): void {
-  process.env.PI_CODING_AGENT_DIR = agentDir;
-  writeFileSync(path.join(agentDir, "settings.json"), JSON.stringify({ ceulen: { disabledTools: names } }), "utf8");
-}
-
-function clearDisabled(): void {
-  rmSync(path.join(agentDir, "settings.json"), { force: true });
-}
-
 async function startBlock(cwd: string, base = "BASE"): Promise<string | undefined> {
   const { events } = harness();
   const result = await events.get("before_agent_start")!({ systemPrompt: base, prompt: "p" }, context(cwd));
@@ -112,21 +100,14 @@ describe("rules module — before_agent_start", () => {
 
   it("does not gate on the tool set (the fff pattern minus the active-tool check)", async () => {
     const cwd = workspace({ ".pi/RULES.md": "## sticky\nS body\n" });
-    disableTools(["rule_get"]);
-    try {
-      assert.equal(readDisabledTools().has("rule_get"), true);
-      assert.ok((await startBlock(cwd))!.includes("S body"));
-    } finally {
-      clearDisabled();
-    }
+    assert.ok((await startBlock(cwd))!.includes("S body"));
   });
 });
 
 describe("rules module — rule_get", () => {
-  it("registers the canonical tool name, active by default", () => {
+  it("registers the canonical tool name", () => {
     const { tools } = harness();
     assert.deepEqual([...tools.keys()], ["rule_get"]);
-    assert.equal(tools.get("rule_get").defaultActive, true);
   });
 
   it("returns the body (imports expanded) for a found rule and lists names when not found", async () => {
@@ -160,14 +141,6 @@ describe("rules module — rule_get", () => {
     assert.ok(result.content[0].text.includes("no RULES.md exists in this workspace"));
   });
 
-  it("registers inactive when listed in ceulen.disabledTools", () => {
-    disableTools(["rule_get"]);
-    try {
-      assert.equal(harness().tools.get("rule_get").defaultActive, false);
-    } finally {
-      clearDisabled();
-    }
-  });
 });
 
 describe("rules module — /rules command", () => {

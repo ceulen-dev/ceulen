@@ -33,7 +33,6 @@ import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getClassifierSettings } from "./lib/settings.js";
 import { setClassifierRegistry } from "./configPanel.js";
-import { readDisabledTools } from "../../lib/tools.js";
 
 // ── Risk gate (static, before Jev ever sees a command) ──────────────────────
 
@@ -182,8 +181,6 @@ export default function (pi: ExtensionAPI) {
   pi.registerTool({
     name: "classify",
     label: "Classify",
-    // Per-tool kill-switch (ceulen.disabledTools / /config tool rows).
-    defaultActive: !readDisabledTools().has("classify"),
     description:
       "Ask a System One decision model (TypeSafe Jev) typed questions about a state and get calibrated answers: " +
       "noul (probability of yes), choice (option + per-option probabilities + confidence), score (weighted position + confidence). " +

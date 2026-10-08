@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.15.0 — 2026-10-08
+
+Deferred-exposure pass + config kill-switch removal (net −660 lines):
+
+- **Deferred tools**: 56 cold tools across 19 modules now register with
+  `exposure: "deferred"` — pi declares only hot direct tools in the system
+  prompt (fresh session: 23 tools ≈ 438 tokens, was ~79 ≈ 21K);
+  `tool_search` loads them on demand and the bundle re-activates
+  `tool_search` on `session_start` whenever a deferred tier exists.
+  Registry `tools?: string[]` → `deferredTools?: string[]` tier lists;
+  `ceulen.disabledTools` + `lib/tools.ts` deleted outright.
+- **/config**: module Enable rows, synthesized Enable-only sections, and
+  per-tool toggle rows REMOVED — `ceulen.disabled` remains the
+  settings-only escape hatch (no UI); Built-in tools is 9 rows
+  (tool_search removed — ceulen owns its activation).
+- **usage report fix**: `computeContextBreakdown` counted ALL registered
+  tool schemas as "System tools" — now counts ACTIVE tools only (what the
+  model actually receives) and discloses the deferred tier separately
+  (`Tools (N active · X tokens in prompt · M deferred not in prompt (Y))`).
+  Fresh-session prompts were never carrying the 21K the old report showed.
+- Prompt-guidance updated for on-demand loading (serena guidance matches
+  `tool_search`, munin protocol + rules rulebook point at `tool_search`
+  first); tests updated, +1 deferred-tier disclosure suite.
+
 ## 0.14.0 — 2026-10-08
 
 Review-wave hardening across 7 modules (round-3 findings), 8 new regression

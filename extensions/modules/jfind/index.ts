@@ -6,7 +6,6 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { existsSync, statSync } from "node:fs";
 import { resolve as resolvePath } from "node:path";
 import { Type } from "typebox";
-import { readDisabledTools } from "../../lib/tools.js";
 import { formatBytes } from "./lib/format.js";
 import { runCascade, FIND_TIMEOUT_MS, type CascadeResult } from "./lib/cascade.js";
 import { createJudge } from "./lib/judge.js";
@@ -20,11 +19,9 @@ function formatBytesCeulen(bytes: number): string {
 }
 
 export default function jfindModule(pi: ExtensionAPI): void {
-  const disabled = readDisabledTools();
   pi.registerTool({
     name: "jfind",
     label: "Semantic Find",
-    defaultActive: !disabled.has("jfind"),
     description:
       "Semantic code find: describe a BEHAVIOR (\"where do we parse CLI flags\", \"retry with backoff around provider calls\") and get the files and line ranges that implement it, strongest first. " +
       "A lexical keyword scan ranks candidates, then a System One judge (the router's classifier models) ranks filenames, passage sketches, and full passages in three waves. " +

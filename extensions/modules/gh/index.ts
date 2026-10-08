@@ -12,7 +12,6 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { readDisabledTools } from "../../lib/tools.js";
 import { ghAvailable, realGh } from "./lib/gh-cli.js";
 import { executeOp } from "./lib/ops.js";
 
@@ -40,7 +39,6 @@ export default function ghModule(pi: ExtensionAPI): void {
   // stays registered in the loader) so installing gh + /reload activates it.
   if (!ghAvailable()) return;
 
-  const disabled = readDisabledTools();
   pi.registerTool({
     name: "github",
     label: "GitHub",
@@ -81,6 +79,5 @@ export default function ghModule(pi: ExtensionAPI): void {
         return { content: [{ type: "text", text: err instanceof Error ? err.message : String(err) }], isError: true, details: undefined };
       }
     },
-    defaultActive: !disabled.has("github"),
   });
 }

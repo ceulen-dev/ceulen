@@ -84,11 +84,6 @@ test("extension registers the /ux command and ux_audit tool, and NO status bar",
   assert.equal(events.has("agent_end"), false, "no agent_end handler (status-bar only)");
 });
 
-test("ux_audit is registered default-active unless ceulen.disabledTools lists it", () => {
-  const active = createPiHarness();
-  assert.equal(active.tools.get("ux_audit").defaultActive, true);
-});
-
 test("ux_audit parameter schema has the expected shape", () => {
   const { tools } = createPiHarness();
   const params = tools.get("ux_audit").parameters;

@@ -22,7 +22,6 @@ import type {
   ExtensionContext,
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
-import { readDisabledTools } from "../../lib/tools";
 import { clearRuleCache, loadRules, type RuleModel } from "./lib/rules";
 
 /** Cap on a single rule body returned by rule_get (chars). */
@@ -59,8 +58,6 @@ function statusLines(model: RuleModel, cwd: string): string {
 }
 
 export default function rulesExtension(pi: ExtensionAPI): void {
-  const disabledTools = readDisabledTools();
-
   pi.on("before_agent_start", async (event, ctx): Promise<BeforeAgentStartEventResult | undefined> => {
     let model: RuleModel;
     try {
@@ -81,7 +78,6 @@ export default function rulesExtension(pi: ExtensionAPI): void {
     parameters: Type.Object({
       name: Type.String({ description: "Rule name (the `## <name>` heading) from the rulebook listing." }),
     }),
-    defaultActive: !disabledTools.has("rule_get"),
     async execute(_id: string, params: { name: string }, _signal, _onUpdate, ctx) {
       const model = loadRules(ctx?.cwd ?? process.cwd(), undefined, projectTrusted(ctx));
       const wanted = (params.name ?? "").trim();

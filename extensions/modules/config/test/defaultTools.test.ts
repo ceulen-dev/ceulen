@@ -46,7 +46,7 @@ describe("startupToolSet", () => {
 describe("builtinToolRows", () => {
   it("renders one toggle per built-in tool, stock four default-on", () => {
     const rows = builtinToolRows(new Set(startupToolSet(SettingsManager.inMemory())));
-    assert.equal(rows.length, 10);
+    assert.equal(rows.length, 9, "tool_search has no row — ceulen owns its activation");
     const byKey = new Map(rows.map((r) => [r.key, r]));
     for (const name of STOCK) {
       const r = byKey.get(`${DEFAULT_TOOLS_PREFIX}${name}`)!;
@@ -77,9 +77,8 @@ describe("nextDefaultTools", () => {
   });
 
   it("round-trips through the panel state", () => {
-    const working = startupToolSet(SettingsManager.inMemory({ defaultTools: ["+codemode"] }));
-    working.add("tool_search");
-    assert.deepEqual(nextDefaultTools(working), [...STOCK, "codemode", "tool_search"]);
+    const working = startupToolSet(SettingsManager.inMemory({ defaultTools: ["+codemode", "+grep"] }));
+    assert.deepEqual(nextDefaultTools(working), [...STOCK, "grep", "codemode"]);
   });
 });
 

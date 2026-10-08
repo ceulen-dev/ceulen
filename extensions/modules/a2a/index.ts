@@ -40,7 +40,6 @@ import { Container, Text } from "@earendil-works/pi-tui";
 // /a2a-config DROPPED: the central /config panel owns A2A settings
 // (configPanel.ts). ceulen deltas: ceulen-a2a-inbound customType/status key,
 // per-tool kill-switch wrap, resources_discover skill, restart bridge export.
-import { readDisabledTools } from "../../lib/tools.js";
 import { skillsRoot } from "../../lib/skill-path.js";
 
 // ---------------------------------------------------------------------------
@@ -534,14 +533,6 @@ export default function a2aExtension(pi: ExtensionAPI): void {
   // -------------------------------------------------------------------------
   // Tools (outbound client) — always registered
   // -------------------------------------------------------------------------
-
-  // Per-tool kill-switch (ceulen.disabledTools): listed tools register
-  // inactive; /config's tool rows re-activate live via setActiveTools
-  // (web module pattern).
-  const disabledTools = readDisabledTools();
-  const registerTool = pi.registerTool.bind(pi);
-  pi.registerTool = ((tool: Parameters<typeof pi.registerTool>[0]) =>
-    registerTool({ ...tool, defaultActive: !disabledTools.has((tool as { name: string }).name) })) as typeof pi.registerTool;
 
   // Skill ships in-package (../../../skills/a2a) and is contributed through
   // resources_discover — NOT via the package.json pi.skills manifest — so the

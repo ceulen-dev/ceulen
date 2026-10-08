@@ -49,6 +49,20 @@ export function guarded(pi: ExtensionAPI, mod: string, owner: Map<string, string
   } as ExtensionAPI;
 }
 
+/** Inject `exposure: "deferred"` onto a module's listed tools at registration
+ *  — the registry's `deferredTools` list is the single tier source. Returns pi
+ *  unchanged when the module defers nothing. */
+function withDeferred(pi: ExtensionAPI, names?: string[]): ExtensionAPI {
+  if (!names?.length) return pi;
+  const deferred = new Set(names);
+  const registerTool = pi.registerTool.bind(pi);
+  return {
+    ...pi,
+    registerTool: (tool: Parameters<typeof pi.registerTool>[0]) =>
+      registerTool(deferred.has(tool.name) ? { ...tool, exposure: "deferred" as const } : tool),
+  } as ExtensionAPI;
+}
+
 export default function ceulen(pi: ExtensionAPI) {
   // Kill-switch: "ceulen": { "disabled": ["usage"] } in settings.json skips those
   // modules entirely. Minimal form of the per-module toggle promise.
@@ -73,9 +87,13 @@ export default function ceulen(pi: ExtensionAPI) {
       }
       const activeCount = MODULES.length - disabled.size;
       const core = MODULES.filter((m) => m.core).map((m) => m.name);
+      const deferredCount = MODULES.reduce((n, m) => n + (m.deferredTools?.length ?? 0), 0);
       ctx.ui.notify(
         `Ceulen ${activeCount} module(s) active:\n  ${lines.join("\n  ")}` +
           (core.length ? `\nCore (always on): ${core.join(", ")}` : "") +
+          (deferredCount
+            ? `\n${deferredCount} tool(s) deferred — tool_search loads them on demand.`
+            : "") +
           "\nConfigure: /config",
         "info",
       );
@@ -93,6 +111,20 @@ export default function ceulen(pi: ExtensionAPI) {
     // — move them into <agentDir>/.env.local (0600) and scrub. Env was already
     // winning at read time, so effective values are unchanged.
     migrateSecretsFromSettings();
+    // Discovery activation: pi only auto-activates tool_search for MCP
+    // servers — extension-registered deferred tools get nothing. Ceulen owns
+    // the activation (the /config Built-in tools section has no tool_search
+    // row for exactly this reason): when the bundle has a deferred tier, the
+    // discovery tool must be declared or the tier is unreachable by the model.
+    if (MODULES.some((m) => m.deferredTools?.length)) {
+      const all = new Set(pi.getAllTools().map((t) => t.name));
+      if (all.has("tool_search")) {
+        const active = pi.getActiveTools();
+        if (!active.includes("tool_search")) pi.setActiveTools([...active, "tool_search"]);
+      } else {
+        console.warn("ceulen: tool_search is not registered — deferred tools are reachable only via codemode/ctx.executeTool");
+      }
+    }
   });
 
   // One ownership map for the whole loop — this is what makes guarded() able
@@ -106,7 +138,7 @@ export default function ceulen(pi: ExtensionAPI) {
   const deps: ModuleLoadDeps = { configContribs };
   for (const m of MODULES) {
     if (disabled.has(m.name)) continue;
-    const g = guarded(pi, m.name, owner);
+    const g = guarded(withDeferred(pi, m.deferredTools), m.name, owner);
     if (m.config) configContribs.set(m.name, () => m.config!(g));
     try {
       m.load(g, deps);
