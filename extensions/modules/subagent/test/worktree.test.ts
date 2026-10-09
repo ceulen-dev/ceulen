@@ -324,7 +324,7 @@ describe("createWorktree", () => {
     assert.deepEqual(leftovers, [], "no orphan marker may survive a failed creation");
   });
 
-  it("CoW copies the live .git under the repo lock (no torn copy)", async () => {
+  it("CoW copies the live .git under the repo lock (no torn copy)", { skip: process.platform !== "darwin" }, async () => {
     const repo = await tempDir("wt-cow-lock-");
     await mkdir(join(repo, ".git"), { recursive: true });
     await writeFile(join(repo, "file.txt"), "x");
