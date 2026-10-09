@@ -104,6 +104,13 @@ describe("plan settings", () => {
     assert.equal(isInsidePlansDir(join(REPO, ".pi/plans"), ".pi/plans/{yyyymm}", REPO), false, "the dir itself is not inside");
   });
 
+  it("{yyyymm} matches only a real 6-digit month segment (segment-wise, no splice)", () => {
+    assert.equal(isInsidePlansDir(join(REPO, ".pi/evil/plans/x.md"), ".pi/{yyyymm}/plans", REPO), false, "an any-segment wildcard must not match");
+    assert.equal(isInsidePlansDir(join(REPO, ".pi/202610/plans/x.md"), ".pi/{yyyymm}/plans", REPO), true);
+    assert.equal(isInsidePlansDir(join(REPO, ".pi/20261/plans/x.md"), ".pi/{yyyymm}/plans", REPO), false, "5 digits is not a month");
+    assert.equal(isInsidePlansDir(join(REPO, ".pi/plans/x.md"), ".pi/plans/{yyyymm}", REPO), false, "the month segment is required");
+  });
+
   it("isSavePlans accepts only the closed set", () => {
     assert.equal(isSavePlans("all"), true);
     assert.equal(isSavePlans("approved"), true);

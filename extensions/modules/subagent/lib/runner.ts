@@ -460,13 +460,23 @@ export const WORKTREE_DIR_NAME = ".pi-worktrees";
 
 /** A nested `.gitignore` (content `*`) inside the sandbox base keeps sandboxes
  *  out of the parent's `git status` AND out of untracked baseline capture —
- *  without touching the user's own .gitignore. */
-async function ensureWorktreeBaseGitignore(base: string): Promise<void> {
+ *  without touching the user's own .gitignore. Returns an error note when the
+ *  base is unusable (sandboxes would then be enumerable by the baseline
+ *  capture), undefined on success. */
+async function ensureWorktreeBaseGitignore(base: string): Promise<string | undefined> {
   const ignoreFile = path.join(base, ".gitignore");
   try {
     await fs.mkdir(base, { recursive: true });
     await fs.writeFile(ignoreFile, "*\n", { flag: "wx" });
-  } catch { /* exists (or unwritable) — either is fine */ }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code !== "EEXIST") {
+      return `could not write ${WORKTREE_DIR_NAME}/.gitignore: ${(error as Error).message}`;
+    }
+  }
+  // EEXIST is acceptable only if the thing at that path IS the ignore file.
+  const st = await fs.stat(ignoreFile).catch(() => undefined);
+  if (!st?.isFile()) return `${WORKTREE_DIR_NAME}/.gitignore is missing or not a file`;
+  return undefined;
 }
 
 /** Owner marker: a SIBLING file inside the (gitignored) sandbox base —
@@ -476,9 +486,14 @@ async function ensureWorktreeBaseGitignore(base: string): Promise<void> {
  *  concurrent-merge race test). */
 export const OWNER_SUFFIX = ".owner.json";
 
+/** Atomic write (tmp + rename) — a concurrent sweep reader must never see a
+ *  partial marker and mistake a live sandbox for stale. */
 async function writeOwnerMarker(base: string, id: string): Promise<void> {
   const owner: WorktreeOwner = { pid: process.pid, id, createdAt: Date.now() };
-  await fs.writeFile(path.join(base, `${id}${OWNER_SUFFIX}`), JSON.stringify(owner), { encoding: "utf8", mode: 0o600 });
+  const target = path.join(base, `${id}${OWNER_SUFFIX}`);
+  const tmp = `${target}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  await fs.writeFile(tmp, JSON.stringify(owner), { encoding: "utf8", mode: 0o600, flag: "wx" });
+  await fs.rename(tmp, target);
 }
 
 async function readOwnerMarker(base: string, entry: string): Promise<WorktreeOwner | undefined> {
@@ -510,10 +525,13 @@ export interface SweepResult {
 /** Remove crashed runs' worktree sandboxes under <repoRoot>/.pi-worktrees.
  *  Source of truth is the DIRECTORY (covers both backends); the git
  *  registration check only decides HOW a stale dir is removed. Never removes
- *  a sandbox whose marker pid is alive. Best-effort throughout. */
+ *  a sandbox whose marker pid is alive — except under opts.force, which may
+ *  also remove FOREIGN live-pid sandboxes (pid recycling can false-KEEP);
+ *  this process's own live sandboxes stay protected. Best-effort throughout. */
 export async function sweepStaleWorktrees(
   cwd: string,
   exec?: (command: string, args: string[], options?: { cwd?: string; timeout?: number }) => Promise<{ code: number; stdout: string; stderr: string }>,
+  opts?: { force?: boolean },
 ): Promise<SweepResult> {
   const removed: string[] = [];
   try {
@@ -534,17 +552,35 @@ export async function sweepStaleWorktrees(
         (list.ok ? list.stdout : "").split("\n").filter((l) => l.startsWith("worktree ")).map((l) => l.slice("worktree ".length).trim()),
       );
       for (const entry of entries) {
-        if (entry.endsWith(OWNER_SUFFIX)) continue; // marker files, not sandboxes
+        if (entry.endsWith(OWNER_SUFFIX)) {
+          // Orphan marker (creation failed after the write, or the sandbox was
+          // already swept): the dir is gone, so drop the marker instead of
+          // skipping it forever — it would otherwise render as a phantom row
+          // in /subagent worktrees for the life of the checkout.
+          const orphanDir = path.join(base, entry.slice(0, -OWNER_SUFFIX.length));
+          if (!(await fs.stat(orphanDir).then((s) => s.isDirectory()).catch(() => false))) {
+            await fs.rm(path.join(base, entry), { force: true }).catch(() => { /* best effort */ });
+          }
+          continue; // marker files, not sandboxes
+        }
         const dir = path.join(base, entry);
         // The nested .gitignore is a FILE, not a sandbox — never scan/rm it.
         if (!(await fs.stat(dir).then((s) => s.isDirectory()).catch(() => false))) continue;
         const owner = await readOwnerMarker(base, entry);
-        if (owner && pidAlive(owner.pid)) { kept++; continue; }
+        if (owner && pidAlive(owner.pid) && (!opts?.force || owner.pid === process.pid)) { kept++; continue; }
         // ponytail: pid recycling can false-KEEP a stale sandbox (safe
-        // direction); `/subagent worktrees clean` is the manual override.
+        // direction); `/subagent worktrees clean` passes force, which lifts
+        // the keep-gate for foreign live pids only.
         try {
-          if (registered.has(dir)) await runGit(repoRoot, ["worktree", "remove", "--force", dir], exec);
+          let removeFailed = false;
+          if (registered.has(dir)) {
+            const rmRes = await runGit(repoRoot, ["worktree", "remove", "--force", dir], exec);
+            removeFailed = !rmRes.ok;
+          }
           await fs.rm(dir, { recursive: true, force: true });
+          // rm -rf alone leaves a stale .git/worktrees registration behind —
+          // prune it (after the dir is gone; prune only drops missing dirs).
+          if (removeFailed) await runGit(repoRoot, ["worktree", "prune"], exec);
           await fs.rm(path.join(base, `${entry}${OWNER_SUFFIX}`), { force: true });
           removed.push(dir);
         } catch { /* best effort per dir */ }
@@ -648,7 +684,13 @@ async function createCowClone(
     const entries = await fs.readdir(repoRoot, { withFileTypes: true });
     for (const entry of entries) {
       if (entry.name === WORKTREE_DIR_NAME) continue;
-      const res = await run("cp", ["-cR", path.join(repoRoot, entry.name), path.join(staging, entry.name)], { timeout: 300_000 });
+      const args = ["-cR", path.join(repoRoot, entry.name), path.join(staging, entry.name)];
+      // The live .git mutates under us — copy it under the same per-repo lock
+      // the sibling mutators (worktree add/remove, git apply --3way) hold, or
+      // a concurrent mutation can tear the copy.
+      const res = entry.name === ".git"
+        ? await withRepoLock(repoRoot, () => run("cp", args, { timeout: 300_000 }))
+        : await run("cp", args, { timeout: 300_000 });
       if (res.code !== 0) return false;
     }
     await fs.mkdir(path.dirname(wtPath), { recursive: true });
@@ -740,19 +782,43 @@ export async function createWorktree(
     const repoRoot = root.stdout.trim();
     if (!repoRoot) return { ok: false, error: "empty git root" };
     const id = `pi-subagent-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
-    const wtPath = path.join(repoRoot, WORKTREE_DIR_NAME, id);
-    await ensureWorktreeBaseGitignore(path.join(repoRoot, WORKTREE_DIR_NAME));
-    if (await createCowClone(repoRoot, wtPath, exec)) {
-      await writeOwnerMarker(path.join(repoRoot, WORKTREE_DIR_NAME), id).catch(() => { /* best effort */ });
-      return { ok: true, path: wtPath, repoRoot };
+    const base = path.join(repoRoot, WORKTREE_DIR_NAME);
+    const wtPath = path.join(base, id);
+    const ignoreError = await ensureWorktreeBaseGitignore(base);
+    if (ignoreError) return { ok: false, error: ignoreError };
+    // Owner marker BEFORE the sandbox becomes visible at wtPath (CoW rename /
+    // `worktree add`): the GC sweep treats a missing marker as stale and
+    // rm -rf's the dir, so a marker published late — or failing to publish —
+    // must never leave an unprotected live sandbox behind.
+    const markerError = await writeOwnerMarker(base, id).then(
+      () => undefined,
+      (error) => (error instanceof Error ? error.message : String(error)),
+    );
+    if (markerError) return { ok: false, error: `owner marker unwritable (${markerError}) — refusing to create an unprotected sandbox` };
+    let outcome: { ok: boolean; path?: string; repoRoot?: string; error?: string; cow?: boolean };
+    try {
+      if (await createCowClone(repoRoot, wtPath, exec)) {
+        outcome = { ok: true, path: wtPath, repoRoot };
+      } else {
+        // Fallback: detached git worktree (clean HEAD; the caller seeds the
+        // parent's WIP via applyBaselineToWorktree). worktree add mutates the
+        // parent's shared .git/worktrees registry. The marker already covers it.
+        const add = await withRepoLock(repoRoot, () => runGit(repoRoot, ["worktree", "add", "--detach", wtPath, "HEAD"], exec));
+        outcome = add.ok
+          ? { ok: true, path: wtPath, repoRoot, cow: false }
+          : { ok: false, error: add.stderr.trim() || "git worktree add failed" };
+      }
+    } catch (error) {
+      // A rejecting exec (or any throw) after the marker write lands here.
+      outcome = { ok: false, error: error instanceof Error ? error.message : String(error) };
     }
-    // Fallback: detached git worktree (clean HEAD; the caller seeds the
-    // parent's WIP via applyBaselineToWorktree). worktree add mutates the
-    // parent's shared .git/worktrees registry.
-    const add = await withRepoLock(repoRoot, () => runGit(repoRoot, ["worktree", "add", "--detach", wtPath, "HEAD"], exec));
-    if (!add.ok) return { ok: false, error: add.stderr.trim() || "git worktree add failed" };
-    await writeOwnerMarker(path.join(repoRoot, WORKTREE_DIR_NAME), id).catch(() => { /* best effort */ });
-    return { ok: true, path: wtPath, repoRoot, cow: false };
+    if (!outcome.ok) {
+      // No sandbox was published — drop the marker so it cannot litter the
+      // base as an orphan: the sweep skips marker entries and /subagent
+      // worktrees would render it as a phantom row forever.
+      await fs.rm(path.join(base, `${id}${OWNER_SUFFIX}`), { force: true }).catch(() => { /* best effort */ });
+    }
+    return outcome;
   } catch (error) {
     return { ok: false, error: error instanceof Error ? error.message : String(error) };
   }

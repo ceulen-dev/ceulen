@@ -168,13 +168,24 @@ export function executeSqliteView(db: DatabaseSync, sel: SqliteSelector, display
       if (!/^(SELECT|WITH|PRAGMA)/.test(head)) {
         throw new Error(`only read-only queries (SELECT/WITH/PRAGMA) — got "${sel.sql.slice(0, 40)}". Use bash for writes.`);
       }
-      const stmt = db.prepare(sel.sql);
-      const columns = (stmt as unknown as { columns: () => Array<{ name: string }> }).columns().map((c) => c.name);
-      const rows = stmt.all() as Array<Record<string, unknown>>;
-      const total = rows.length;
-      const shown = rows.slice(0, MAX_RAW_QUERY_ROWS);
-      const footer = total > shown.length ? `\n[showing ${shown.length} of ${total} rows — add LIMIT/TARGET the query]` : "";
-      return `${displayPath} : query — ${total} row(s)\n${shown.length ? renderRows(columns, shown) : "(no rows)"}${footer}`;
+      // Bounded iteration (F8): never materialize more than cap+1 rows.
+      // Column names come from the first row (F2) — stmt.columns() is
+      // Node >=23.11 and TypeErrors on the 22.x engines floor.
+      const collected: Record<string, unknown>[] = [];
+      let overflow = false;
+      for (const row of db.prepare(sel.sql).iterate()) {
+        if (collected.length >= MAX_RAW_QUERY_ROWS) {
+          overflow = true;
+          break;
+        }
+        collected.push(row as Record<string, unknown>);
+      }
+      const columns = collected.length ? Object.keys(collected[0]!) : [];
+      const footer = overflow
+        ? `\n[showing ${collected.length} of ${collected.length}+ rows — add LIMIT to narrow the query]`
+        : "";
+      const total = overflow ? `${collected.length}+` : String(collected.length);
+      return `${displayPath} : query — ${total} row(s)\n${collected.length ? renderRows(columns, collected) : "(no rows)"}${footer}`;
     }
   }
 }

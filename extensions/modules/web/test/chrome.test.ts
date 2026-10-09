@@ -72,6 +72,12 @@ describe("isLocalUrl", () => {
     "http://[::ffff:7f00:1]:8080", // hex form — WHATWG URL canonicalization shape
     "http://[::ffff:169.254.169.254]/",
     "http://[::ffff:10.0.0.5]/",
+    "http://100.64.0.1/", // 100.64/10 CGNAT
+    "http://100.127.255.254/", // 100.64/10 upper edge
+    "http://198.18.0.1/", // 198.18/15 benchmarking
+    "http://198.19.255.254/", // 198.18/15 upper edge
+    "http://192.0.0.1/", // 192.0.0/24 IETF protocol assignments
+    "http://[fec0::1]/", // decommissioned IPv6 site-local
     "file:///Users/me/project/index.html",
   ];
   for (const url of local) {
@@ -86,6 +92,9 @@ describe("isLocalUrl", () => {
     "http://172.32.0.1/",
     "http://192.169.1.1/",
     "http://[2001:db8::1]/",
+    "http://100.128.0.1/", // just above 100.64/10
+    "http://198.20.0.1/", // just above 198.18/15
+    "http://192.0.1.1/", // just above 192.0.0/24
     "https://developer.chrome.com/blog",
     "not a url",
   ];
@@ -277,6 +286,29 @@ describe("runChrome via stub binary", () => {
       assert.fail("should have timed out");
     } catch (err: any) {
       assert.ok(includes(err.message, "timed out"));
+    }
+  });
+
+  it("bounds the captured stderr to a ~1KB tail even after megabytes of noise (F7)", async () => {
+    // The stub floods STDERR (~15MB, 25000 × 600B lines), then exits 1 without
+    // writing the output file → the close handler builds the error message
+    // from the retained tail.
+    process.env.CHROME_PATH = writeStub(
+      `echo "ERROR-TAIL-MARKER: chrome exploded" >&2\n` +
+        `i=0\nwhile [ $i -lt 25000 ]; do\n` +
+        `  echo 'xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx' >&2\n` +
+        `  i=$((i+1))\ndone\nexit 1\n`,
+    );
+    try {
+      await captureScreenshot({ url: "http://localhost:9/x", timeoutMs: 10_000 });
+      assert.fail("should have failed (no output file)");
+    } catch (err: any) {
+      assert.ok(includes(err.message, "Chrome exited with code 1"));
+      // Retained stderr (message after the code prefix) is bounded, and the
+      // newest bytes survived the clipping (tail, not head).
+      const tail = String(err.message).split("Chrome exited with code 1: ")[1] ?? "";
+      assert.ok(tail.length <= 1024, `stderr tail ${tail.length}B must be ≤ 1KB`);
+      assert.ok(tail.includes("xxxx"), "newest stderr bytes retained");
     }
   });
 });

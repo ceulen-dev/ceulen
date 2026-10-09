@@ -181,15 +181,32 @@ describe("repo_view / file_read", () => {
 
   it("file_read flags binary content and returns the image block for images", async () => {
     const binary = Buffer.from([0x00, 0x01, 0x02]).toString("base64");
-    const png = Buffer.from("89504e47", "hex").toString("base64");
+    // REALISTIC PNG: full signature + IHDR (contains NUL bytes in the first
+    // 8KB — the old 4-byte-magic fixture without NULs masked the defect where
+    // isProbablyBinary reported every actual image as "Cannot read binary file").
+    const png = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]), // signature
+      Buffer.from([0x00, 0x00, 0x00, 0x0d]), // IHDR length
+      Buffer.from("IHDR"),
+      Buffer.from([0x00, 0x00, 0x03, 0x20, 0x00, 0x00, 0x01, 0xe0, 0x08, 0x06, 0x00, 0x00, 0x00]), // w/h/depth (NULs)
+      Buffer.alloc(512, 0), // IDAT-ish zero-filled body
+    ]).toString("base64");
     const { gh } = fakeGh([
       { match: (a) => a.some((x) => String(x).includes("bin.dat")), respond: () => ({ stdout: JSON.stringify({ encoding: "base64", content: binary }) }) },
       { match: (a) => a.some((x) => String(x).includes("img.png")), respond: () => ({ stdout: JSON.stringify({ encoding: "base64", content: png }) }) },
+      { match: (a) => a.some((x) => String(x).includes("fake.png")), respond: () => ({ stdout: JSON.stringify({ encoding: "base64", content: Buffer.from("just text, no magic").toString("base64") }) }) },
     ]);
     const bin = await executeFileRead(gh, CWD, { repo: "acme/widget", path: "bin.dat" });
     assert.match(bin.text, /Cannot read binary file/);
+    // A real PNG (NUL-heavy) reaches the image block instead of the binary refusal.
     const img = await executeFileRead(gh, CWD, { repo: "acme/widget", path: "img.png" });
     assert.equal(img.image?.mimeType, "image/png");
+    assert.doesNotMatch(img.text, /Cannot read binary file/);
+    // Magic-byte gate: a TEXT file wearing .png is NOT served as an image —
+    // it falls through to the plain-text decode path (valid UTF-8, no magic).
+    const fake = await executeFileRead(gh, CWD, { repo: "acme/widget", path: "fake.png" });
+    assert.equal(fake.image, undefined);
+    assert.match(fake.text, /just text, no magic/);
   });
 });
 
@@ -245,6 +262,52 @@ describe("run_watch", () => {
     ]);
     const text = await executeRunWatch(gh, CWD, { run: "2" }, undefined, 1);
     assert.match(text, /watch budget elapsed/);
+  });
+
+  it("F10b: the budget-elapsed note fires only after the CONFIGURED window (no 295s silent cap)", { timeout: 8_000 }, async () => {
+    const inProgress = { id: 3, name: "CI", status: "in_progress", html_url: "https://ci/3" };
+    // The fake gh advances the FAKE clock by 400s while serving the poll —
+    // simulating a slow poll. Under the old Math.min(…, 295s) cap the budget
+    // was already exhausted at that point and the note fired; under the fixed
+    // code 400s < the configured 600s, so the loop KEEPS POLLING (proven by
+    // aborting during the inter-poll sleep: it rejects "Operation aborted"
+    // instead of returning the note).
+    const run = async (jumpMs: number, abortDuringSleep: boolean): Promise<string> => {
+      const realNow = Date.now;
+      let fakeNow = 1_000_000;
+      Date.now = () => fakeNow;
+      const controller = new AbortController();
+      const { gh } = fakeGh([
+        { match: (a) => a[0] === "repo" && a[1] === "view", respond: () => ({ stdout: "https://github.com/acme/widget" }) },
+        { match: (a) => a.some((x) => String(x).endsWith("/actions/runs/3")), respond: () => { fakeNow += jumpMs; return { stdout: JSON.stringify(inProgress) }; } },
+        { match: (a) => a.some((x) => String(x).includes("/actions/runs/3/jobs")), respond: () => ({ stdout: JSON.stringify({ jobs: [] }) }) },
+      ]);
+      try {
+        const pending = executeRunWatch(gh, CWD, { run: "3" }, controller.signal, 600_000);
+        if (abortDuringSleep) {
+          // The first poll's sleep (3s real) is pending — abort inside it.
+          setTimeout(() => controller.abort(), 50);
+          await assert.rejects(() => pending, /Operation aborted/);
+          return "kept-polling";
+        }
+        // No abort: let the loop reach the post-sleep budget check. Nudge the
+        // fake clock across the deadline while the real 3s sleep runs.
+        const winner = await Promise.race([
+          pending.then((t) => t),
+          new Promise<string>((resolve) => setTimeout(() => { fakeNow += 900_000; resolve("nudged"); }, 100)),
+          new Promise<string>((resolve) => setTimeout(() => resolve("hung"), 5_000)),
+        ]);
+        controller.abort();
+        return winner === "hung" ? "hung" : String(await Promise.race([pending, Promise.resolve("still-pending")]).then((t) => (typeof t === "string" && t.includes("budget")) || t === "still-pending" ? t : "other"));
+      } finally {
+        Date.now = realNow;
+      }
+    };
+    // 400s fake-elapsed < 600s configured → NO note (old cap: 295s → note).
+    assert.equal(await run(400_000, true), "kept-polling");
+    // Past the configured 600s → the note fires.
+    const late = await run(700_000, false);
+    assert.match(late, /watch budget elapsed/);
   });
 
   it("classifies failed jobs and clamps tail", () => {

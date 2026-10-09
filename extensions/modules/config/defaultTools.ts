@@ -64,10 +64,14 @@ export function builtinToolRows(working: Set<string>): PanelRow[] {
   );
 }
 
-/** The absolute defaultTools list that results from toggling `working`
- *  (BUILTIN_TOOLS order, deterministic). Pure — exported for tests. */
+/** The absolute defaultTools list that results from toggling `working` (BUILTIN_TOOLS
+ *  order, deterministic; any non-builtin names still in `working` — e.g. seeded
+ *  from an existing `+name`/arbitrary defaultTools entry — are appended so a
+ *  toggle save cannot delete them). Pure — exported for tests. */
 export function nextDefaultTools(working: Set<string>): string[] {
-  return BUILTIN_TOOLS.map(({ name }) => name).filter((n) => working.has(n));
+  const builtins = new Set(BUILTIN_TOOLS.map(({ name }) => name));
+  const others = [...working].filter((n) => !builtins.has(n));
+  return [...BUILTIN_TOOLS.map(({ name }) => name).filter((n) => working.has(n)), ...others];
 }
 
 /** Write the startup selection into the GLOBAL agent settings.json (the same

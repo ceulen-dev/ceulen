@@ -113,7 +113,10 @@ export default function rulesExtension(pi: ExtensionAPI): void {
       const arg = (args ?? "").trim().toLowerCase();
       if (arg === "reload") {
         clearRuleCache();
-        ctx.ui.notify(`[rules] cache dropped — re-reading ${loadRules(ctx.cwd).files.length} source(s)`, "info");
+        // Same trust gate as the status path: without it, an untrusted project
+        // reported phantom sources and the cache key never matched the
+        // composer's (trusted=false) key.
+        ctx.ui.notify(`[rules] cache dropped — re-reading ${loadRules(ctx.cwd, undefined, projectTrusted(ctx)).files.length} source(s)`, "info");
         return;
       }
       if (arg !== "") {

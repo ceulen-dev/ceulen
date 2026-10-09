@@ -64,7 +64,9 @@ export function buildRepairGroups(cfg: RepairSettings): PanelGroup[] {
           warning: "Bash description + auto-background mechanism bind at session start — applies to the next session.",
         }),
         row("repair.autoBgSecs", "Auto-background after", "number", cfg.autoBgSecs, (v) => {
-          cfg.autoBgSecs = Math.max(1, Math.floor(Number(v)));
+          // Mirror the cron guard: non-numeric input must not persist NaN→null.
+          const n = Math.floor(Number(v));
+          if (Number.isFinite(n) && n > 0) cfg.autoBgSecs = n;
         }, {
           defaultValue: DEFAULT_REPAIR_SETTINGS.autoBgSecs,
           description: "Seconds a foreground bash call may run before it is auto-backgrounded.",

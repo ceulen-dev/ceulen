@@ -94,8 +94,9 @@ export function isLocalUrl(raw: string): boolean {
         return isLocalUrl(`http://${(bits >>> 24) & 0xff}.${(bits >>> 16) & 0xff}.${(bits >>> 8) & 0xff}.${bits & 0xff}/`);
       }
     }
-    // IPv6 ULA fc00::/7 and link-local fe80::/10 are private too.
-    if (/^f[cd]/.test(host) || /^fe[89ab]/.test(host)) return true;
+    // IPv6 ULA fc00::/7, link-local fe80::/10, and the decommissioned
+    // site-local fec0::/10 are private too.
+    if (/^f[cd]/.test(host) || /^fe[89ab]/.test(host) || /^fe[c-f]/.test(host)) return true;
     return false;
   }
   const m = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
@@ -106,6 +107,12 @@ export function isLocalUrl(raw: string): boolean {
     if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12
     if (a === 192 && b === 168) return true;
     if (a === 169 && b === 254) return true; // link-local
+    // Reserved/special-use (RFC 2544 benchmarks, RFC 5737-adjacent docs, etc.):
+    // 100.64/10 (CGNAT), 198.18/15 (benchmarking), 192.0.0/24 (IETF protocol
+    // assignments). Unroutable from the public internet — treat as local.
+    if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10
+    if (a === 198 && (b === 18 || b === 19)) return true; // 198.18/15
+    if (a === 192 && b === 0 && Number(m[3]) === 0) return true; // 192.0.0/24
   }
   return false;
 }
@@ -206,7 +213,9 @@ function runChrome(
     }, timeoutMs);
     signal?.addEventListener("abort", onAbort, { once: true });
     child.stderr?.on("data", (d: Buffer) => {
-      stderr += d.toString();
+      // Keep only the tail — Chrome is chatty (GCM/Freedom/DevTools noise); an
+      // unbounded accumulate over a 30s capture window can OOM the host.
+      stderr = (stderr + d.toString()).slice(-1024);
     });
     child.on("error", (err) => finish(err));
     child.on("close", (code) => {

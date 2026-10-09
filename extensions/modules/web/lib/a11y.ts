@@ -15,7 +15,7 @@ import { readFileSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { launchCdp, unwrapEvaluate, waitForLoad, type WsFactory } from "./cdp";
+import { launchCdp, raceBounded, unwrapEvaluate, waitForLoad, type WsFactory } from "./cdp";
 
 // ── OMP shapes (browser/a11y/audit.ts) ─────────────────────────────────────
 
@@ -198,9 +198,11 @@ function runnerExpression(options: BrowserA11yOptions): string {
     const r = await window.axe.run(context, opts);
     return JSON.stringify({ __axeOk: r });
   } catch (err) {
-    // Error inside the page: the CDP connection layer resolves responses to
-    // msg.result only, so a top-level exceptionDetails never reaches
-    // unwrapEvaluate — carry the failure through the value instead.
+    // Belt and braces: unwrapEvaluate already surfaces exceptionDetails loudly
+    // (the connection layer preserves them, including Runtime.evaluate's
+    // nested shape), so an in-page throw would reject the evaluate promise —
+    // the in-page try/catch just carries a friendlier message through the
+    // {__axeError} value instead.
     return JSON.stringify({ __axeError: err instanceof Error ? err.message : String(err) });
   }
 })()`;
@@ -216,26 +218,39 @@ export async function runA11yAudit(opts: RunA11yOpts): Promise<BrowserA11yResult
   const browser = await launchCdp({ wsFactory: opts.wsFactory });
   const onAbort = () => browser.cleanup();
   opts.signal?.addEventListener("abort", onAbort, { once: true });
+  // timeoutError matcher for the tests (and readable tool errors).
+  const auditTimeoutError = (ms: number) =>
+    `audit timed out after ${Math.round(ms / 1000)}s — page/renderer likely wedged`;
   let sessionId: string | undefined;
+  const bounded = <T>(p: Promise<T>): Promise<T> =>
+    raceBounded(p, timeoutMs, auditTimeoutError(timeoutMs));
   try {
     const connection = browser.connection;
-    const target = await connection.send("Target.createTarget", { url: "about:blank" });
+    // The whole post-launch CDP phase is bounded: a wedged renderer (hung
+    // navigate/evaluate) must reject at the documented budget instead of
+    // parking web_a11y forever. finally below tears Chrome down either way.
+    const target = await bounded(connection.send("Target.createTarget", { url: "about:blank" }));
     const targetId = target.targetId as string;
-    sessionId = ((await connection.send("Target.attachToTarget", { targetId, flatten: true })) as { sessionId: string })
-      .sessionId;
+    sessionId = ((await bounded(
+      connection.send("Target.attachToTarget", { targetId, flatten: true }),
+    )) as { sessionId: string }).sessionId;
     const send = (method: string, params?: Record<string, unknown>) => connection.send(method, params, sessionId);
-    await send("Page.enable");
+    await bounded(send("Page.enable"));
     const loaded = waitForLoad(connection, sessionId);
-    await send("Page.navigate", { url: opts.url });
-    await loaded;
+    await bounded(send("Page.navigate", { url: opts.url }));
+    await bounded(loaded);
     const evaluate = async (expression: string, awaitPromise = false) =>
-      unwrapEvaluate(await send("Runtime.evaluate", { expression, awaitPromise, returnByValue: true }));
-    // Bootstrap: the UMD build defines window.axe in the page world.
-    evaluate(axeSource());
+      unwrapEvaluate(await bounded(send("Runtime.evaluate", { expression, awaitPromise, returnByValue: true })));
+    // Bootstrap: the UMD build defines window.axe in the page world. Awaited —
+    // CDP serializes commands so ordering holds, and a failed bootstrap must
+    // fail the audit loudly rather than escape as an unhandled rejection
+    // (which kills pi; see cdp.ts incident 2026-09-20). The runner's
+    // window.axe check remains as backup for a silently swallowed failure.
+    await evaluate(axeSource());
     // Runner: axe.run is async and huge — awaitPromise + returnByValue, and
     // stringified (JSON survives returnByValue losslessly). In-page failures
-    // ride back as {__axeError} because the connection layer drops top-level
-    // exceptionDetails (see runnerExpression).
+    // ride back as {__axeError}; CDP-level exceptions surface via
+    // unwrapEvaluate (exceptionDetails preserved — see runnerExpression).
     const raw = String(await evaluate(runnerExpression(opts), true));
     let parsed: { __axeOk?: unknown; __axeError?: string };
     try {

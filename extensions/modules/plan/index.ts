@@ -591,11 +591,20 @@ export default function planModule(pi: ExtensionAPI): void {
   }
 
   /** Approve + execute in the current session. Shared by /plan-approve and
-   *  the auto-approve settle path (no command context needed). */
+   *  the auto-approve settle path (no command context needed). A failure
+   *  (e.g. materializePlan hitting an unwritable plans dir) must not swallow
+   *  the approval: the ready flag is restored so /plan-approve can retry. */
   async function executeInCurrentSession(ctx: ExtensionContext): Promise<void> {
-    await materializePlan();
-    const relativePlan = await exitPlanForExecution(ctx);
-    pi.sendUserMessage(buildExecutionPrompt(relativePlan, "current"), { deliverAs: "followUp" });
+    try {
+      await materializePlan();
+      const relativePlan = await exitPlanForExecution(ctx);
+      pi.sendUserMessage(buildExecutionPrompt(relativePlan, "current"), { deliverAs: "followUp" });
+    } catch (error) {
+      planReadyForReview = true;
+      persistState();
+      const reason = error instanceof Error ? error.message : String(error);
+      ctx.ui.notify(`Auto-approve failed: ${reason} — run /plan-approve to retry.`, "error");
+    }
   }
 
   /** Approve + hand the plan to a fresh session (command context only:

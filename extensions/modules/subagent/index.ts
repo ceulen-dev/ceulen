@@ -42,6 +42,7 @@ import {
   getResultOutput,
   isFailedResult,
   mapWithConcurrencyLimit,
+  OWNER_SUFFIX,
   pidAlive,
   runSubAgent,
   startHeartbeat,
@@ -421,7 +422,7 @@ export default function (pi: ExtensionAPI) {
         const ownerLabel = async (): Promise<string> => {
           const base = path.join(path.resolve(ctx.cwd), WORKTREE_DIR_NAME);
           let entries: string[] = [];
-          try { entries = (await fs.readdir(base)).filter((e) => e !== ".gitignore"); } catch { return "No worktree sandboxes."; }
+          try { entries = (await fs.readdir(base)).filter((e) => e !== ".gitignore" && !e.endsWith(OWNER_SUFFIX)); } catch { return "No worktree sandboxes."; }
           if (entries.length === 0) return "No worktree sandboxes.";
           const lines = await Promise.all(entries.map(async (entry) => {
             let owner: WorktreeOwner | undefined;
@@ -434,7 +435,7 @@ export default function (pi: ExtensionAPI) {
           return `Worktree sandboxes (${entries.length}):
 ${lines.join("\n")}`;
         };
-        const result = force ? await sweepStaleWorktrees(ctx.cwd) : null;
+        const result = force ? await sweepStaleWorktrees(ctx.cwd, undefined, { force: true }) : null;
         const listing = await ownerLabel();
         const sweepLine = result ? `\n\nSwept ${result.removed.length} stale sandbox(es): ${result.removed.map((r) => path.basename(r)).join(", ") || "none"}.` : "\n\n(/subagent worktrees clean to sweep stale entries)";
         pi.sendMessage({ customType: "ceulen-subagent", content: `${listing}${sweepLine}`, display: true });

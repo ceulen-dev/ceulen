@@ -2,6 +2,7 @@
 // Readable content extraction using JSDOM + Readability + Turndown.
 
 import { createRequire } from "node:module";
+import { isLocalUrl } from "./chrome";
 import { signalWithTimeout } from "./retry";
 
 const require = createRequire(import.meta.url);
@@ -52,15 +53,37 @@ export async function fetchReadableContent(
   timeoutMs = 15000,
   signal?: AbortSignal,
 ): Promise<{ title: string; markdown: string }> {
-  const response = await fetch(url, {
-    headers: {
-      "User-Agent":
-        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
-      Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-      "Accept-Language": "en-US,en;q=0.9",
-    },
-    signal: signalWithTimeout(timeoutMs, signal),
-  });
+  // SSRF guard: model-supplied URLs must never reach loopback/metadata
+  // endpoints, and fetch follows redirects by default — follow manually and
+  // re-validate each hop (imageapi.ts downloadImage pattern).
+  let current = url;
+  for (let hop = 0; ; hop++) {
+    if (hop > 3) throw new Error("too many content redirects");
+    if (isLocalUrl(current)) throw new Error(`content host is private/loopback (SSRF-guarded): ${current}`);
+    const response = await fetch(current, {
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 Chrome/120 Safari/537.36",
+        Accept: "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
+      },
+      redirect: "manual",
+      signal: signalWithTimeout(timeoutMs, signal),
+    });
+    if ([301, 302, 303, 307, 308].includes(response.status)) {
+      const loc = response.headers.get("location");
+      if (!loc) throw new Error(`content redirect ${response.status} without a location header`);
+      current = new URL(loc, current).toString();
+      continue;
+    }
+    return await readExtractResponse(response, current);
+  }
+}
+
+async function readExtractResponse(
+  response: Response,
+  url: string,
+): Promise<{ title: string; markdown: string }> {
   if (!response.ok) throw new Error(`HTTP ${response.status}: ${response.statusText}`);
   // Raw text/JSON payloads (raw.githubusercontent.com, JSON APIs) — Readability
   // shreds them to nothing. Pass through verbatim. text/html and text/xml keep

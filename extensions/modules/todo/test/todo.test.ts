@@ -110,6 +110,15 @@ describe("todo state machine", () => {
     assert.deepEqual(partial[1].blockedBy, ["p1"], "unblock drops only the named edge");
   });
 
+  it("init/append reject a stored status:\"blocked\" — blocked is derived from blockedBy", () => {
+    assert.match(fail([], { action: "init", phases: [{ title: "A", status: "blocked" }] })[0], /blockedBy/);
+    const seeded2 = run([], { action: "init", phases: [{ title: "A" }] });
+    assert.match(fail(seeded2, { action: "append", phases: [{ title: "B", status: "blocked" }] })[0], /blockedBy/);
+    // Normal flows unchanged: blocking goes through blockedBy edges.
+    const blocked = run(seeded(), { action: "block", id: "p1", blockedBy: ["p3"] });
+    assert.deepEqual(blocked[0].blockedBy, ["p3"]);
+  });
+
   it("append adds one phase with a fresh id and rejects duplicates", () => {
     const appended = run(seeded(), { action: "append", phases: [{ title: "Ship it" }] });
     assert.deepEqual(appended.map((p) => p.id), ["p1", "p2", "p3", "p4"]);

@@ -80,6 +80,22 @@ describe("nextDefaultTools", () => {
     const working = startupToolSet(SettingsManager.inMemory({ defaultTools: ["+codemode", "+grep"] }));
     assert.deepEqual(nextDefaultTools(working), [...STOCK, "grep", "codemode"]);
   });
+
+  it("preserves non-builtin names from the user's defaultTools through a toggle save", () => {
+    // A bare list may carry arbitrary names (pi accepts them) — toggling a
+    // builtin must not silently delete them.
+    const working = startupToolSet(SettingsManager.inMemory({ defaultTools: ["+codemode", "github"] }));
+    const rows = builtinToolRows(working);
+    rows.find((r) => r.key === `${DEFAULT_TOOLS_PREFIX}grep`)!.set(true);
+    const list = nextDefaultTools(working);
+    assert.ok(list.includes("github"), "arbitrary name survives");
+    assert.ok(list.includes("grep"), "toggled builtin included");
+
+    const file = tmpFile();
+    writeDefaultTools(list, file);
+    assert.deepEqual(readJson(file).defaultTools, list, "round-trip keeps both");
+    rmSync(path.dirname(file), { recursive: true, force: true });
+  });
 });
 
 describe("writeDefaultTools", () => {

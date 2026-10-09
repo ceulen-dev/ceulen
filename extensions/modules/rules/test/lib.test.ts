@@ -125,6 +125,30 @@ describe("@import expansion", () => {
     assert.equal(body.match(/BBB/g)?.length, 1);
   });
 
+  it("the same absolute import from TWO files expands in both (seen is per file)", () => {
+    // F3: ImportState.seen was shared across all RULES.md files, so the same
+    // @import from a second file stayed a literal token.
+    const { cwd, userDir } = workspace();
+    const shared = path.join(cwd, ".pi/shared.md");
+    write(shared, "SHARED-CONTENT\n");
+    write(path.join(cwd, ".pi/RULES.md"), "## a\n@" + shared + "\n");
+    write(path.join(userDir, "RULES.md"), "## b\n@" + shared + "\n");
+
+    const model = loadRules(cwd, userDir);
+    assert.equal(model.rules.length, 2);
+    for (const rule of model.rules) {
+      assert.ok(rule.body.includes("SHARED-CONTENT"), `${rule.name}: expanded`);
+      assert.ok(!rule.body.includes("@"), `${rule.name}: no literal token left`);
+    }
+  });
+
+  it("repeats WITHIN one file stay literal (cycle guard untouched)", () => {
+    const { cwd, userDir } = workspace();
+    write(path.join(cwd, ".pi/RULES.md"), "## a\n@x.md\n@x.md\n");
+    write(path.join(cwd, ".pi/x.md"), "XXX\n");
+    assert.equal(loadRules(cwd, userDir).rules[0].body.match(/XXX/g)?.length, 1);
+  });
+
   it("marks a missing import in one line instead of failing", () => {
     const { cwd, userDir } = workspace();
     write(path.join(cwd, ".pi/RULES.md"), "## a\nsee @nope/missing.md for details\n");

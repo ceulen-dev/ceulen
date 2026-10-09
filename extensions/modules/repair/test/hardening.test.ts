@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -205,6 +205,51 @@ describe("patch rename arrows (A9)", () => {
         assert.equal(res.isError, true, `ascii arrow: rename of a lockfile refused (${arrow})`);
         assert.match(res.content[0].text, /auto-generated/);
       }
+    } finally {
+      if (orig === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = orig;
+      await rm(proj, { recursive: true, force: true });
+    }
+  });
+
+  it("a rename INTO a guarded destination is refused even when the source is clean", async () => {
+    // F4: the arrow used to drop the destination, so `src/a.ts → dist/out.min.js`
+    // bypassed the auto-gen guard. Both arrows must now refuse on the DEST too.
+    const { default: repairModule } = await import("../index.js");
+    const proj = await mkdtemp(path.join(tmpdir(), "repair-arrow-dest-"));
+    const orig = process.env.PI_CODING_AGENT_DIR;
+    process.env.PI_CODING_AGENT_DIR = proj;
+    const tools: any[] = [];
+    try {
+      repairModule({
+        on: () => {},
+        registerTool: (def: any) => tools.push(def),
+        registerCommand: () => {},
+      } as never);
+      const applyPatch = tools.find((t) => t.name === "apply_patch");
+      assert.ok(applyPatch, "apply_patch registered");
+      await mkdir(path.join(proj, "src"), { recursive: true });
+      await writeFile(path.join(proj, "src.ts"), "x\n");
+      for (const arrow of ["→", "->"]) {
+        const res = await applyPatch.execute(
+          "t1",
+          { patch: `*** Begin Patch\n*** Update File: src.ts ${arrow} dist/out.min.js\n@@ x\n-y\n+z\n*** End Patch` },
+          undefined,
+          undefined,
+          { cwd: proj },
+        );
+        assert.equal(res.isError, true, `rename into a guarded dest refused (${arrow})`);
+        assert.match(res.content[0].text, /out\.min\.js/);
+      }
+      // Non-rename to a clean path is still allowed (guard untouched).
+      const ok = await applyPatch.execute(
+        "t1",
+        { patch: "*** Add File: src/new.ts\n+hi\n*** End Patch" },
+        undefined,
+        undefined,
+        { cwd: proj },
+      );
+      assert.equal(ok.isError, undefined);
     } finally {
       if (orig === undefined) delete process.env.PI_CODING_AGENT_DIR;
       else process.env.PI_CODING_AGENT_DIR = orig;

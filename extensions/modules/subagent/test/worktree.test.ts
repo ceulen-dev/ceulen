@@ -5,7 +5,8 @@
 // git version; on-disk effects use real temp dirs.
 
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, writeFile } from "node:fs/promises";
+import { readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
@@ -125,6 +126,42 @@ describe("sweepStaleWorktrees", () => {
     assert.deepEqual(result, { removed: [], kept: 0 });
     assert.equal(exec.calls.length, 1);
   });
+
+  it("orphan marker (no matching dir) is reclaimed by the sweep", async () => {
+    const repo = await tempDir("wt-sweep-orphan-");
+    const base = join(repo, WORKTREE_DIR_NAME);
+    await mkdir(base, { recursive: true });
+    await writeFile(join(base, "orphan.owner.json"), JSON.stringify({ pid: process.pid, id: "orphan", createdAt: Date.now() }));
+    const exec = fakeExec([
+      { match: (_c, args) => args[0] === "rev-parse", stdout: `${repo}\n` },
+      { match: (_c, args) => args[0] === "worktree" && args[1] === "list", stdout: "" },
+    ]);
+    const result = await sweepStaleWorktrees(repo, exec);
+    assert.deepEqual(result, { removed: [], kept: 0 });
+    await assert.rejects(stat(join(base, "orphan.owner.json")), "orphan marker must be dropped");
+  });
+
+  it("force: foreign live-pid sandbox removed, non-force keeps it, own pid stays protected", async () => {
+    const repo = await tempDir("wt-sweep-force-");
+    const base = join(repo, WORKTREE_DIR_NAME);
+    await mkdir(join(base, "foreign"), { recursive: true });
+    await mkdir(join(base, "mine"), { recursive: true });
+    await writeFile(join(base, "foreign.owner.json"), JSON.stringify({ pid: 1, id: "foreign", createdAt: Date.now() }));
+    await writeFile(join(base, "mine.owner.json"), JSON.stringify({ pid: process.pid, id: "mine", createdAt: Date.now() }));
+    const exec = fakeExec([
+      { match: (_c, args) => args[0] === "rev-parse", stdout: `${repo}\n` },
+      { match: (_c, args) => args[0] === "worktree" && args[1] === "list", stdout: "" },
+    ]);
+    const plain = await sweepStaleWorktrees(repo, exec);
+    assert.equal(plain.kept, 2); // pid 1 (launchd/init) is alive — the false-KEEP
+    await stat(join(base, "foreign"));
+
+    const forced = await sweepStaleWorktrees(repo, exec, { force: true });
+    assert.deepEqual(forced.removed.map((r) => r.split("/").pop()), ["foreign"]);
+    assert.equal(forced.kept, 1);
+    await assert.rejects(stat(join(base, "foreign")));
+    await stat(join(base, "mine")); // this process's own live sandbox survives force
+  });
 });
 
 // ── Baseline capture: PURE READS on the parent ─────────────────────────────
@@ -226,5 +263,123 @@ describe("createWorktree", () => {
     const result = await createWorktree(dir, exec);
     assert.equal(result.ok, false);
     assert.match(result.error!, /not a git repo/);
+  });
+
+  it("owner marker exists at the moment `worktree add` runs (git fallback path)", async () => {
+    const repo = await tempDir("wt-marker-add-");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    const base = join(repo, WORKTREE_DIR_NAME);
+    let sawMarker: boolean | undefined;
+    const exec = fakeExec([
+      { match: (_c, args) => args[0] === "rev-parse", stdout: `${repo}\n` },
+      { match: (c) => c === "cp", code: 1, stderr: "cp failed" }, // force the git-worktree fallback
+    ]);
+    const wrapped: Exec = async (command, args, options) => {
+      if (command === "git" && args[0] === "worktree" && args[1] === "add") {
+        sawMarker = readdirSync(base).some((f) => f.endsWith(".owner.json"));
+      }
+      return exec(command, args, options);
+    };
+    const result = await createWorktree(repo, wrapped);
+    assert.equal(result.ok, true);
+    assert.equal(result.cow, false);
+    assert.equal(sawMarker, true, "marker must exist before the sandbox is registered");
+  });
+
+  it("marker-write failure → createWorktree fails; never ok without a marker", async () => {
+    if (typeof process.getuid === "function" && process.getuid() === 0) return; // root ignores dir perms
+    const repo = await tempDir("wt-marker-eacces-");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    const base = join(repo, WORKTREE_DIR_NAME);
+    await mkdir(base, { recursive: true });
+    await writeFile(join(base, ".gitignore"), "*\n"); // the gitignore check passes; the MARKER write is what fails
+    await chmod(base, 0o500);
+    try {
+      const exec = fakeExec([{ match: (_c, args) => args[0] === "rev-parse", stdout: `${repo}\n` }]);
+      const result = await createWorktree(repo, exec);
+      assert.equal(result.ok, false);
+      assert.match(result.error!, /marker/);
+      assert.ok(!exec.calls.some((c) => c.command === "git" && c.args[0] === "worktree"), "no sandbox registered");
+    } finally {
+      await chmod(base, 0o700);
+    }
+  });
+
+  it("a rejecting `worktree add` after the marker write → ok:false AND no orphan marker", async () => {
+    const repo = await tempDir("wt-add-throws-");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    const base = join(repo, WORKTREE_DIR_NAME);
+    const exec = fakeExec([
+      { match: (_c, args) => args[0] === "rev-parse", stdout: `${repo}\n` },
+      { match: (c) => c === "cp", code: 1, stderr: "cp failed" }, // force the git-worktree fallback
+    ]);
+    const wrapped: Exec = async (command, args, options) => {
+      if (command === "git" && args[0] === "worktree" && args[1] === "add") throw new Error("worktree add exploded");
+      return exec(command, args, options);
+    };
+    const result = await createWorktree(repo, wrapped);
+    assert.equal(result.ok, false);
+    assert.match(result.error!, /exploded/);
+    const leftovers = (await readdir(base).catch(() => [] as string[])).filter((f) => f.endsWith(".owner.json"));
+    assert.deepEqual(leftovers, [], "no orphan marker may survive a failed creation");
+  });
+
+  it("CoW copies the live .git under the repo lock (no torn copy)", async () => {
+    const repo = await tempDir("wt-cow-lock-");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await writeFile(join(repo, "file.txt"), "x");
+    const order: string[] = [];
+    let release!: () => void;
+    const gate = new Promise<void>((r) => { release = r; });
+    const holder = withRepoLock(repo, async () => { order.push("lock-start"); await gate; order.push("lock-end"); });
+    await new Promise((r) => setTimeout(r, 10));
+    assert.deepEqual(order, ["lock-start"], "holder acquired the lock first");
+    const exec = fakeExec([
+      { match: (_c, args) => args[0] === "rev-parse", stdout: `${repo}\n` },
+      { match: (c) => c === "cp" },
+    ]);
+    const wrapped: Exec = async (command, args, options) => {
+      if (command === "cp" && args[1]?.endsWith("/.git")) order.push("cow-git");
+      return exec(command, args, options);
+    };
+    const pending = createWorktree(repo, wrapped);
+    await new Promise((r) => setTimeout(r, 20));
+    assert.ok(!order.includes("cow-git"), "cp .git waits for the lock");
+    release();
+    await holder;
+    const result = await pending;
+    assert.ok(result.ok, result.error);
+    assert.equal(result.cow, undefined, "CoW path ran");
+    assert.deepEqual(order, ["lock-start", "lock-end", "cow-git"]);
+  });
+
+  it("base .gitignore as a DIRECTORY → createWorktree fails loudly", async () => {
+    const repo = await tempDir("wt-gitignore-dir-");
+    await mkdir(join(repo, ".git"), { recursive: true });
+    await mkdir(join(repo, WORKTREE_DIR_NAME, ".gitignore"), { recursive: true });
+    const exec = fakeExec([{ match: (_c, args) => args[0] === "rev-parse", stdout: `${repo}\n` }]);
+    const result = await createWorktree(repo, exec);
+    assert.equal(result.ok, false);
+    assert.match(result.error!, /\.gitignore/);
+    assert.ok(!exec.calls.some((c) => c.command === "cp" || c.args[0] === "worktree"), "no sandbox materialized");
+  });
+});
+
+// ── Sweep: registry stays consistent when `worktree remove` fails ───────────
+
+describe("sweepStaleWorktrees — prune fallback", () => {
+  it("a registered dir whose `worktree remove` exits 1 gets `worktree prune`", async () => {
+    const repo = await tempDir("wt-sweep-prune-");
+    const base = join(repo, WORKTREE_DIR_NAME);
+    await mkdir(join(base, "stuck"), { recursive: true });
+    const exec = fakeExec([
+      { match: (_c, args) => args[0] === "rev-parse", stdout: `${repo}\n` },
+      { match: (_c, args) => args[0] === "worktree" && args[1] === "list", stdout: `worktree ${join(base, "stuck")}\n` },
+      { match: (_c, args) => args[0] === "worktree" && args[1] === "remove", code: 1, stderr: "remove failed" },
+    ]);
+    const result = await sweepStaleWorktrees(repo, exec);
+    assert.deepEqual(result.removed.map((r) => r.split("/").pop()), ["stuck"]);
+    assert.ok(exec.calls.some((c) => c.args[0] === "worktree" && c.args[1] === "prune"), "prune issued after failed remove");
+    await assert.rejects(stat(join(base, "stuck"))); // the dir is still gone
   });
 });

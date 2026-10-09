@@ -233,6 +233,9 @@ export function applyTodo(current: readonly TodoPhase[], params: TodoParams): Ap
       for (const [i, p] of list.entries()) {
         const title = p.title.trim();
         if (!title) return fail("Every phase needs a title");
+        // Blocked is DERIVED from unmet blockedBy edges — a stored "blocked"
+        // status never clears (unblock touches blockedBy only), so refuse it.
+        if (p.status === "blocked") return fail(`"${title}": status "blocked" is derived from unmet blockedBy edges and is never stored — pass blockedBy: [ids] (or omit status)`);
         if (seenTitle.has(title)) return fail(`Duplicate phase title "${title}"`);
         seenTitle.add(title);
         const id = p.id?.trim() || autoId(i, taken);
@@ -255,6 +258,7 @@ export function applyTodo(current: readonly TodoPhase[], params: TodoParams): Ap
       const p = list[0];
       const title = p.title.trim();
       if (!title) return fail("Every phase needs a title");
+      if (p.status === "blocked") return fail(`"${title}": status "blocked" is derived from unmet blockedBy edges and is never stored — pass blockedBy: [ids] (or omit status)`);
       if (phases.some((x) => x.title === title)) return fail(`Phase "${title}" already exists`);
       const id = p.id?.trim() || autoId(phases.length, new Set(phases.map((x) => x.id)));
       if (byId.has(id)) return fail(`Phase id "${id}" already exists`);

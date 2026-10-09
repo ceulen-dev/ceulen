@@ -15,6 +15,7 @@ import os from "node:os";
 import path from "node:path";
 
 import rulesExtension from "../index.ts";
+import { clearRuleCache, loadRules } from "../lib/rules.ts";
 
 const temps: string[] = [];
 const envBackup = process.env.PI_CODING_AGENT_DIR;
@@ -191,6 +192,34 @@ describe("rules module — /rules command", () => {
     const { commands } = harness();
     await commands.get("rules").handler("bogus", context(workspace(), notes));
     assert.equal(notes[0].level, "error");
+  });
+
+  it("UNTRUSTED project: reload counts only user-level sources and the cache key matches the composer's", async () => {
+    // F5: /rules reload called loadRules without the trust gate — the phantom
+    // trusted=true model also poisoned the mtime cache with a key the composer
+    // (trusted=false) could never hit.
+    const cwd = workspace({ ".pi/RULES.md": "## project-rule\nPROJECT-SECRET-MARKER\n" });
+    const userFile = write(path.join(agentDir, "RULES.md"), "## user-rule\nUSER-MARKER\n");
+    const { commands } = harness();
+    const notes: Harness["notes"] = [];
+    const untrusted = { ...context(cwd, notes), isProjectTrusted: () => false };
+
+    await commands.get("rules").handler("reload", untrusted);
+    assert.ok(notes[0].message.includes("1 source(s)"), `only user-level source: ${notes[0].message}`);
+    assert.ok(!notes[0].message.includes(path.join(cwd, ".pi/RULES.md")));
+
+    // The composer now hits the reload-populated cache: loadRules with the
+    // SAME (cwd, trusted=false) key the composer uses returns the identical
+    // model object — the reload-run cache is a hit, not a re-parse.
+    const { events } = harness();
+    const first = await events.get("before_agent_start")!({ systemPrompt: "BASE", prompt: "p" }, untrusted);
+    assert.ok(first?.systemPrompt.includes("USER-MARKER"));
+    assert.ok(!first?.systemPrompt.includes("PROJECT-SECRET-MARKER"));
+    assert.equal(loadRules(cwd, undefined, false), loadRules(cwd, undefined, false), "cache hit — same model object");
+    await events.get("before_agent_start")!({ systemPrompt: "BASE", prompt: "p" }, untrusted);
+
+    rmSync(userFile);
+    clearRuleCache();
   });
 
   it("UNTRUSTED project: repo RULES.md never reaches the prompt; user file still applies", async () => {

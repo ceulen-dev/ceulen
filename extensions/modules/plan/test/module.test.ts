@@ -286,6 +286,23 @@ describe("plan mode — prompt + approval flow", () => {
     assert.match(h.userMessages[0].content, /Execute the approved plan/);
   });
 
+  it("auto-approve materialize failure notifies and restores the plan for retry", async () => {
+    setPlanSettings(agent.dir, { autoApprove: true, savePlans: "approved" });
+    const h = await start();
+    await h.commands.plan.handler("", h.ctx({ cwd: REPO }));
+    await h.tools.write_plan.execute("tc1", { title: "T", content: "body" }, undefined, undefined, h.ctx({ cwd: REPO }));
+    // plans dir unwritable: <REPO>/.pi is a FILE → the approval-time write throws.
+    writeFileSync(join(REPO, ".pi"), "not a dir");
+    await h.fire("agent_settled", {}, h.ctx({ cwd: REPO })); // must not reject
+    assert.equal(h.userMessages.length, 0, "no execution turn on failure");
+    assert.ok(h.notifications.some((n) => n.includes("Auto-approve failed") && n.includes("/plan-approve to retry")));
+    // Condition fixed → a later settle still executes the still-ready plan.
+    rmSync(join(REPO, ".pi"));
+    await h.fire("agent_settled", {}, h.ctx({ cwd: REPO }));
+    assert.equal(h.userMessages.length, 1);
+    assert.match(h.userMessages[0].content, /Execute the approved plan/);
+  });
+
   it("auto-approve never fires off an aborted settle; the plan still approves on a clean one", async () => {
     setPlanSettings(agent.dir, { autoApprove: true });
     const h = await start();

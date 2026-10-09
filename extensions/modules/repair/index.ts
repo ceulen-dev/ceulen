@@ -112,11 +112,12 @@ function applyReadSelector(args: Record<string, unknown>, cwd: string): unknown 
 // ── sqlite / archive views (OMP read-sqlite + read-archive) ──
 
 /** Peel `db.sqlite:users` / `pkg.tgz:src/x.ts:50-80` for sqlite/archive
- *  views. Returns the model-facing text result, or null when the path is
- *  neither (caller falls through to the built-in read). The stem must exist
- *  (the caller probes the literal path first — literal-wins preserved).
- *  Exported for tests. */
-export function applySpecialView(rawPath: string, cwd: string): { text: string } | null {
+ *  views. Returns the model-facing text result plus the RESOLVED STEM (so the
+ *  caller records the freshness baseline against the stem, not the raw
+ *  selector path), or null when the path is neither (caller falls through to
+ *  the built-in read). The stem must exist (the caller probes the literal path
+ *  first — literal-wins preserved). Exported for tests. */
+export function applySpecialView(rawPath: string, cwd: string): { text: string; stem: string } | null {
   // Special-view peel: the LONGEST existing prefix path split at colons is
   // the stem; the remainder is the sqlite sub-selector or archive member
   // (+ optional line ranges). peelPathSelector can't do this — its grammar
@@ -139,7 +140,7 @@ export function applySpecialView(rawPath: string, cwd: string): { text: string }
   if (isSqliteFile(stemAbs)) {
     try {
       // The sqlite sub-selector spans ALL segments (users:2 is table+rowid).
-      return { text: readSqlite(stemAbs, remainder, stem) };
+      return { text: readSqlite(stemAbs, remainder, stem), stem };
     } catch (err) {
       throw new Error(err instanceof Error ? err.message : String(err));
     }
@@ -147,7 +148,7 @@ export function applySpecialView(rawPath: string, cwd: string): { text: string }
 
   const kind = archiveKind(stem);
   if (kind) {
-    if (!remainder) return { text: readArchiveListing(stemAbs, kind, stem).text };
+    if (!remainder) return { text: readArchiveListing(stemAbs, kind, stem).text, stem };
     // Peel the trailing lines-selector FIRST (`src/x.ts:50-80`): the member
     // lookup must see `src/x.ts`, not the raw remainder with the `:50-80`
     // suffix (which matchMember reports as "no member matching").
@@ -168,9 +169,9 @@ export function applySpecialView(rawPath: string, cwd: string): { text: string }
         ? resolveTailSelector(selector, lines.length - 1)
         : selector;
       const sliced = sliceMemberLines(lines, resolved);
-      if (sliced !== null) return { text: sliced };
+      if (sliced !== null) return { text: sliced, stem };
     }
-    return { text: res.text };
+    return { text: res.text, stem };
   }
   return null;
 }
@@ -312,9 +313,13 @@ async function recordMutatedMtimes(toolName: string, params: any, cwd: string): 
  *  so the auto-gen guard + mtime refresh must too). */
 function parsePatchTargetPaths(patch: string): string[] {
   const out: string[] = [];
-  for (const m of patch.matchAll(/^\*{3} (?:Add|Delete|Update) File: (.+?)(?:\s*(?:→|->)\s*.+)?$/gm)) {
-    const target = m[1].trim();
-    if (target && !target.includes("://")) out.push(target);
+  for (const m of patch.matchAll(/^\*{3} (?:Add|Delete|Update) File: (.+?)(?:\s*(?:→|->)\s*(.+))?$/gm)) {
+    // A rename touches BOTH paths — the destination too (a `→ dist/out.min.js`
+    // target used to bypass the auto-gen guard because the regex dropped it).
+    for (const target of [m[1], m[2]]) {
+      const p = target?.trim();
+      if (p && !p.includes("://")) out.push(p);
+    }
   }
   return out;
 }
@@ -483,7 +488,7 @@ export function wrapToolDefinition(
       if (base.name === "read" && isRecord(params) && typeof params.path === "string" && !selector) {
         const rawPath: string = params.path;
         const rawAbs = resolvePath(cwd, rawPath);
-        let view: { text: string } | null = null;
+        let view: { text: string; stem?: string } | null = null;
         if (existsSync(rawAbs) && isSqliteFile(rawAbs)) {
           try {
             view = { text: readSqlite(rawAbs, undefined, rawPath) };
@@ -496,9 +501,9 @@ export function wrapToolDefinition(
           view = applySpecialView(rawPath, cwd);
         }
         if (view) {
-          // Record the freshness baseline for the STEM so a follow-up write
-          // to the extracted file is judged normally (members have none).
-          await recordReadMtimes({ path: rawPath }, cwd);
+          // Record the freshness baseline for the STEM (the raw selector path
+          // itself doesn't exist on disk — recording it records nothing).
+          await recordReadMtimes({ path: view.stem ?? rawPath }, cwd);
           return { content: [{ type: "text", text: view.text }], details: undefined };
         }
       }

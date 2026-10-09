@@ -394,6 +394,16 @@ const IMAGE_MIME: Record<string, string> = {
   png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg", gif: "image/gif", webp: "image/webp",
 };
 
+/** Recognized image magic bytes — isProbablyBinary's NUL sniff is true for
+ *  every real raster format, so the extension branch must win first (F10a). */
+const IMAGE_MAGIC: Array<{ ext: string; test: (b: Buffer) => boolean }> = [
+  { ext: "png", test: (b) => b.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) },
+  { ext: "jpg", test: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { ext: "jpeg", test: (b) => b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff },
+  { ext: "gif", test: (b) => b.subarray(0, 3).toString("latin1") === "GIF" },
+  { ext: "webp", test: (b) => b.subarray(0, 4).toString("latin1") === "RIFF" && b.subarray(8, 12).toString("latin1") === "WEBP" },
+];
+
 export async function executeFileRead(gh: GhRunner, cwd: string, params: GhParams, signal?: AbortSignal): Promise<{ text: string; image?: { data: string; mimeType: string } }> {
   const repo = await resolveGitHubRepoVia(gh, cwd, normalizeOptionalString(params.repo), undefined, signal);
   const filePath = requireNonEmpty(params.path, "path");
@@ -426,7 +436,12 @@ export async function executeFileRead(gh: GhRunner, cwd: string, params: GhParam
   const bytes = Buffer.from(encoded, "base64");
   const ext = filePath.split(".").pop()?.toLowerCase() ?? "";
   const mime = IMAGE_MIME[ext];
-  if (mime && !isProbablyBinary(bytes)) {
+  // Recognized image EXTENSION wins FIRST (F10a): real PNG/JPEG/GIF/WebP all
+  // contain NUL bytes in the first 8KB, so the binary sniff would report
+  // "Cannot read binary file" for every actual image. Magic bytes gate the
+  // image block so a text file with an image extension still degrades to the
+  // binary/text paths below.
+  if (mime && IMAGE_MAGIC.some((m) => m.ext === ext && m.test(bytes))) {
     return { text: `Image file: ${filePath}`, image: { data: encoded, mimeType: mime } };
   }
   if (isProbablyBinary(bytes)) {
@@ -705,8 +720,8 @@ const sleep = (ms: number, signal?: AbortSignal): Promise<void> =>
 
 /**
  * Poll a workflow run until it completes; on failure tail each failed job's
- * logs. Watch budget comes from `timeoutMs` (the tool's overall deadline —
- * the caller passes gh-cli's 5-min window here).
+ * logs. Watch budget comes from `timeoutMs` (gh.runWatchTimeoutSecs, default
+ * 600s) — each gh poll stays bounded by gh-cli's own per-spawn deadline.
  */
 export async function executeRunWatch(gh: GhRunner, cwd: string, params: GhParams, signal?: AbortSignal, timeoutMs = 600_000): Promise<string> {
   const runReference = parseRunReference(params.run);
@@ -714,7 +729,10 @@ export async function executeRunWatch(gh: GhRunner, cwd: string, params: GhParam
   if (runId === undefined) throw new Error("run_watch requires `run` (workflow run ID or Actions run URL)");
   const repo = await resolveGitHubRepoVia(gh, cwd, normalizeOptionalString(params.repo), runReference.repo, signal);
   const tail = resolveTailLimit(params.tail);
-  const deadline = Date.now() + Math.min(timeoutMs, 5 * 60_000 - 5_000);
+  // Honor the configured budget as-is (F10b) — the old Math.min(…, 295s) cap
+  // silently halved the documented 600s default. Floor 10s so a misconfigured
+  // 0/negative still terminates; each poll is bounded by gh-cli's GH_TIMEOUT_MS.
+  const deadline = Date.now() + Math.max(10_000, timeoutMs);
   const watchStartMs = Date.now();
   const intervalSeconds = () => (Date.now() - watchStartMs < RUN_WATCH_FAST_WINDOW_MS ? RUN_WATCH_INTERVAL_DEFAULT : RUN_WATCH_INTERVAL_SLOW);
 

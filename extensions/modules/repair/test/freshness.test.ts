@@ -143,6 +143,36 @@ describe("write freshness guard", () => {
     assert.match(await readFile(file, "utf8"), /FOREIGN/);
   });
 
+  it("a special-view read records the STEM's baseline (db.sqlite:users arms the guard)", async () => {
+    // F6: the raw selector path (db.sqlite:users) was recorded instead of the
+    // stem — no mtime ever landed, so a foreign write to the db after the read
+    // was invisible to the freshness guard.
+    const { DatabaseSync } = await import("node:sqlite");
+    const dir = await tempDir();
+    const dbFile = join(dir, "db.sqlite");
+    const db = new DatabaseSync(dbFile);
+    db.exec("CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT)");
+    db.exec("INSERT INTO users (name) VALUES ('alice')");
+    db.close();
+
+    const read = makeWrapped("read", dir);
+    const result = await exec(read, { path: "db.sqlite:users" }, dir);
+    assert.match(String(result.content[0].text), /alice/, "special view served");
+
+    // Foreign write (fresh mtime) after our read → a full-file write must
+    // now be refused, proving the STEM mtime is recorded.
+    const db2 = new DatabaseSync(dbFile);
+    db2.exec("INSERT INTO users (name) VALUES ('bob')");
+    db2.close();
+    const future = new Date(Date.now() + 1100);
+    await utimes(dbFile, future, future);
+
+    const write = makeWrapped("write", dir);
+    const fresh = await exec(write, { path: "db.sqlite", content: "clobber" }, dir);
+    assert.equal(fresh.isError, true, "checkWriteFresh sees the recorded stem mtime");
+    assert.match(fresh.content[0].text, /Re-read the file/);
+  });
+
   it("write after a wrapped EDIT does not false-positive (edit refreshes the baseline)", async () => {
     // Live-found defect (reviewer 2026-10-06): a successful edit never
     // refreshed the freshness baseline, so read → edit → write compared the

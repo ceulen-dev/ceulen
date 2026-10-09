@@ -19,14 +19,8 @@ export function truncationMarker(bytes: number): string {
   return `[… ${bytes} bytes truncated …]`;
 }
 
-function trimPartialHead(lines: string[], total: number, keep: number): { lines: string[]; total: number } {
-  let dropped = 0;
-  while (lines.length > 0 && total - dropped > keep) {
-    dropped += Buffer.byteLength(lines[0], "utf8") + 1;
-    lines.shift();
-  }
-  return { lines, total: total - dropped };
-}
+// ponytail: trimPartialHead deleted — the partial is now bounded in enforceCap
+// itself (byte-aware clip), so a second head-trimmer has no job left.
 
 /**
  * Line-buffered ring for one output stream. `push` splits on \n and keeps the
@@ -52,6 +46,7 @@ export class RingBuffer {
     this.lifetimeLineCount += parts.length;
     this.totalBytes += Buffer.byteLength(chunk, "utf8");
     this.lifetimeBytes += Buffer.byteLength(chunk, "utf8");
+    // Cap check counts the partial too — newline-free output must be bounded.
     if (this.totalBytes > TOTAL_BYTES) this.enforceCap();
   }
 
@@ -59,13 +54,24 @@ export class RingBuffer {
     this.capped = true;
     const lineBytes = (ls: string[]) => ls.reduce((n, l) => n + Buffer.byteLength(l, "utf8") + 1, 0);
     const keepTail = TOTAL_BYTES - HEAD_KEEP_BYTES - Buffer.byteLength(truncationMarker(1), "utf8") - 1;
+    // Fold PREVIOUS markers into one: their claimed drops carry forward so a
+    // re-trip never stacks marker lines or loses the older drops' accounting.
+    let carriedDrops = 0;
+    const lines = this.linesArr.filter((l) => {
+      const m = /^\[… (\d+) bytes truncated …\]$/.exec(l);
+      if (m) {
+        carriedDrops += Number(m[1]);
+        return false;
+      }
+      return true;
+    });
     // Split the whole lines into HEAD (first bytes) + TAIL (last bytes),
     // dropping the middle; the first line of each side is taken even when it
     // alone busts its budget (one giant line must still be visible).
     let head: string[] = [];
     const tail: string[] = [];
     let tailBytes = 0;
-    const rest = [...this.linesArr];
+    const rest = [...lines];
     while (rest.length > 0) {
       const l = rest[rest.length - 1]!;
       const b = Buffer.byteLength(l, "utf8") + 1;
@@ -83,10 +89,27 @@ export class RingBuffer {
       rest.shift();
       headBytes += b;
     }
-    const droppedBytes = lineBytes(rest);
+    let droppedBytes = lineBytes(rest) + carriedDrops;
+    // The unterminated partial is bounded by its OWN TOTAL_BYTES cap, keeping
+    // the newest tail — newline-free output (minified JSON, `yes`) must not
+    // grow memory unbounded. (Clipping against the lines' leftover budget
+    // would zero a small spinner after one giant line.) Bytes dropped from
+    // the partial's head count into droppedBytes so the marker stays truthful.
+    let partial = this.partial;
+    const partialBytes = Buffer.byteLength(partial, "utf8");
+    if (partialBytes > TOTAL_BYTES) {
+      // Byte-aware clip of the newest tail (multi-byte chars snap forward).
+      const buf = Buffer.from(partial, "utf8");
+      let start = buf.length - TOTAL_BYTES;
+      while (start < buf.length && start > 0 && (buf[start]! & 0xc0) === 0x80) start++;
+      droppedBytes += start;
+      partial = buf.subarray(start).toString("utf8");
+    }
     this.linesArr = [...head, truncationMarker(Math.max(droppedBytes, 1)), ...tail];
     this.tailStart = head.length + 1;
-    this.totalBytes = lineBytes(this.linesArr);
+    this.partial = partial;
+    // Recompute counts the partial: the next push's cap check sees it.
+    this.totalBytes = lineBytes(this.linesArr) + Buffer.byteLength(this.partial, "utf8");
   }
 
   /** Everything visible so far: complete lines plus the unterminated tail. */
@@ -220,7 +243,9 @@ const EXIT_WAIT_MS = 2_000;
 export class SessionStore {
   private map = new Map<string, ShellSession>();
 
-  /** Register a session. Throws (listing live sessions) when 10 are already LIVE. */
+  /** Register a session. Throws (listing live sessions) when 10 are already LIVE.
+   *  Also evicts exited sessions beyond the keep count — the kill-action call
+   *  alone let naturally-exited sessions accumulate forever (2 rings each). */
   add(session: ShellSession): void {
     const live = this.list().filter((s) => s.exitedAt === undefined);
     if (live.length >= MAX_LIVE_SESSIONS && session.exitedAt === undefined) {
@@ -230,6 +255,9 @@ export class SessionStore {
       );
     }
     this.map.set(session.id, session);
+    // Registration is the enforcement point (F9): every start passes through
+    // here, so the exited cap holds even when nothing ever kills explicitly.
+    while (this.evictOldestExited());
   }
 
   get(id: string): ShellSession | undefined {

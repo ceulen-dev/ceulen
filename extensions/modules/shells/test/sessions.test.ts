@@ -93,6 +93,44 @@ describe("RingBuffer", () => {
     assert.equal(rb.isTruncated(), true);
     assert.match(rb.lines().at(-1)!, /^spinner…/);
   });
+
+  it("F8: bounds a newline-free flood — partial capped, lifetime and marker truthful", () => {
+    const rb = new RingBuffer();
+    const CHUNK = "x".repeat(1024 * 1024); // 1MB, no newline
+    for (let i = 0; i < 10; i++) rb.push(CHUNK);
+    // Memory is bounded: the partial alone stays within the cap (+ grace for
+    // the head/marker lines the split keeps).
+    const partialBytes = Buffer.byteLength(rb.peekPartial(), "utf8");
+    assert.ok(partialBytes <= TOTAL_BYTES, `partial ${partialBytes}B must be ≤ TOTAL_BYTES`);
+    // The newest tail survived, not the head.
+    assert.ok(rb.peekPartial().endsWith("x"));
+    assert.ok(rb.peekPartial().length > 0);
+    // Lifetime accounting is pre-truncation truth: ~10MB written.
+    assert.ok(Math.abs(rb.totalWritten() - 10 * 1024 * 1024) < 4096);
+    assert.equal(rb.isTruncated(), true);
+    // The marker reports the REAL dropped byte count (unpatched: "1 bytes").
+    const marker = rb.lines().find((l) => l.startsWith("[…"));
+    assert.ok(marker, "has a truncation marker");
+    const dropped = Number(/\[… (\d+) bytes truncated …\]/.exec(marker!)?.[1]);
+    // Cumulative truth: 10MB in, ≤TOTAL_BYTES (partial) + head kept → dropped
+    // ≈ 10MB − 262144 − grace; the unpatched marker degenerated to "1 bytes".
+    assert.ok(dropped >= 9 * 1024 * 1024, `marker reports real dropped bytes, got ${dropped}`);
+    // Exactly ONE marker — repeated cap trips fold, never stack.
+    assert.equal(rb.lines().filter((l) => l.startsWith("[…")).length, 1);
+  });
+
+  it("F8: a newline-free flood clips to the newest tail (byte-aware, multibyte snapped)", () => {
+    const rb = new RingBuffer();
+    // One chunk far over the cap; the clip window is the NEWEST TOTAL_BYTES.
+    const chunk = "a".repeat(TOTAL_BYTES + 50_000) + "é".repeat(1000);
+    rb.push(chunk);
+    const partial = rb.peekPartial();
+    assert.ok(Buffer.byteLength(partial, "utf8") <= TOTAL_BYTES);
+    assert.ok(partial.endsWith("é".repeat(1000)), "newest tail kept intact");
+    // The clipped window starts exactly 262144 bytes (UTF-8) before the end.
+    const expectedStart = chunk.length - (262_144 - 2000); // é is 2 bytes each
+    assert.ok(partial.startsWith(chunk.slice(expectedStart - 2, expectedStart)), "clip is byte-aware");
+  });
 });
 
 // ── ids + resolution ────────────────────────────────────────────────────────
@@ -192,9 +230,29 @@ describe("SessionStore", () => {
     for (let i = 0; i < 7; i++) store.add(live({ id: `d${i}`, exitedAt: 1_000 + i, exitCode: 0 }));
     let evicted = 0;
     while (store.evictOldestExited()) evicted++;
-    assert.equal(evicted, 2);
+    assert.equal(evicted, 0); // F9: registration already enforced the cap
     assert.equal(store.list().length, 5);
-    assert.equal(store.list()[0]!.id, "d2"); // oldest two gone
+    assert.equal(store.list()[0]!.id, "d2"); // oldest two gone at add time
+  });
+
+  it("F9: the exited cap is enforced at registration — a 6th naturally-exited session evicts the oldest", () => {
+    const store = new SessionStore();
+    // 5 exited registered, then two more sessions EXIT NATURALLY after
+    // registration (the unpatched path — evictOldestExited was kill-only).
+    for (let i = 0; i < 5; i++) store.add(live({ id: `x${i}`, exitedAt: 1_000 + i, exitCode: 0 }));
+    const sixth = live({ id: "x5", exitedAt: 1_005, exitCode: 0 });
+    store.add(live({ id: "x5" })); // register live (cap counts it)
+    (store.get("x5") as ShellSession).exitedAt = 1_005; // natural exit
+    const seventh = live({ id: "x6" });
+    store.add(seventh);
+    (store.get("x6") as ShellSession).exitedAt = 1_006;
+    const eighth = live({ id: "x7" });
+    store.add(eighth); // 7 exited → evicts down to 5 at registration
+    (store.get("x7") as ShellSession).exitedAt = 1_007;
+    store.add(live({ id: "x8" })); // 6 exited again → oldest evicted NOW
+    assert.equal(store.list().filter((s) => s.exitedAt !== undefined).length <= 5, true);
+    assert.ok(store.get("x7"), "newest survived");
+    assert.equal(store.get("x0"), undefined, "oldest evicted");
   });
 
   it("clear drops every session", () => {

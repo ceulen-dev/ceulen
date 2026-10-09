@@ -139,16 +139,22 @@ describe("sqlite views", () => {
     }, /readonly|read-only/i);
   });
 
-  it("raw queries cap at MAX_RAW_QUERY_ROWS", () => {
+  it("raw queries cap at MAX_RAW_QUERY_ROWS without materializing the rest", () => {
     const big = path.join(dir, "big.db");
     const db = new DatabaseSync(big);
     db.exec("CREATE TABLE t (n INTEGER)");
-    db.exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < ${MAX_RAW_QUERY_ROWS + 50}) INSERT INTO t SELECT x FROM c`);
+    db.exec(`WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x+1 FROM c WHERE x < ${MAX_RAW_QUERY_ROWS * 10}) INSERT INTO t SELECT x FROM c`);
     db.close();
     const out = readSqlite(big, "?SELECT * FROM t", "big.db");
-    assert.match(out, /showing \d+ of \d+ rows/);
-    const total = Number(/of (\d+) rows/.exec(out)![1]);
-    assert.equal(total, MAX_RAW_QUERY_ROWS + 50);
+    assert.match(out, /showing 200 of 200\+ rows/);
+    assert.match(out, /— 200\+ row\(s\)/);
+    assert.match(out, /add LIMIT/);
+  });
+
+  it("a query returning zero rows renders (no rows) — no stmt.columns() call", () => {
+    const out = readSqlite(dbFile, "?SELECT * FROM users WHERE age > 999", "f.db");
+    assert.match(out, /\(no rows\)/);
+    assert.match(out, /— 0 row\(s\)/);
   });
 });
 

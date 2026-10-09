@@ -39,6 +39,8 @@ export interface CdpFrame {
   params?: Record<string, unknown>;
   result?: Record<string, unknown>;
   error?: { message: string; data?: string };
+  /** Sibling-of-result protocol error report (e.g. Runtime domains): kept so unwrapEvaluate can fail loudly. */
+  exceptionDetails?: { text?: string; exception?: { description?: string; value?: unknown } };
   sessionId?: string;
 }
 
@@ -108,6 +110,13 @@ export class CdpConnection {
       this.pending.delete(msg.id);
       if (msg.error) {
         p.reject(new Error(`${msg.error.message}${msg.error.data ? `: ${msg.error.data}` : ""}`));
+      } else if (msg.exceptionDetails) {
+        // Shape-compatible: keep the result payload and surface the SIBLING
+        // exceptionDetails so unwrapEvaluate can fail loudly. (The nested
+        // Runtime.evaluate shape — exceptionDetails inside msg.result — was
+        // already preserved by the plain branch; this covers domains that
+        // report it beside result.)
+        p.resolve({ ...(msg.result ?? {}), exceptionDetails: msg.exceptionDetails });
       } else {
         p.resolve(msg.result ?? {});
       }
@@ -347,9 +356,9 @@ function stepLabel(step: InteractStep): string {
  * Bound any CDP await: a wedged renderer (hung evaluate, dialog race) must
  * fail loudly instead of hanging the call. Used for steps AND the post-loop
  * probe/auto-screenshot — without it a step timeout would still hang forever
- * on the unbounded probe that follows.
+ * on the unbounded probe that follows. Also bounds web_a11y's whole audit.
  */
-function raceBounded<T>(p: Promise<T>, ms: number, timeoutError: string): Promise<T> {
+export function raceBounded<T>(p: Promise<T>, ms: number, timeoutError: string): Promise<T> {
   let timer: ReturnType<typeof setTimeout> | undefined;
   const timeout = new Promise<T>((_, reject) => {
     timer = setTimeout(() => reject(new Error(timeoutError)), ms);

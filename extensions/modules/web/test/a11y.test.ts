@@ -3,10 +3,10 @@
 // the fake websocket server (cdp.test.ts harness pattern).
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync, chmodSync } from "node:fs";
+import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { after, before, describe, it } from "node:test";
+import { after, before, afterEach, beforeEach, describe, it } from "node:test";
 
 import {
   axeSource,
@@ -182,6 +182,104 @@ describe("runner expression (via fake CDP server)", { skip: process.platform ===
       runA11yAudit({ url: "http://localhost:8000/", wsFactory: () => ws }),
       /axe bootstrap missing/,
     );
+  });
+});
+
+// ── F1/F2 regressions: bounded audit + awaited bootstrap (fake CDP server) ──
+
+// launchCdp always spawns a real browser process (the wsFactory only fakes the
+// WS protocol), so these need the stub-Chrome contract from cdp.test.ts.
+describe("runA11yAudit liveness (fake CDP server)", { skip: process.platform === "linux" && !process.env.CHROME_PATH && "CI runners have no Chrome — launchCdp always spawns a real browser (the wsFactory only fakes the WS protocol)" }, () => {
+  let dir: string;
+  let originalChromePath: string | undefined;
+
+  beforeEach(() => {
+    dir = mkdtempSync(path.join(tmpdir(), "pi-web-a11y-live-"));
+    originalChromePath = process.env.CHROME_PATH;    // Stub Chrome: publish DevToolsActivePort, record the profile dir, hang.
+    const stub = path.join(dir, "stub-chrome.sh");
+    const probe = path.join(dir, "profile-path");
+    process.env.A11Y_TEST_PROFILE_FILE = probe;
+    writeFileSync(
+      stub,
+      `#!/bin/sh\nfor a in "$@"; do case "$a" in --user-data-dir=*) prof="\${a#--user-data-dir=}" ;; esac; done\n` +
+        `mkdir -p "$prof"\nprintf '9222\\n/devtools/browser/fake' > "$prof/DevToolsActivePort"\n` +
+        `printf '%s' "$prof" > "$A11Y_TEST_PROFILE_FILE"\nsleep 30\n`,
+    );
+    chmodSync(stub, 0o755);
+    process.env.CHROME_PATH = stub;
+  });
+
+  afterEach(() => {
+    delete process.env.A11Y_TEST_PROFILE_FILE;
+    if (originalChromePath === undefined) delete process.env.CHROME_PATH;
+    else process.env.CHROME_PATH = originalChromePath;
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  const baseServer = (ws: FakeWs) => {
+    ws.onSend = (frame) => {
+      const { method, id, params } = frame;
+      if (method === "Target.createTarget") ws.reply(id, { targetId: "t1" });
+      else if (method === "Target.attachToTarget") ws.reply(id, { sessionId: "s1" });
+      else if (method === "Page.navigate") {
+        ws.reply(id, { frameId: "f1" });
+        ws.event("Page.loadEventFired", {}, "s1");
+      } else if (method === "Runtime.evaluate") {
+        if (String((params as { expression?: string }).expression ?? "").startsWith("/*! axe")) {
+          ws.reply(id, { result: { type: "object" } });
+        } else {
+          ws.reply(id, { result: { type: "string", value: JSON.stringify({ __axeOk: FIXTURE_RESULTS }) } });
+        }
+      } else ws.reply(id, {});
+    };
+  };
+
+  it("F1: a wedged runner evaluate rejects at the audit budget instead of hanging (cleanup runs)", { timeout: 10_000 }, async () => {
+    const ws = new FakeWs();
+    baseServer(ws);
+    const realOnSend = ws.onSend!;
+    ws.onSend = (frame) => {
+      // The runner evaluate is NEVER answered (wedged renderer).
+      if (frame.method === "Runtime.evaluate" && !String(frame.params?.expression ?? "").startsWith("/*! axe")) return;
+      realOnSend(frame);
+    };
+    const started = Date.now();
+    await assert.rejects(
+      runA11yAudit({ url: "http://localhost:8000/", timeoutMs: 400, wsFactory: () => ws }),
+      /timed out/,
+    );
+    assert.ok(Date.now() - started < 5_000, "rejected within the budget, not at the 30s stub lifetime");
+    // launchCdp cleanup observed: the browser temp profile is torn down.
+    const profile = readFileSync(path.join(dir, "profile-path"), "utf8");
+    await new Promise((r) => setTimeout(r, 1_000)); // cleanup rmSync runs 300ms after the rejection
+    assert.ok(!existsSync(profile), "browser cleanup removed the temp profile");
+  });
+
+  it("F2: a ws close during the awaited bootstrap rejects cleanly with zero unhandled rejections", { timeout: 10_000 }, async () => {
+    const ws = new FakeWs();
+    baseServer(ws);
+    const realOnSend = ws.onSend!;
+    ws.onSend = (frame) => {
+      if (frame.method === "Runtime.evaluate" && String(frame.params?.expression ?? "").startsWith("/*! axe")) {
+        ws.close(); // the transport dies exactly at the bootstrap evaluate
+        return;
+      }
+      realOnSend(frame);
+    };
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await assert.rejects(
+        runA11yAudit({ url: "http://localhost:8000/", timeoutMs: 2_000, wsFactory: () => ws }),
+        /closed|timed out/,
+      );
+      // Give any orphaned rejection a tick to surface.
+      await new Promise((r) => setTimeout(r, 2_100));
+      assert.deepEqual(unhandled, [], "fire-and-forget bootstrap must not escape as an unhandled rejection");
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
   });
 });
 

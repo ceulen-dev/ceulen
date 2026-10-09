@@ -174,7 +174,8 @@ describe("tool_call honors the trusted-project layer (A5 e2e)", () => {
 
 describe("buildRepairGroups (panel contract)", () => {
   it("renders the six repair.* rows on the Tools tab with the documented defaults", () => {
-    const groups = buildRepairGroups({ ...DEFAULT_REPAIR_SETTINGS });
+    const cfg: RepairSettings = { ...DEFAULT_REPAIR_SETTINGS };
+    const groups = buildRepairGroups(cfg);
     assert.equal(groups.length, 1);
     assert.equal(groups[0].tab, "Tools");
     assert.equal(groups[0].label, "Repair");
@@ -199,9 +200,13 @@ describe("buildRepairGroups (panel contract)", () => {
     assert.equal(byKey.get("repair.guards")!.value, false);
     // The row's setter clamps into the working config (the panel kernel keeps
     // the raw value on the row — same contract as every ceulen number row).
-    const cfg: RepairSettings = { ...DEFAULT_REPAIR_SETTINGS };
     byKey.get("repair.autoBgSecs")!.set(45.8);
     cfg.autoBgSecs = Math.max(1, Math.floor(Number(45.8)));
     assert.equal(Math.floor(Number(byKey.get("repair.autoBgSecs")!.value)), 45);
+
+    // F7: non-numeric input must not persist NaN→null — the working value is
+    // untouched, so the save diff produces no autoBgSecs entry.
+    byKey.get("repair.autoBgSecs")!.set("abc" as never);
+    assert.equal(cfg.autoBgSecs, 45, "set('abc') leaves the working value unchanged");
   });
 });

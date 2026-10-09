@@ -148,16 +148,14 @@ export function planPath(cwd: string, title: string, plansDir: string = DEFAULT_
   return path.join(cwd, expandPlansDir(plansDir), `${stamp}-${slug}.md`);
 }
 
-/** True when `resolved` is a file inside the configured plans dir; `{yyyymm}`
- *  matches any single path segment so monthly subfolders stay inside. */
+/** True when `resolved` is a file inside the configured plans dir; a
+ *  `{yyyymm}` pattern segment must match an actual 6-digit month segment
+ *  (segment-wise — a bare wildcard splice would let ANY segment stand in). */
 export function isInsidePlansDir(resolved: string, plansDir: string, cwd: string): boolean {
   const pattern = path.resolve(cwd, plansDir).split(/[\\/]/).filter(Boolean);
   const actual = path.resolve(cwd, resolved).split(/[\\/]/).filter(Boolean);
-  const wildcard = pattern.indexOf("{yyyymm}");
-  const root = wildcard === -1 ? pattern : pattern.filter((seg) => seg !== "{yyyymm}");
-  if (actual.length <= root.length) return false;
-  if (wildcard !== -1) actual.splice(wildcard, 1);
-  return root.every((seg, i) => actual[i] === seg);
+  if (actual.length <= pattern.length) return false;
+  return pattern.every((seg, i) => (seg === "{yyyymm}" ? /^\d{6}$/.test(actual[i] ?? "") : actual[i] === seg));
 }
 
 /** Relative path with forward slashes (prompt text). */

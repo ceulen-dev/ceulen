@@ -302,6 +302,54 @@ describe("CdpConnection over a fake websocket", () => {
     // Normal path intact: awaiting still throws (timeout still surfaces).
     assert.match(String(await rejectMsg(loaded)), /Navigation timed out after 0\.02s/);
   });
+
+  it("F3: a SIBLING exceptionDetails reaches unwrapEvaluate — step outcome ok:false with the error", async () => {
+    const ws = new FakeWs();
+    ws.onSend = (frame) => {
+      const { method, id } = frame;
+      if (method === "Target.createTarget") return ws.reply(id, { targetId: "t1" });
+      if (method === "Target.attachToTarget") return ws.reply(id, { sessionId: "s1" });
+      if (method === "Page.navigate") {
+        ws.reply(id, {});
+        ws.event("Page.loadEventFired", {}, "s1");
+        return;
+      }
+      if (method === "Runtime.evaluate") {
+        // Raw frame: exceptionDetails SIBLING to result (not the nested
+        // Runtime.evaluate shape unwrapEvaluate already handled).
+        return ws.emit("message", {
+          data: JSON.stringify({
+            id,
+            result: { result: { type: "object" } },
+            exceptionDetails: { exception: { description: "ReferenceError: boom" } },
+          }),
+        });
+      }
+      ws.reply(id, {});
+    };
+    const r = await runInteraction({ url: "http://localhost:3000/", steps: [{ evaluate: "1+1" }], wsFactory: () => ws });
+    assert.equal(r.outcomes[0]!.ok, false);
+    assert.match(String(r.outcomes[0]!.error), /boom/);
+  });
+
+  it("waitForLoad: orphaned timer rejection is pre-handled (pi-crash regression 2026-09-20)", async () => {
+    const ws = new FakeWs();
+    const conn = await CdpConnection.connect("ws://fake", () => ws);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (e: unknown) => unhandled.push(e);
+    process.on("unhandledRejection", onUnhandled);
+    // Deliberately not awaited — simulates Page.navigate rejecting first so the
+    // caller skips `await loaded`; the 20ms timer then rejects with no consumer.
+    const loaded = waitForLoad(conn, "s1", 20);
+    try {
+      await new Promise((r) => setTimeout(r, 60));
+      assert.deepEqual(unhandled, []); // unpatched: contains the timeout Error
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+    // Normal path intact: awaiting still throws (timeout still surfaces).
+    assert.match(String(await rejectMsg(loaded)), /Navigation timed out after 0\.02s/);
+  });
 });
 
 // ── runInteraction end-to-end against the fake CDP server ────────────────

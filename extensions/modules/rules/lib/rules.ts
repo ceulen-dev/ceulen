@@ -244,12 +244,15 @@ export function readRulesFile(source: string, state: ImportState = { seen: new S
 }
 
 function buildModel(files: string[], cwd: string): { model: RuleModel; imported: string[] } {
-  const state: ImportState = { seen: new Set(), read: new Set() };
+  // `read` is shared across files (cache signature); `seen` is PER FILE —
+  // a repeat guard, not a global: the same @import from two RULES.md files
+  // must expand in both, or the second serves a literal token.
+  const read = new Set<string>();
   const rules: LoadedRule[] = [];
   const claimed = new Set<string>();
 
   for (const file of files) {
-    for (const rule of readRulesFile(file, state)) {
+    for (const rule of readRulesFile(file, { seen: new Set(), read })) {
       // Name-based dedup, first-wins (precedence order = discovery order).
       if (claimed.has(rule.name)) continue;
       claimed.add(rule.name);
@@ -266,7 +269,7 @@ function buildModel(files: string[], cwd: string): { model: RuleModel; imported:
   };
   model.block = composeRulesBlock(model, cwd);
   model.blockChars = model.block?.length ?? 0;
-  return { model, imported: [...state.read] };
+  return { model, imported: [...read] };
 }
 
 // ---------------------------------------------------------------------------
