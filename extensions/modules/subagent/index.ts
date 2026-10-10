@@ -109,6 +109,7 @@ import {
   MAX_HERDR_TASK_BYTES,
   MAX_REPORT_BYTES,
   prepareHerdrTask,
+  captureEvidenceStamp,
   promptAndWait,
   resolveEffectiveRunner,
   truncateHerdrTask,
@@ -2157,6 +2158,8 @@ ${lines.join("\n")}`;
             const fileStampBefore = entry
               ? await fs.stat(entry.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "")
               : "";
+            // Stalled-turn recovery evidence (same baseline as the runner path).
+            const stamp = entry ? await captureEvidenceStamp(entry, name, herdrCli.exec) : undefined;
             // Abortable: an aborted tool call interrupts the wait (esc to the
             // child) instead of blocking until the CLI timeout.
             const outcome = await new Promise<PromptOutcome>((resolve) => {
@@ -2169,7 +2172,19 @@ ${lines.join("\n")}`;
                 resolve({ state: "unknown", delivered: false, error: "aborted: tool call cancelled" });
               };
               _signal?.addEventListener("abort", onAbort, { once: true });
-              promptAndWait({ name, text, timeoutMs, exec: herdrCli.exec }).then((o) => {
+              promptAndWait({
+                name,
+                text,
+                timeoutMs,
+                exec: herdrCli.exec,
+                evidence: entry
+                  ? {
+                    resultFile: entry.resultFile,
+                    readOnly: entry.readOnly,
+                    stamp: stamp!,
+                  }
+                  : undefined,
+              }).then((o) => {
                 if (settled) return;
                 settled = true;
                 _signal?.removeEventListener("abort", onAbort);

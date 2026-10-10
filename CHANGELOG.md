@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.16.1 — 2026-10-10
+
+- **herdr stall recovery rewritten on output evidence** — live probing
+  (2026-10-10) showed herdr 0.9.3's status watcher NEVER reports `working`
+  for pi panes (`state_change_seq` frozen across live turns), so
+  `agent prompt --wait` returned `agent_prompt_stalled` on healthy
+  dispatches (every herdr delegation was affected; the child completed its
+  work while the parent reported failure). The subagent module now snapshots
+  an output-evidence baseline BEFORE submission (`captureEvidenceStamp`:
+  report-file stamp + pane tail for read-only children) and, on a stall,
+  waits on EVIDENCE for the remaining dispatch budget — a changed report-file
+  stamp (delivery contract) or a changed-then-quiet pane tail (3 stable
+  polls). Window exhaustion reports timeout semantics (pane interrupted,
+  may-still-complete disclosure) — never a phantom hard stall. Verified live
+  across all five agent types under 4-way concurrency, including a mid-turn
+  Z.ai 429 recovery; 6 new regression tests (`test/herdr-stalled.test.ts`).
+
 ## 0.16.0 — 2026-10-09
 
 - **RTK selective rewrite** — the prompt note states the policy honestly

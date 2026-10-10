@@ -42,6 +42,93 @@ export const herdrCli: { exec: HerdrExec } = { exec: defaultExec };
 export const HERDR_OFF_ENV = "PI_SUBAGENT_HERDR";
 
 const HERDR_NAME_RE = /^[a-z][a-z0-9_-]{0,31}$/;
+/**
+ * Grace window after herdr's `agent_prompt_stalled` (its built-in allowance is
+ * a hard 5000ms): how long we additionally wait for OUTPUT evidence before
+ * declaring the dispatch dead. Covers cold-model first-token latency.
+ */
+const STALLED_GRACE_MS = 30_000;
+
+/** Pre-submission snapshot used as the baseline for stalled-turn recovery. */
+export interface OutputEvidenceStamp {
+  /** `${size}:${mtimeMs}` of the report file ("" when absent) — same format the herdr tool's follow-up compare uses. */
+  fileStamp: string;
+  /** Read-only children only: pane tail before submission (inline replies are the only evidence channel). */
+  paneTail?: string;
+}
+
+/**
+ * herdr 0.9.3's status watcher never observes `working` for pi panes —
+ * `state_change_seq` stays frozen across live turns (live-probed 2026-10-10) —
+ * so `agent prompt --wait` stalls on dispatches that run fine and `agent
+ * wait --until working` never fires. State polling proves nothing; the only
+ * trustworthy completion evidence is OUTPUT. Capture the pre-submission
+ * baseline: report-file stamp (+ pane tail for read-only children).
+ */
+export async function captureEvidenceStamp(
+  handle: { resultFile: string; readOnly?: boolean },
+  name: string,
+  exec: HerdrExec,
+): Promise<OutputEvidenceStamp> {
+  const fileStamp = await fs.stat(handle.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "");
+  let paneTail: string | undefined;
+  if (handle.readOnly) {
+    const read = await exec("herdr", ["agent", "read", name, "--source", "recent-unwrapped", "--lines", "40"], { timeout: 10_000 });
+    paneTail = read.code === 0 ? read.stdout : "";
+  }
+  return { fileStamp, paneTail };
+}
+
+/**
+ * Wait for output evidence that the stalled turn is (or already was) running:
+ * the report file's stamp changing (delivery contract), or — read-only
+ * children — the pane tail changing and then staying quiet. Returns true when
+ * evidence settled; false on deadline (genuinely silent pane).
+ */
+async function waitForOutputEvidence(opts: {
+  name: string;
+  resultFile: string;
+  readOnly?: boolean;
+  stamp: OutputEvidenceStamp;
+  deadlineMs: number;
+  pollMs?: number;
+  signal?: AbortSignal;
+  exec: HerdrExec;
+}): Promise<boolean> {
+  const pollMs = opts.pollMs ?? 1_000;
+  const deadline = Date.now() + opts.deadlineMs;
+  const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+  const fileStampNow = () =>
+    fs.stat(opts.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "");
+  const readTail = async () => {
+    const read = await opts.exec("herdr", ["agent", "read", opts.name, "--source", "recent-unwrapped", "--lines", "40"], { timeout: 10_000 });
+    return read.code === 0 ? read.stdout : "";
+  };
+  let stableCount = 0;
+  let lastTail = "";
+  for (;;) {
+    if (opts.signal?.aborted) return false;
+    if (!opts.readOnly) {
+      const stamp = await fileStampNow();
+      // A changed stamp means the child (re)wrote its report — settled.
+      // "" → exists is the fast-child case (wrote before the stall fired).
+      if (stamp && stamp !== opts.stamp.fileStamp) return true;
+    } else {
+      const tail = await readTail();
+      if (tail !== opts.stamp.paneTail) {
+        // Changed from the baseline: require quiescence (3 identical polls)
+        // so a mid-stream snapshot is not collected as the final reply.
+        if (tail === lastTail) stableCount++;
+        else { stableCount = 1; lastTail = tail; }
+        if (stableCount >= 3) return true;
+      } else {
+        stableCount = 0;
+      }
+    }
+    if (Date.now() >= deadline) return false;
+    await sleep(pollMs);
+  }
+}
 /** Reject herdr tasks above this size — the prompt travels as a CLI argv element. */
 export const MAX_HERDR_TASK_BYTES = 64 * 1024;
 /**
@@ -565,6 +652,18 @@ export async function promptAndWait(opts: {
   text: string;
   timeoutMs: number;
   exec: HerdrExec;
+  /** Output-evidence baseline + channels for stalled-turn recovery. Without
+   *  it a stall is a hard failure (CLI-faithful behaviour). With it, the
+   *  evidence wait spans the remaining dispatch budget — a long task is not
+   *  a stalled task — and exhaustion reports TIMEOUT (the caller then
+   *  interrupts the pane), never a phantom stall. */
+  evidence?: {
+    resultFile: string;
+    readOnly?: boolean;
+    stamp: OutputEvidenceStamp;
+    graceMs?: number;
+    signal?: AbortSignal;
+  };
 }): Promise<PromptOutcome> {
   const res = await opts.exec(
     "herdr",
@@ -580,7 +679,37 @@ export async function promptAndWait(opts: {
       return { state: "unknown", delivered: true, error: `timeout after ${opts.timeoutMs}ms` };
     }
     if (/stalled/i.test(errText)) {
-      return { state: "unknown", delivered: false, error: "agent_prompt_stalled: no agent activity observed after submission" };
+      // herdr's --wait requires an observed working/blocked state within
+      // 5000ms — but its status watcher NEVER reports `working` for pi panes
+      // (state_change_seq frozen across live turns, live probe 2026-10-10), so
+      // the stall fires on healthy dispatches and no state probe can recover
+      // it. The only trustworthy completion evidence is OUTPUT: a changed
+      // report-file stamp (delivery contract) or a changed-then-quiet pane
+      // tail (read-only inline replies). Without evidence channels, the
+      // stall stays a hard failure.
+      if (opts.evidence) {
+        const settled = await waitForOutputEvidence({
+          name: opts.name,
+          resultFile: opts.evidence.resultFile,
+          readOnly: opts.evidence.readOnly,
+          stamp: opts.evidence.stamp,
+          // The CLI consumed ~5s observing its stall window; the evidence
+          // wait gets the full dispatch budget (floored at the grace minimum
+          // so very short timeouts still get a fair window).
+          deadlineMs: opts.evidence.graceMs ?? Math.max(STALLED_GRACE_MS, opts.timeoutMs),
+          signal: opts.evidence.signal,
+          exec: opts.exec,
+        });
+        if (settled) {
+          return { state: await getAgentState(opts.name, opts.exec), delivered: true };
+        }
+        // Evidence window exhausted with the full budget spent: report
+        // timeout semantics (executeHerdrTask's timedOut branch interrupts
+        // the child and discloses the maybe-late write) — the dispatch was
+        // delivered and may STILL complete, so never a hard stall here.
+        return { state: "unknown", delivered: true, error: `timeout after ${opts.timeoutMs}ms (no output evidence — likely still working or blocked in its pane)` };
+      }
+      return { state: "unknown", delivered: false, error: "agent_prompt_stalled: no output evidence within the grace window — check the pane (a dialog can also look silent), then prompt again" };
     }
     // Unexpected error — still report the last known state.
     const state = await getAgentState(opts.name, opts.exec);
@@ -964,6 +1093,11 @@ export async function executeHerdrTask(
   try {
     pollTimer = setInterval(() => { void poll(); }, 2_000);
     pollTimer.unref?.();
+    // Pre-submission output baseline: herdr's stall fires on healthy pi
+    // dispatches (its watcher never reports `working`), so recovery waits on
+    // evidence, not state. Snapshot BEFORE the prompt so any change proves
+    // the turn produced output.
+    const stamp = await captureEvidenceStamp(handle, handle.name, exec);
     // A pre-aborted dispatch must not submit the task to the live child at
     // all (mirrors the SDK path's early return on an aborted signal).
     const prompt = opts.signal?.aborted
@@ -973,6 +1107,12 @@ export async function executeHerdrTask(
         text: wrapTaskPrompt(handle.task, handle.resultFile, handle.readOnly),
         timeoutMs: handle.timeoutMs,
         exec,
+        evidence: {
+          resultFile: handle.resultFile,
+          readOnly: handle.readOnly,
+          stamp,
+          signal: opts.signal,
+        },
       });
     let output = "";
     let outputSource: "file" | "pane" | "none" = "none";
