@@ -17,7 +17,13 @@
   across all five agent types under 4-way concurrency, including a mid-turn
   Z.ai 429 recovery; 6 new regression tests (`test/herdr-stalled.test.ts`).
 
-## 0.16.0 — 2026-10-09
+## 0.16.0 — 2026-10-09 (never released separately)
+
+The v0.16.0 tag/release was not created (bump+changelog landed in commit
+`901cc0e`, but the tag step was skipped), so publish.yml never ran for it and
+npm jumped 0.15.2 → 0.16.1. Its full content ships inside **0.16.1** together
+with the a474b… review wave (27 defect fixes) — do not create a v0.16.0
+release retroactively: it would publish a pre-security-fix artifact.
 
 - **RTK selective rewrite** — the prompt note states the policy honestly
   (RTK rewrites only what it models; chains, redirects, and inline scripts
