@@ -11,7 +11,7 @@ Use the Munin Pi extension tools to recover and preserve verified project knowle
 
 ## How It Works
 
-1. The ceulen `munin` module provides native tools: `munin_search`, `munin_get`, `munin_store`, `munin_list`, `munin_recent`, `munin_delete`, `munin_capabilities`, `munin_share`.
+1. The ceulen `munin` module provides native tools: `munin_search`, `munin_get`, `munin_store` (all three always declared), plus `munin_list`, `munin_recent`, `munin_delete`, `munin_capabilities`, `munin_share` (loaded on demand via `tool_search`).
 2. Config lives at PROJECT level: `/config` → Memory → Munin (saved to `<repo>/.pi/settings.json` under a `munin` section). `MUNIN_API_KEY` / `MUNIN_PROJECT` / `MUNIN_BASE_URL` env vars (incl. trusted `.env.local` / `.env`) override it; a per-call `api_key`/`project`/`base_url` param overrides everything.
 3. Print readable output by default, or raw JSON via tool details.
 4. Store only durable knowledge that is verified and useful in a future session.

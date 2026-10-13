@@ -222,3 +222,127 @@ describe("munin extension", () => {
     assert.equal(await hook({ toolName: "munin_search", isError: false, content: [{ type: "text", text: "ok" }] }), undefined);
   });
 });
+
+describe("loop dampener", () => {
+  beforeEach(() => {
+    process.env.MUNIN_API_KEY = "key";
+    process.env.MUNIN_PROJECT = "project";
+  });
+
+  afterEach(() => {
+    delete process.env.MUNIN_API_KEY;
+    delete process.env.MUNIN_PROJECT;
+    delete (MuninClient.prototype as { invoke?: unknown }).invoke;
+  });
+
+  function stubInvoke(calls: string[]): void {
+    MuninClient.prototype.invoke = async function (this: unknown, _projectId: string, action: string) {
+      calls.push(action);
+      return { ok: true } as any;
+    } as typeof MuninClient.prototype.invoke;
+  }
+
+  it("3rd identical munin_get returns guidance without executing", async () => {
+    const { tools, ctx } = harness();
+    const calls: string[] = [];
+    stubInvoke(calls);
+    for (let i = 0; i < 2; i++) {
+      const r = await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+      assert.equal((r.details as { dampened?: boolean }).dampened ?? false, false);
+    }
+    assert.equal(calls.length, 2);
+    const third = await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+    assert.equal(calls.length, 2, "3rd identical call must not reach the SDK");
+    assert.match((third.content[0] as { text: string }).text, /call munin_store directly/);
+    assert.equal((third.details as { dampened: boolean }).dampened, true);
+  });
+
+  it("6th consecutive munin_search with varying queries returns guidance", async () => {
+    const { tools, ctx } = harness();
+    const calls: string[] = [];
+    stubInvoke(calls);
+    for (let i = 0; i < 5; i++) {
+      const r = await tools.munin_search.execute("id", { query: `query-${i}` }, undefined, undefined, ctx);
+      assert.equal((r.details as { dampened?: boolean }).dampened ?? false, false);
+    }
+    assert.equal(calls.length, 5);
+    const sixth = await tools.munin_search.execute("id", { query: "query-5" }, undefined, undefined, ctx);
+    assert.equal(calls.length, 5, "6th consecutive same-tool call must not reach the SDK");
+    assert.equal((sixth.details as { dampened: boolean }).dampened, true);
+  });
+
+  it("any non-munin tool call resets the run counter (protocol-compliant sessions never dampen)", async () => {
+    const { tools, ctx, handlers } = harness();
+    const calls: string[] = [];
+    stubInvoke(calls);
+    const nonMunin = handlers.tool_call[0];
+    for (let i = 0; i < 5; i++) {
+      await tools.munin_search.execute("id", { query: `q-${i}` }, undefined, undefined, ctx);
+      await nonMunin({ toolName: "read", input: {} });
+    }
+    assert.equal(calls.length, 5);
+    // All 10 searches executed — the interleaved non-munin work resets the run.
+    for (let i = 0; i < 5; i++) {
+      const r = await tools.munin_search.execute("id", { query: `p-${i}` }, undefined, undefined, ctx);
+      assert.equal((r.details as { dampened?: boolean }).dampened ?? false, false, `search ${i + 6} must execute`);
+      await nonMunin({ toolName: "read", input: {} });
+    }
+    assert.equal(calls.length, 10);
+  });
+
+  it("a different munin tool resets the run counter", async () => {
+    const { tools, ctx } = harness();
+    const calls: string[] = [];
+    stubInvoke(calls);
+    for (let i = 0; i < 5; i++) {
+      await tools.munin_search.execute("id", { query: `q-${i}` }, undefined, undefined, ctx);
+    }
+    await tools.munin_list.execute("id", {}, undefined, undefined, ctx);
+    assert.equal(calls.length, 6);
+    const r = await tools.munin_search.execute("id", { query: "fresh" }, undefined, undefined, ctx);
+    assert.equal((r.details as { dampened?: boolean }).dampened ?? false, false);
+    assert.equal(calls.length, 7);
+  });
+
+  it("guidance resets state — the next identical call executes again", async () => {
+    const { tools, ctx } = harness();
+    const calls: string[] = [];
+    stubInvoke(calls);
+    await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+    await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+    const third = await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+    assert.equal((third.details as { dampened: boolean }).dampened, true);
+    assert.equal(calls.length, 2);
+    const fourth = await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+    assert.equal((fourth.details as { dampened?: boolean }).dampened ?? false, false);
+    assert.equal(calls.length, 3);
+  });
+
+  it("munin_store never returns dampener guidance", async () => {
+    const { tools, ctx } = harness();
+    const calls: string[] = [];
+    stubInvoke(calls);
+    for (let i = 0; i < 3; i++) {
+      const r = await tools.munin_store.execute("id", {
+        key: "fact/repeat-key",
+        title: "Title",
+        content: "Content",
+        tags: "type:fact,domain:memory",
+      }, undefined, undefined, ctx);
+      assert.equal((r.details as { dampened?: boolean }).dampened ?? false, false);
+    }
+    assert.equal(calls.length, 3);
+  });
+
+  it("session_start resets the dampener", async () => {
+    const { tools, ctx, handlers } = harness();
+    const calls: string[] = [];
+    stubInvoke(calls);
+    await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+    await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+    await handlers.session_start[0]({ reason: "startup" }, ctx);
+    const r = await tools.munin_get.execute("id", { key: "bug-fix/some-key" }, undefined, undefined, ctx);
+    assert.equal((r.details as { dampened?: boolean }).dampened ?? false, false);
+    assert.equal(calls.length, 3);
+  });
+});

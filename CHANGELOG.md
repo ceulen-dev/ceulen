@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.17.0 — 2026-10-13
+
+- **Munin loop fixed** (incident report 2026-10-12; two sessions on
+  glm-5.3-flash looped 30/33 consecutive munin_search/munin_get calls while
+  intending munin_store, losing both sessions' memories):
+  - `munin_store` promoted DIRECT — a deferred store silently vanished from
+    the live tool schema across plan-mode transitions / branch restores, and
+    a model cannot emit a tool absent from its request's tool array, so it
+    looped on the always-declared read neighbors instead. The protocol's
+    terminal action is now declared in every configured session (plan mode
+    still blocks it via BLOCKED_TOOLS). Guarded by the registry tier test.
+  - Consecutive-call loop dampener on the munin read tools: the 3rd identical
+    -args call or 6th same-tool call (any args — incident A's queries
+    degenerated/varied) returns guidance ("call munin_store directly")
+    instead of executing. Resets on a different munin tool, ANY non-munin
+    tool_call (protocol-compliant search→work→search sessions never
+    accumulate), session_start, and after guidance fires. 7 new tests.
+  - Protocol header + skill text aligned: "munin_search/munin_get/
+    munin_store are always declared".
+  - Live-verified post-reload (4 probes: schema declaration, both dampener
+    rules, non-munin reset).
+
 ## 0.16.1 — 2026-10-10
 
 - **herdr stall recovery rewritten on output evidence** — live probing

@@ -2,8 +2,8 @@
 //
 // Ported from @bacnh85/pi-munin 0.5.12 extensions/index.ts (SDK vendored to
 // lib/sdk.ts; dotenv dropped — ceulen's bundle env.ts ingests trusted .env).
-// Registers the 8 munin_* tools (search/get direct; the other six deferred —
-// tool_search loads them),
+// Registers the 8 munin_* tools (search/get/store direct; the other five
+// deferred — tool_search loads them), the consecutive-call loop dampener,
 // /munin-status, the Munin Memory Protocol injection (only when configured),
 // the tool_result error sanitizer, and the munin skill (resources_discover).
 // Config lives at PROJECT level (.pi/settings.json `munin` section) — see
@@ -69,8 +69,8 @@ const MUNIN_PROTOCOL_HEADER = `## Munin Memory Protocol
 
 Use Munin to recover and preserve verified project knowledge, not as a task log.
 If Munin is unavailable, state that briefly when it matters and continue from
-repository evidence. munin_search/munin_get are always declared; the other
-munin_* tools load on demand with one tool_search call for "munin".
+repository evidence. munin_search/munin_get/munin_store are always declared;
+the other munin_* tools load on demand with one tool_search call for "munin".
 
 ### Before acting
 
@@ -265,7 +265,65 @@ function invokeMuninAction(
 // generic (same pattern as ux_audit).
 type AnyTool = ToolDefinition<any, unknown>;
 
-function makeTools(): AnyTool[] {
+/** Read-only munin tools the dampener may suppress (mutators are confirm-gated
+ *  already; suppress-on-repeat has no legitimacy case there). */
+const DAMPENED_TOOLS = new Set(["munin_search", "munin_get", "munin_list", "munin_recent"]);
+
+/** Loop-dampener state (2026-10-12 munin-loop incident: a model intending
+ *  munin_store emitted the always-declared read neighbors 30/33× and could not
+ *  stop). Tracks the CONSECUTIVE munin_* run: same-tool run length and the
+ *  identical-args run length. Reset by a different munin tool, ANY non-munin
+ *  tool call (a protocol-compliant session interleaves non-munin work between
+ *  searches — it must never accumulate), session_start, and after guidance
+ *  fires (a renewed loop re-trips the same threshold). */
+interface DampenerState {
+  lastTool: string | undefined;
+  runCount: number;
+  lastArgsSig: string | undefined;
+  identicalRunCount: number;
+}
+
+function createDampener() {
+  const state: DampenerState = { lastTool: undefined, runCount: 0, lastArgsSig: undefined, identicalRunCount: 0 };
+
+  function reset(): void {
+    state.lastTool = undefined;
+    state.runCount = 0;
+    state.lastArgsSig = undefined;
+    state.identicalRunCount = 0;
+  }
+
+  /** Record one munin tool call; returns guidance (do-not-execute) only for
+   *  read tools: 3rd consecutive identical-args call, or 6th consecutive
+   *  same-tool call with any args (incident A's queries degenerated/varied —
+   *  an identical-args-only rule would have missed it). */
+  function dampenCheck(name: string, params: Record<string, unknown>): { text: string; runCount: number; identicalRunCount: number } | undefined {
+    if (name !== state.lastTool) {
+      state.lastTool = name;
+      state.runCount = 1;
+      state.identicalRunCount = 0;
+      state.lastArgsSig = undefined;
+    } else {
+      state.runCount += 1;
+    }
+    const sig = JSON.stringify(Object.entries(params ?? {}).sort());
+    state.identicalRunCount = sig === state.lastArgsSig ? state.identicalRunCount + 1 : 1;
+    state.lastArgsSig = sig;
+
+    if (!DAMPENED_TOOLS.has(name)) return undefined;
+    const fire = state.identicalRunCount >= 3 || state.runCount >= 6;
+    if (!fire) return undefined;
+    const text =
+      `${name} has been called ${Math.max(state.runCount, state.identicalRunCount)} times in a row — repeating it returns nothing new. ` +
+      `If you intend to STORE memory, call munin_store directly (always available). Otherwise state your finding and move on.`;
+    reset();
+    return { text, runCount: state.runCount, identicalRunCount: state.identicalRunCount };
+  }
+
+  return { state, reset, dampenCheck };
+}
+
+function makeTools(dampenCheck: (name: string, params: Record<string, unknown>) => { text: string } | undefined): AnyTool[] {
   return [
     {
       name: "munin_search",
@@ -298,6 +356,8 @@ function makeTools(): AnyTool[] {
         ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
+        const dampened = dampenCheck("munin_search", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { query, topK = 10, tags, tag_mode, since, before, include_total } = params as Record<string, any>;
         validateSearchQuery(query);
         const tagMode = validateTagMode(tag_mode);
@@ -330,6 +390,8 @@ function makeTools(): AnyTool[] {
         key: Type.String({ description: "Key to retrieve." }),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
+        const dampened = dampenCheck("munin_get", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { key: rawKey } = params as Record<string, any>;
         const key = validateMemoryKey(rawKey);
         const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
@@ -374,6 +436,8 @@ function makeTools(): AnyTool[] {
         ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
+        const dampened = dampenCheck("munin_store", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { key: rawKey, title, content, tags, valid_from, valid_to, pinned } = params as Record<string, any>;
         const key = validateMemoryKey(rawKey);
         const tagValidation = validateMemoryTags(tags);
@@ -415,6 +479,8 @@ function makeTools(): AnyTool[] {
         ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
+        const dampened = dampenCheck("munin_list", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { limit = 20, offset = 0 } = params as Record<string, any>;
         const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
           return callMunin(client, projectId, "list", { limit, offset });
@@ -440,6 +506,8 @@ function makeTools(): AnyTool[] {
         ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
+        const dampened = dampenCheck("munin_recent", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { limit = 10 } = params as Record<string, any>;
         const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
           return callMunin(client, projectId, "recent", { limit });
@@ -464,6 +532,8 @@ function makeTools(): AnyTool[] {
         key: Type.String({ description: "Key to delete." }),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
+        const dampened = dampenCheck("munin_delete", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { key: rawKey } = params as Record<string, any>;
         const key = validateMemoryKey(rawKey);
         const confirmed = await ctx.ui.confirm(
@@ -499,6 +569,8 @@ function makeTools(): AnyTool[] {
         ...controlSchema,
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
+        const dampened = dampenCheck("munin_capabilities", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
           return callMunin(client, projectId, "capabilities", {});
         }, ctx);
@@ -523,6 +595,8 @@ function makeTools(): AnyTool[] {
         target_project_ids: Type.Array(Type.String(), { description: "Target project IDs." }),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
+        const dampened = dampenCheck("munin_share", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { memory_ids, target_project_ids } = params as Record<string, any>;
         const confirmed = await ctx.ui.confirm(
           "Share Munin memories?",
@@ -577,7 +651,20 @@ export default function muninExtension(pi: ExtensionAPI) {
     skillPaths: [path.join(skillsRoot(), "munin")],
   }));
 
-  for (const tool of makeTools()) {
+  const dampener = createDampener();
+
+  // Any NON-munin tool call breaks the consecutive munin run: a
+  // protocol-compliant session interleaves non-munin work between searches and
+  // must never accumulate toward the dampener (both 2026-10-12 incidents were
+  // munin-only back-to-back sequences — true loops stay caught).
+  pi.on("tool_call", async (event) => {
+    if (!String(event.toolName || "").startsWith("munin_")) dampener.reset();
+    return undefined;
+  });
+
+  pi.on("session_start", () => dampener.reset());
+
+  for (const tool of makeTools(dampener.dampenCheck)) {
     pi.registerTool(tool as AnyTool);
   }
 

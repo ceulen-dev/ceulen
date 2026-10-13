@@ -134,7 +134,13 @@ replaced session. omp's roster / per-advisor tool grants /
 Ported from `@bacnh85/pi-munin` 0.5.12 (see `extensions/modules/munin/`). Eight
 `munin_*` tools (search/get DIRECT since 2026-10-08 re-eval — the Memory
 Protocol's before-acting rule is a search, and the old deferred tier forced a
-tool_search round-trip in front of it; the other six stay deferred), `/munin-status`, the Munin Memory
+tool_search round-trip in front of it; store DIRECT since 2026-10-12 — it is the
+protocol's terminal action, and a deferred store vanished from the live schema
+across plan-mode/branch restores, looping the model on the read neighbors (the
+munin-loop incident); the other five stay deferred), a consecutive-call loop
+dampener (read tools: 3rd identical-args or 6th same-tool consecutive call
+returns guidance instead of executing; ANY non-munin tool_call resets the run —
+protocol-compliant sessions never dampen), `/munin-status`, the Munin Memory
 Protocol injection (`before_agent_start`, only when configured), the `tool_result`
 error sanitizer, and the `munin` skill (own `resources_discover` dir). The SDK is
 VENDORED to `lib/sdk.ts` (`// ponytail: vendored from @kalera/munin-sdk 1.5.0`;

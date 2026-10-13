@@ -134,11 +134,16 @@ export const MODULES: ModuleEntry[] = [
   // munin_search + munin_get are DIRECT (2026-10-08 usage re-eval): the Memory
   // Protocol is injected into every configured session and its before-acting
   // rule is a search — forcing a tool_search round-trip first was pure
-  // latency. The remaining six stay deferred: store/list/recent/delete/
+  // latency. munin_store joined them DIRECT (2026-10-12 munin-loop incident):
+  // it is the protocol's terminal action (every configured session's last
+  // munin call), and a deferred store silently vanished from the live schema
+  // across plan-mode transitions / branch restores — the model then cannot
+  // emit it at all and loops on the always-declared read neighbors (two full
+  // sessions lost). The remaining five stay deferred: list/recent/delete/
   // capabilities/share are needed only after search/get evidence is in hand
   // (and store/delete/share stay behind plan mode's BLOCKED_TOOLS).
   { name: "munin", category: "Memory", describe: "Munin long-term memory tools (search/get/store/list/recent/delete/capabilities/share) + memory protocol. Config at project level.", load: muninModule, config: muninConfig, deferredTools: [
-    "munin_store", "munin_list", "munin_recent", "munin_delete", "munin_capabilities", "munin_share",
+    "munin_list", "munin_recent", "munin_delete", "munin_capabilities", "munin_share",
   ] },
   // ── Tasks ──────────────────────────────────────────────────────────────
   { name: "ponytail", category: "Tasks", describe: "Lazy-senior-dev mode: prompts, skills, subagent instructions.", load: ponytailModule, config: ponytailConfig },
