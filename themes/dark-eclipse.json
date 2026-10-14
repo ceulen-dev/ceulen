@@ -1,8 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-eclipse",
 	"vars": {
-		"void": "#050507",
 		"obsidian": "#111018",
 		"corona": "#f5c542",
 		"ember": "#e08a2e",
@@ -66,22 +65,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "ember",
 		"thinkingXhigh": "corona",
-		"bashMode": "astral",
-		"statusLineBg": "#0b0b10",
-		"statusLineSep": "#2a2635",
-		"statusLineModel": "violet",
-		"statusLinePath": "astral",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "corona",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "astral",
-		"statusLineOutput": "silver",
-		"statusLineCost": "corona",
-		"statusLineSubagents": "corona",
-		"pythonMode": "#f0c040"
+		"bashMode": "astral"
 	},
 	"export": {
 		"pageBg": "#08070d",

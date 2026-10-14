@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-equinox",
 	"vars": {
 		"charcoal": "#121418",
@@ -65,22 +65,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "warm",
 		"thinkingXhigh": "light",
-		"bashMode": "cool",
-		"statusLineBg": "#0f1115",
-		"statusLineSep": "#2a2e36",
-		"statusLineModel": "violet",
-		"statusLinePath": "cool",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "warm",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "cool",
-		"statusLineOutput": "light",
-		"statusLineCost": "warm",
-		"statusLineSubagents": "warm",
-		"pythonMode": "#f0c040"
+		"bashMode": "cool"
 	},
 	"export": {
 		"pageBg": "#0f1115",

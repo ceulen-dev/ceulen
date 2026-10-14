@@ -341,12 +341,28 @@ export default function steeringModule(pi: ExtensionAPI): void {
     settings = readSteeringSettings(ctx); // read per turn — /config saves apply live
     activeFamily = family(ctx.model);
 
+    // pi 1.2.0 fires before_agent_start for sendMessage(..., { triggerTurn: true })
+    // runs too (cron fires, repair auto-bg follow-ups, subagent receipts) and
+    // splits the event on `messageType` — `prompt`/`images` exist only on the
+    // "user" variant. Older pi has no messageType and fires ONLY for user
+    // prompts, so "not custom" is the correct test on every supported version.
+    const messageType = (event as { messageType?: string }).messageType;
+    const isCustomRun = messageType === "custom";
+
     // ds-anchor bootstrap: request #1 gets the byte-identical Minimal prompt
     // and NO guidance (Super Power, selection guidance, hints all suppressed).
     // This handler is LAST in ceulen's chain, so the returned systemPrompt
     // REPLACES everything ponytail/subagent/advisor composed — deliberate, and
     // the only place this module clobbers rather than composes.
-    if (anchorBootstrapping(ctx.model)) {
+    //
+    // A machine-initiated run must NOT consume the bootstrap: the minimal prompt
+    // plus bash/str_replace_editor-only tools would run a cron/background task
+    // under DSH minimal mode. The bootstrap stays pending for the next user turn.
+    if (isCustomRun && anchorTarget(ctx.model)) {
+      // Machine-initiated: never engage the bootstrap (trace once, then the
+      // normal composition path below).
+      anchorTracePush(`bootstrap skipped: custom-triggered run (promoted=${anchorPromoted})`);
+    } else if (anchorBootstrapping(ctx.model)) {
       scanAnchorEntries(ctx);
       if (!anchorPromoted) {
         anchorRunActive = true;
@@ -389,14 +405,17 @@ export default function steeringModule(pi: ExtensionAPI): void {
     // byte-identical — a per-turn source switch would invalidate the cache head.
     const selected = event.systemPromptOptions?.selectedTools;
     const activeForHint: readonly string[] = Array.isArray(selected) && selected.length > 0 ? selected : pi.getActiveTools();
-    if (settings.firstToolHints && activeForHint.includes("bash")) {
-      const runHint = runTaskFirstToolHint(event.prompt || "");
+    // Hints heuristically read the USER's task text: a custom-triggered run has
+    // no prompt, and hinting off a machine message would be noise.
+    const runPrompt = !isCustomRun && "prompt" in event ? event.prompt : "";
+    if (settings.firstToolHints && !isCustomRun && activeForHint.includes("bash")) {
+      const runHint = runTaskFirstToolHint(runPrompt);
       if (runHint) dynamicParts.push(runHint);
-      const ghHint = githubCloneFirstToolHint(event.prompt || "");
+      const ghHint = githubCloneFirstToolHint(runPrompt);
       if (ghHint) dynamicParts.push(ghHint);
     }
-    if (settings.firstToolHints && activeForHint.includes("find")) {
-      const readHint = readUncertainPathHint(event.prompt || "");
+    if (settings.firstToolHints && !isCustomRun && activeForHint.includes("find")) {
+      const readHint = readUncertainPathHint(runPrompt);
       if (readHint) dynamicParts.push(readHint);
     }
 

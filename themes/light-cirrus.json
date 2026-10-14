@@ -1,8 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-cirrus",
 	"vars": {
-		"cloud": "#f7f9fc",
 		"mist": "#e4e8ef",
 		"sky": "#6aa3d7",
 		"blue": "#3c7dbb",
@@ -65,22 +64,7 @@
 		"thinkingMedium": "sky",
 		"thinkingHigh": "blue",
 		"thinkingXhigh": "#1f5f9e",
-		"bashMode": "blue",
-		"statusLineBg": "#eef2f7",
-		"statusLineSep": "#c7d0dc",
-		"statusLineModel": "blue",
-		"statusLinePath": "sky",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "slate",
-		"statusLineSpend": "sky",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "sky",
-		"statusLineOutput": "charcoal",
-		"statusLineCost": "blue",
-		"statusLineSubagents": "blue",
-		"pythonMode": "#f0c040"
+		"bashMode": "blue"
 	},
 	"export": {
 		"pageBg": "#fafbfd",

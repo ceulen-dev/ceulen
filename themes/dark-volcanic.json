@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-volcanic",
 	"vars": {
 		"basaltBlack": "#100908",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "magmaOrange",
 		"thinkingHigh": "sulfurYellow",
 		"thinkingXhigh": "emberGold",
-		"bashMode": "magmaOrange",
-		"statusLineBg": "#0B0706",
-		"statusLineSep": "emberBorder",
-		"statusLineModel": "emberGold",
-		"statusLinePath": "obsidianBlue",
-		"statusLineGitClean": "mossGreen",
-		"statusLineGitDirty": "sulfurYellow",
-		"statusLineContext": "ashGray",
-		"statusLineSpend": "magmaOrange",
-		"statusLineStaged": "mossGreen",
-		"statusLineDirty": "sulfurYellow",
-		"statusLineUntracked": "obsidianBlue",
-		"statusLineOutput": "emberGold",
-		"statusLineCost": "sulfurYellow",
-		"statusLineSubagents": "magmaOrange",
-		"pythonMode": "#f0c040"
+		"bashMode": "magmaOrange"
 	},
 	"export": {
 		"pageBg": "#0B0706",

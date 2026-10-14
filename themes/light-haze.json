@@ -1,8 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-haze",
 	"vars": {
-		"cream": "#f9f2e7",
 		"sun": "#f1c07a",
 		"honey": "#d9944a",
 		"sky": "#7da4c7",
@@ -65,22 +64,7 @@
 		"thinkingMedium": "sky",
 		"thinkingHigh": "honey",
 		"thinkingXhigh": "sun",
-		"bashMode": "sky",
-		"statusLineBg": "#f2eadf",
-		"statusLineSep": "#cdbfaa",
-		"statusLineModel": "honey",
-		"statusLinePath": "sky",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "sun",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "sky",
-		"statusLineOutput": "ink",
-		"statusLineCost": "sun",
-		"statusLineSubagents": "honey",
-		"pythonMode": "#f0c040"
+		"bashMode": "sky"
 	},
 	"export": {
 		"pageBg": "#fbf6ee",

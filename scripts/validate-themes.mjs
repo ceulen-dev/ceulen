@@ -1,7 +1,13 @@
 // Validates every themes/*.json loads as a pi theme: name present + unique,
 // not colliding with pi's builtin names (dark/light/system are preloaded and
-// win dedupe), full pi-required color token set (from pi's theme-json schema),
-// and every value resolving to a var ref, #RRGGBB, 256-color index, or "".
+// win dedupe), full pi-required color token set, every value resolving to a var
+// ref, #RRGGBB, 256-color index, or "", and NO unknown keys anywhere.
+//
+// pi 1.2.0 (dist/modes/interactive/theme/theme-schema.js) validates themes
+// loaded at startup with `additionalProperties: false` at BOTH the root and
+// `colors` — an unknown key throws, the loader swallows it as a diagnostic, and
+// the theme silently vanishes ("Theme not found: <name>" + system fallback).
+// The ALLOWED/ROOT_KEYS gates below mirror that so `npm test` catches it here.
 // ponytail: adapted from @bacnh85/pi-themes scripts/validate-themes.mjs (MIT).
 // Usage: node scripts/validate-themes.mjs [dir]   (dir defaults to ./themes)
 import { readFileSync, readdirSync } from "node:fs";
@@ -30,6 +36,21 @@ const REQUIRED = [
   "syntaxPunctuation", "thinkingOff", "thinkingMinimal", "thinkingLow",
   "thinkingMedium", "thinkingHigh", "thinkingXhigh", "bashMode",
 ];
+// pi 1.2.0's full colors token set (THEME_TOKENS): REQUIRED plus the tokens
+// that are optional because they carry a fallback.
+// Source of truth: node_modules/@earendil-works/pi-coding-agent/dist/modes/
+// interactive/theme/theme-tokens.js (not importable — the package `exports` map
+// blocks deep subpaths). Re-derive on every pi minor bump:
+//   node -p "Object.keys(require('<pi>/dist/modes/interactive/theme/theme-tokens.js').THEME_TOKENS)"
+// A token pi ADDS is not a break (an unknown key only fails when we SHIP one);
+// a token pi REMOVES is — this file would then allow a key pi rejects.
+const ALLOWED_COLORS = new Set([
+  ...REQUIRED,
+  "scrollbarTrack", "scrollbarThumb", "searchMatchBg", "searchMatchText", "thinkingMax",
+]);
+// pi 1.2.0's root object (additionalProperties: false).
+const ROOT_KEYS = new Set(["$schema", "name", "appearance", "vars", "colors", "export"]);
+const EXPORT_KEYS = new Set(["pageBg", "cardBg", "infoBg"]);
 const BUILTIN = new Set(["dark", "light", "system"]);
 
 let failed = false;
@@ -63,9 +84,16 @@ for (const file of files) {
   const missing = REQUIRED.filter((k) => !(k in colors));
   if (missing.length) fail(`missing required tokens: ${missing.join(", ")}`);
 
+  const unknownRoot = Object.keys(theme).filter((k) => !ROOT_KEYS.has(k));
+  if (unknownRoot.length) fail(`unknown root keys: ${unknownRoot.join(", ")}`);
+  const unknownColors = Object.keys(colors).filter((k) => !ALLOWED_COLORS.has(k));
+  if (unknownColors.length) fail(`unknown color tokens: ${unknownColors.join(", ")}`);
+  const unknownExport = Object.keys(theme.export ?? {}).filter((k) => !EXPORT_KEYS.has(k));
+  if (unknownExport.length) fail(`unknown export keys: ${unknownExport.join(", ")}`);
+
   const vars = new Set(Object.keys(theme.vars ?? {}));
   const bad = [];
-  for (const [k, v] of Object.entries({ ...vars.entries && theme.vars, ...colors })) {
+  for (const [k, v] of Object.entries({ ...theme.vars, ...colors })) {
     if (!isColorValue(v, vars)) bad.push(`${k}=${JSON.stringify(v)}`);
   }
   if (bad.length) fail(`unresolvable values: ${bad.join(", ")}`);

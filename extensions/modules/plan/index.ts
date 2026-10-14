@@ -519,10 +519,64 @@ export default function planModule(pi: ExtensionAPI): void {
   // ponytail: ctx.ui.select is not reentrant — serialize concurrent dialogs.
   let askQuestionQueue: Promise<unknown> = Promise.resolve();
 
+  // Ask-loop dampener (2026-10-14 incident, session 01a12a6c): a glm-5.3-flash
+  // run asked permission 6 times in a row — each answered "Send it" — without
+  // ever emitting the a2a_call it was asking about. The wording drifted each
+  // time ("Ready to execute…dispatch now?" → "Execute: dispatch to peer now?" →
+  // "Dispatch now?" → "Dispatch?"), so an identical-args guard catches nothing.
+  // TWO independent arms, because either alone leaves a hole:
+  //  A. near-duplicate — catches the incident's reworded repeats immediately.
+  //  B. consecutive count — wording-independent backstop for a loop that drifts
+  //     past the similarity cut (a 4th ask with NO tool call in between is a
+  //     loop whatever it says; three distinct questions is a legitimate flow).
+  // ANY other tool call (see the tool_call hook) or a new session clears both.
+  let asksSinceToolCall = 0;
+  const ASK_RUN_LIMIT = 4;
+  let answeredAsks: { question: string; tokens: Set<string>; answer: string }[] = [];
+  // Filler words carry no intent and are removed first: without this "Should I
+  // dispatch the diagnosis to the peer now?" and "Should I revert the config
+  // now?" overlap on should/i/the/now and read as the same question.
+  const ASK_STOPWORDS = new Set([
+    "a", "an", "and", "are", "be", "before", "can", "do", "does", "for", "from", "go", "i", "if",
+    "in", "is", "it", "its", "me", "my", "now", "of", "on", "or", "please", "ready", "should",
+    "so", "that", "the", "then", "this", "to", "up", "use", "we", "what", "when", "which", "with",
+    "you", "your",
+  ]);
+  const askTokens = (q: string): Set<string> =>
+    new Set((q.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter((t) => !ASK_STOPWORDS.has(t) && t.length > 1));
+  // 0.8 keeps the recall we need without tripping on same-verb/different-object
+  // questions. Measured on the incident's real wording drift (identical intent):
+  // "Ready to execute…dispatch…peer now?" vs "Execute: dispatch to peer now?" /
+  // "Dispatch now?" / "Dispatch?" all score 1.00, while the closest DISTINCT pair
+  // ("Should I restart the radius unit?" vs "…nginx unit?") scores 0.67.
+  /** Content words the shorter question shares with the longer, ≥0.8 → "same intent". */
+  const isNearDuplicate = (a: Set<string>, b: Set<string>): boolean => {
+    if (a.size === 0 || b.size === 0) return false;
+    const [small, big] = a.size <= b.size ? [a, b] : [b, a];
+    let shared = 0;
+    for (const token of small) if (big.has(token)) shared += 1;
+    return shared / small.size >= 0.8;
+  };
+
   async function executeAskQuestion(_toolCallId: string, params: unknown, _signal: unknown, _onUpdate: unknown, ctx: ExtensionToolContext) {
     const typedParams = params as PlanQuestionParams;
     const { options, recommendedIndex } = validateQuestionParams(typedParams);
     const textBlock = (text: string) => ({ type: "text" as const, text });
+    const tokens = askTokens(typedParams.question);
+    const repeat = answeredAsks.find((entry) => isNearDuplicate(tokens, entry.tokens));
+    asksSinceToolCall += 1;
+    const prior = repeat ?? answeredAsks[answeredAsks.length - 1];
+    if (repeat || (asksSinceToolCall >= ASK_RUN_LIMIT && prior)) {
+      return {
+        content: [textBlock(
+          `Loop guard: ${repeat
+            ? `you already asked this and the user answered — "${repeat.question}" → "${repeat.answer}".`
+            : `this is ask_user_question call #${asksSinceToolCall} in a row with no other tool call in between; the last answer was "${prior.question}" → "${prior.answer}".`} ` +
+          `Act on that answer now instead of asking again. If something genuinely blocks you, do the work that resolves it or say what the blocker is in plain text (a further question is allowed after any other tool call).`,
+        )],
+        details: { question: typedParams.question, options, answer: prior.answer, cancelled: false, loopGuard: true },
+      };
+    }
     const cancelled = {
       content: [textBlock("User cancelled the question.")],
       details: { question: typedParams.question, options, answer: null, cancelled: true, wasCustom: false },
@@ -546,6 +600,8 @@ export default function planModule(pi: ExtensionAPI): void {
     if (choice === otherLabel) {
       const answer = (await ctx.ui.editor("Your answer", ""))?.trim();
       if (!answer) return cancelled;
+      answeredAsks.push({ question: typedParams.question, tokens, answer });
+      if (answeredAsks.length > 8) answeredAsks.shift();
       return {
         content: [textBlock(`User wrote: ${answer}`)],
         details: { question: typedParams.question, options, answer, wasCustom: true, cancelled: false },
@@ -553,6 +609,8 @@ export default function planModule(pi: ExtensionAPI): void {
     }
     const selectedIndex = displayLabels.indexOf(choice);
     const answer = options[selectedIndex]?.label ?? choice;
+    answeredAsks.push({ question: typedParams.question, tokens, answer });
+    if (answeredAsks.length > 8) answeredAsks.shift();
     return {
       content: [textBlock(`User selected: ${answer}`)],
       details: { question: typedParams.question, options, answer, selectedIndex, wasCustom: false, cancelled: false },
@@ -871,6 +929,8 @@ export default function planModule(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (event, ctx) => {
     sessionAllows.clear();
+    answeredAsks = [];
+    asksSinceToolCall = 0;
     refreshSettings(ctx);
     setPlanRegistry(ctx.modelRegistry);
     void probeDiffDrivers(ctx.cwd); // best-effort: textconv-aware bash gating
@@ -923,6 +983,10 @@ export default function planModule(pi: ExtensionAPI): void {
    *    blocked mutators → hard error; bash writers → hard-block; bash reads →
    *    auto-allow; unknown executables + non-read tools → confirm tier. */
   pi.on("tool_call", async (event, ctx) => {
+    // Ask-loop dampener: any tool call other than the question itself breaks the
+    // run (munin dampener contract). Deliberately above the
+    // plan-mode early return — the loop it guards is not plan-specific.
+    if (event.toolName !== ASK_USER_QUESTION_TOOL) { answeredAsks = []; asksSinceToolCall = 0; }
     if (!planModeEnabled) return;
     if (BLOCKED_TOOLS.has(event.toolName)) {
       return { block: true, reason: `plan mode: ${event.toolName} is not available while planning. Use ${PLAN_TOOL} to write the plan file.` };

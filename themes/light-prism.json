@@ -1,8 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-prism",
 	"vars": {
-		"white": "#ffffff",
 		"slate": "#4a4f57",
 		"dim": "#6b7280",
 		"violet": "#7c4dff",
@@ -10,7 +9,6 @@
 		"blue": "#3b82f6",
 		"cyan": "#06b6d4",
 		"green": "#22c55e",
-		"yellow": "#eab308",
 		"orange": "#f97316",
 		"red": "#ef4444"
 	},
@@ -65,22 +63,7 @@
 		"thinkingMedium": "cyan",
 		"thinkingHigh": "violet",
 		"thinkingXhigh": "indigo",
-		"bashMode": "blue",
-		"statusLineBg": "#f4f6fb",
-		"statusLineSep": "#cfd5df",
-		"statusLineModel": "violet",
-		"statusLinePath": "blue",
-		"statusLineGitClean": "green",
-		"statusLineGitDirty": "orange",
-		"statusLineContext": "slate",
-		"statusLineSpend": "cyan",
-		"statusLineStaged": "green",
-		"statusLineDirty": "orange",
-		"statusLineUntracked": "blue",
-		"statusLineOutput": "slate",
-		"statusLineCost": "yellow",
-		"statusLineSubagents": "violet",
-		"pythonMode": "yellow"
+		"bashMode": "blue"
 	},
 	"export": {
 		"pageBg": "#ffffff",

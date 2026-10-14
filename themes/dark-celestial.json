@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-celestial",
 	"vars": {
 		"base": "#0b0c0f",
@@ -15,7 +15,6 @@
 		"text": "#D5D8DA",
 		"primary": "#E95378",
 		"pink": "#E95678",
-		"magenta": "#EE64AC",
 		"purple": "#B877DB",
 		"cyan": "#25B0BC",
 		"teal": "#21BFC2",
@@ -81,22 +80,7 @@
 		"thinkingHigh": "primary",
 		"thinkingXhigh": "coral",
 		"thinkingMax": "gold",
-		"bashMode": "teal",
-		"pythonMode": "gold",
-		"statusLineBg": "crust",
-		"statusLineSep": "surface",
-		"statusLineModel": "purple",
-		"statusLinePath": "cyan",
-		"statusLineGitClean": "green",
-		"statusLineGitDirty": "gold",
-		"statusLineContext": "gray",
-		"statusLineSpend": "teal",
-		"statusLineStaged": "green",
-		"statusLineDirty": "gold",
-		"statusLineUntracked": "blue",
-		"statusLineOutput": "magenta",
-		"statusLineCost": "coral",
-		"statusLineSubagents": "primary"
+		"bashMode": "teal"
 	},
 	"export": {
 		"pageBg": "base",

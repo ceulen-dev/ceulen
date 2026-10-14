@@ -1,8 +1,7 @@
 {
-  "$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+  "$schema": "https://pi.dev/schemas/theme.schema.json",
   "name": "pi-mirage",
   "vars": {
-    "bg": "#171B24",
     "fg": "#CCCAC2",
     "accent": "#FFCC66",
     "orange": "#FFA759",
@@ -11,12 +10,9 @@
     "green": "#BAE67E",
     "red": "#F28779",
     "purple": "#DFBFFF",
-    "yellow": "#FFE6B3",
     "operator": "#F29E74",
     "muted": "#8490A5",
-    "dimmed": "#6A7687",
-    "panelBg": "#13161E",
-    "editorLine": "#1E2430"
+    "dimmed": "#6A7687"
   },
   "colors": {
     "accent": "accent",

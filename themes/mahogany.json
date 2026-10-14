@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "mahogany",
 	"vars": {
 		"brass": "#c4a050",
@@ -9,7 +9,6 @@
 		"amber": "#d4a574",
 		"grain": "#3a302a",
 		"darkGrain": "#2a221d",
-		"woodBase": "#181210",
 		"cream": "#ece4d8",
 		"mutedCream": "#b8b0a6",
 		"dimCream": "#8a847c",
@@ -56,7 +55,6 @@
 		"toolDiffAdded": "forest",
 		"toolDiffRemoved": "burgundy",
 		"toolDiffContext": "mutedCream",
-		"link": "cedar",
 		"syntaxComment": "#7a6e63",
 		"syntaxKeyword": "burgundy",
 		"syntaxFunction": "brass",
@@ -72,22 +70,7 @@
 		"thinkingMedium": "cedar",
 		"thinkingHigh": "brass",
 		"thinkingXhigh": "amber",
-		"bashMode": "brass",
-		"statusLineBg": "woodBase",
-		"statusLineSep": 237,
-		"statusLineModel": "cedar",
-		"statusLinePath": "brass",
-		"statusLineGitClean": "forest",
-		"statusLineGitDirty": "amber",
-		"statusLineContext": "#8a7566",
-		"statusLineSpend": "cedar",
-		"statusLineStaged": 101,
-		"statusLineDirty": 137,
-		"statusLineUntracked": 179,
-		"statusLineOutput": 138,
-		"statusLineCost": 138,
-		"statusLineSubagents": "brass",
-		"pythonMode": "amber"
+		"bashMode": "brass"
 	},
 	"export": {
 		"pageBg": "#181210",

@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-abyss",
 	"vars": {
 		"abyssBlack": "#05070B",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "abyssCyan",
 		"thinkingHigh": "glowCyan",
 		"thinkingXhigh": "crystalBlue",
-		"bashMode": "abyssCyan",
-		"statusLineBg": "#05070B",
-		"statusLineSep": "slateBlue",
-		"statusLineModel": "glowCyan",
-		"statusLinePath": "crystalBlue",
-		"statusLineGitClean": "kelpGreen",
-		"statusLineGitDirty": "warningAmber",
-		"statusLineContext": "mutedSteel",
-		"statusLineSpend": "abyssCyan",
-		"statusLineStaged": "kelpGreen",
-		"statusLineDirty": "warningAmber",
-		"statusLineUntracked": "glowCyan",
-		"statusLineOutput": "crystalBlue",
-		"statusLineCost": "warningAmber",
-		"statusLineSubagents": "glowCyan",
-		"pythonMode": "#f0c040"
+		"bashMode": "abyssCyan"
 	},
 	"export": {
 		"pageBg": "#05070B",

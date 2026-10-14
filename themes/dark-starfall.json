@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-starfall",
 	"vars": {
 		"night": "#0b0c10",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "ember",
 		"thinkingXhigh": "gold",
-		"bashMode": "blue",
-		"statusLineBg": "#0a0c10",
-		"statusLineSep": "#2a2f3a",
-		"statusLineModel": "gold",
-		"statusLinePath": "blue",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "spark",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "blue",
-		"statusLineOutput": "spark",
-		"statusLineCost": "gold",
-		"statusLineSubagents": "gold",
-		"pythonMode": "gold"
+		"bashMode": "blue"
 	},
 	"export": {
 		"pageBg": "#0a0c10",

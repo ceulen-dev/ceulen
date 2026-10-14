@@ -1,8 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-soleil",
 	"vars": {
-		"sand": "#f7f2e7",
 		"terracotta": "#c96a45",
 		"olive": "#7a8a55",
 		"sea": "#2f7b9c",
@@ -65,22 +64,7 @@
 		"thinkingMedium": "sea",
 		"thinkingHigh": "terracotta",
 		"thinkingXhigh": "sun",
-		"bashMode": "sea",
-		"statusLineBg": "#f1ebe0",
-		"statusLineSep": "#cdbfae",
-		"statusLineModel": "terracotta",
-		"statusLinePath": "sea",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "sun",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "sea",
-		"statusLineOutput": "ink",
-		"statusLineCost": "sun",
-		"statusLineSubagents": "terracotta",
-		"pythonMode": "#f0c040"
+		"bashMode": "sea"
 	},
 	"export": {
 		"pageBg": "#fbf7ef",

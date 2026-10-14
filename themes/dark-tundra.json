@@ -1,11 +1,10 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-tundra",
 	"vars": {
 		"frostBlack": "#0B0F12",
 		"iceCave": "#11171C",
 		"glacierBlue": "#172028",
-		"permafrost": "#1E2A34",
 		"coldBorder": "#2A3A46",
 		"iceWhite": "#E3E9F0",
 		"auroraGreen": "#66D1A1",
@@ -66,22 +65,7 @@
 		"thinkingMedium": "auroraGreen",
 		"thinkingHigh": "iceWhite",
 		"thinkingXhigh": "warningGold",
-		"bashMode": "auroraGreen",
-		"statusLineBg": "#080B0E",
-		"statusLineSep": "coldBorder",
-		"statusLineModel": "iceWhite",
-		"statusLinePath": "auroraGreen",
-		"statusLineGitClean": "successGreen",
-		"statusLineGitDirty": "warningGold",
-		"statusLineContext": "mutedIce",
-		"statusLineSpend": "auroraGreen",
-		"statusLineStaged": "successGreen",
-		"statusLineDirty": "warningGold",
-		"statusLineUntracked": "iceWhite",
-		"statusLineOutput": "auroraGreen",
-		"statusLineCost": "warningGold",
-		"statusLineSubagents": "auroraGreen",
-		"pythonMode": "#f0c040"
+		"bashMode": "auroraGreen"
 	},
 	"export": {
 		"pageBg": "#080B0E",

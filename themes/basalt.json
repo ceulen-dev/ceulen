@@ -1,20 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "basalt",
-	"vars": {
-		"charcoal": "#171613",
-		"coolingLava": "#3a3530",
-		"warmGray": "#4a433d",
-		"pumice": "#e4e0d8",
-		"dustyWhite": "#cac5bd",
-		"ironOxide": "#c45a3a",
-		"rustOrange": "#d97651",
-		"mineralGreen": "#6a9a6a",
-		"lichtenGreen": "#8bb88b",
-		"obsidian": "#0f0d0b",
-		"emberRed": "#b84a2c",
-		"ashGray": "#5a524b"
-	},
+	"vars": {},
 	"colors": {
 		"accent": "#c45a3a",
 		"border": "#3a3530",
@@ -66,22 +53,7 @@
 		"thinkingMedium": "#6a605a",
 		"thinkingHigh": "#7a706a",
 		"thinkingXhigh": "#8a807a",
-		"bashMode": "#c45a3a",
-		"statusLineBg": "#0f0d0b",
-		"statusLineSep": "#3a3530",
-		"statusLineModel": "#c45a3a",
-		"statusLinePath": "#cac5bd",
-		"statusLineGitClean": "#6a9a6a",
-		"statusLineGitDirty": "#d97651",
-		"statusLineContext": "#8bb88b",
-		"statusLineSpend": "#d97651",
-		"statusLineStaged": "#6a9a6a",
-		"statusLineDirty": "#d97651",
-		"statusLineUntracked": "#5a524b",
-		"statusLineOutput": "#cac5bd",
-		"statusLineCost": "#d97651",
-		"statusLineSubagents": "#c45a3a",
-		"pythonMode": "#f0c040"
+		"bashMode": "#c45a3a"
 	},
 	"export": {
 		"pageBg": "#171613",

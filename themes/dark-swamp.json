@@ -1,12 +1,11 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-swamp",
 	"vars": {
 		"murkBlack": "#0B100F",
 		"bogGreen": "#111A18",
 		"peatGreen": "#182522",
 		"mossGray": "#2B3A36",
-		"fogGray": "#3B4B46",
 		"mossLight": "#8EA59A",
 		"dimMoss": "#667A71",
 		"fireflyGold": "#F2C35B",
@@ -65,22 +64,7 @@
 		"thinkingMedium": "swampCyan",
 		"thinkingHigh": "fireflyGold",
 		"thinkingXhigh": "algaeGreen",
-		"bashMode": "swampCyan",
-		"statusLineBg": "#080D0C",
-		"statusLineSep": "mossGray",
-		"statusLineModel": "fireflyGold",
-		"statusLinePath": "swampCyan",
-		"statusLineGitClean": "algaeGreen",
-		"statusLineGitDirty": "fireflyGold",
-		"statusLineContext": "mossLight",
-		"statusLineSpend": "swampCyan",
-		"statusLineStaged": "algaeGreen",
-		"statusLineDirty": "fireflyGold",
-		"statusLineUntracked": "mossLight",
-		"statusLineOutput": "swampCyan",
-		"statusLineCost": "fireflyGold",
-		"statusLineSubagents": "fireflyGold",
-		"pythonMode": "#f0c040"
+		"bashMode": "swampCyan"
 	},
 	"export": {
 		"pageBg": "#080D0C",

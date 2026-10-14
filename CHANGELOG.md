@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.18.0 — 2026-10-14
+
+pi 1.2.0 compatibility + the ask_user_question confirmation loop (incident
+report 2026-10-14, session 01a12a6c: six consecutive permission dialogs, each
+answered, with the dispatch they were asking about never sent):
+
+- **Themes broke on pi 1.2.0 — all 104 shipped themes failed to load**
+  (`Error: Failed to load theme "titanium": Theme not found: titanium` →
+  system fallback). pi 1.2.0 validates themes at startup against a schema with
+  `additionalProperties: false` at both the root object and `colors`; 100 of
+  the 104 themes carried non-schema keys inherited from the pi-themes port
+  (`statusLine*` ×14, `pythonMode`, `link`, `toolText`) that pi and ceulen both
+  ignore. Validation threw, the resource loader swallowed it as a diagnostic,
+  and the theme silently vanished. All 104 themes are now schema-clean (their
+  255 orphaned `vars` pruned, `$schema` repointed to
+  `https://pi.dev/schemas/theme.schema.json`), and `scripts/validate-themes.mjs`
+  — which runs in `npm test` — gained ALLOWED/ROOT/EXPORT gates mirroring pi's
+  closed schema, so a stray key fails the suite instead of vanishing at boot.
+  Verified against pi 1.2.0's own validator: 4/104 → 104/104, all 104 also
+  build a Theme instance.
+- **Peer deps widened** to `>=0.99.1 <1.3.0` for both `@earendil-works/pi-coding-agent`
+  and `@earendil-works/pi-tui` — the old range excluded 1.2.0 semver-wise. Dev
+  lockfile refreshed; typecheck + full suite now run against 1.2.0 types.
+- **steering**: pi 1.2.0 made `BeforeAgentStartEvent` a union on `messageType`
+  (`prompt`/`images` only on the `"user"` variant) and now fires
+  `before_agent_start` for `sendMessage({triggerTurn:true})` runs too (cron
+  fires, repair auto-bg follow-ups, subagent receipts). The first-tool hints
+  read `event.prompt` (3 type errors) and the ds-anchor bootstrap could be
+  consumed by a machine-initiated run — running a cron task under the DSH
+  minimal prompt with bash/str_replace_editor only. Custom runs now skip the
+  bootstrap and the prompt-derived hints; the bootstrap stays pending for the
+  next user turn. Tested as "not custom" (not `=== "user"`), since pi ≤1.1.0
+  sends no `messageType`. 2 new tests.
+- **plan**: `ask_user_question` gains a two-arm loop dampener. Either arm alone
+  has a hole: an identical-args guard misses the incident's reworded repeats
+  ("Ready to execute…dispatch…peer now?" → "Execute: dispatch to peer now?" →
+  "Dispatch now?" → "Dispatch?"). Arm A refuses a near-duplicate of an
+  already-answered question (stopword-filtered content-word containment, cut at
+  0.8 — the incident's rewording scores 1.00 every time, the closest distinct
+  pair 0.67; replaying the incident it fires at ask #2). Arm B is the
+  wording-blind backstop: a 4th ask with no other tool call in between. The
+  guard returns the earlier question + answer and an instruction to act instead
+  of opening another dialog; any other tool call or a new session clears it.
+  8 new tests.
+- **advisor**: a whole-chain consult failure now wraps the raw provider error
+  (`400 insufficient credits` is what spun the model into asking) with what it
+  means and what to do — continue without guidance, do not stall the user.
+  1 new test.
+- **a2a**: the reply-timeout error now points at `a2a_status` and
+  `async_dispatch: true` before re-sending, and notes a duplicate synchronous
+  send can double-deliver.
+
 ## 0.17.0 — 2026-10-13
 
 - **Munin loop fixed** (incident report 2026-10-12; two sessions on

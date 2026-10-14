@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-taiga",
 	"vars": {
 		"nightPine": "#0B100D",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "frostBlue",
 		"thinkingHigh": "auroraGreen",
 		"thinkingXhigh": "snowWhite",
-		"bashMode": "auroraGreen",
-		"statusLineBg": "#080C0A",
-		"statusLineSep": "spruce",
-		"statusLineModel": "snowWhite",
-		"statusLinePath": "frostBlue",
-		"statusLineGitClean": "lichenGreen",
-		"statusLineGitDirty": "emberAmber",
-		"statusLineContext": "wolfGray",
-		"statusLineSpend": "auroraGreen",
-		"statusLineStaged": "lichenGreen",
-		"statusLineDirty": "emberAmber",
-		"statusLineUntracked": "snowWhite",
-		"statusLineOutput": "frostBlue",
-		"statusLineCost": "emberAmber",
-		"statusLineSubagents": "auroraGreen",
-		"pythonMode": "#f0c040"
+		"bashMode": "auroraGreen"
 	},
 	"export": {
 		"pageBg": "#080C0A",

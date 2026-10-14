@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-solstice",
 	"vars": {
 		"midnight": "#0b1120",
@@ -65,22 +65,7 @@
 		"thinkingMedium": "aurora",
 		"thinkingHigh": "ice",
 		"thinkingXhigh": "#e4edf9",
-		"bashMode": "aurora",
-		"statusLineBg": "#0a101f",
-		"statusLineSep": "#2a334a",
-		"statusLineModel": "violet",
-		"statusLinePath": "frost",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "aurora",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "frost",
-		"statusLineOutput": "ice",
-		"statusLineCost": "aurora",
-		"statusLineSubagents": "aurora",
-		"pythonMode": "#f0c040"
+		"bashMode": "aurora"
 	},
 	"export": {
 		"pageBg": "#0a0f1c",

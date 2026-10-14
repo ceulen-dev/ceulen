@@ -1,8 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-zenith",
 	"vars": {
-		"paper": "#f6f7fb",
 		"ink": "#2f343b",
 		"muted": "#4b5563",
 		"dim": "#6b7280",
@@ -64,22 +63,7 @@
 		"thinkingMedium": "cyan",
 		"thinkingHigh": "blue",
 		"thinkingXhigh": "#1b4f8f",
-		"bashMode": "blue",
-		"statusLineBg": "#f0f3f8",
-		"statusLineSep": "#c4cbd6",
-		"statusLineModel": "blue",
-		"statusLinePath": "cyan",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "blue",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "cyan",
-		"statusLineOutput": "ink",
-		"statusLineCost": "blue",
-		"statusLineSubagents": "blue",
-		"pythonMode": "#f0c040"
+		"bashMode": "blue"
 	},
 	"export": {
 		"pageBg": "#ffffff",

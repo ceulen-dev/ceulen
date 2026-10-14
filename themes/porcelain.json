@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "porcelain",
 	"vars": {
 		"porcelainWhite": "#f8f9fc",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "wedgwoodBlue",
 		"thinkingHigh": "deepWedgwood",
 		"thinkingXhigh": "cobaltBlack",
-		"bashMode": "goldTrim",
-		"statusLineBg": "porcelainWhite",
-		"statusLineSep": "delicateGray",
-		"statusLineModel": "wedgwoodBlue",
-		"statusLinePath": "cobaltBlack",
-		"statusLineGitClean": "#507050",
-		"statusLineGitDirty": "darkGold",
-		"statusLineContext": "softBlue",
-		"statusLineSpend": "goldTrim",
-		"statusLineStaged": "#507050",
-		"statusLineDirty": "darkGold",
-		"statusLineUntracked": "mutedBlue",
-		"statusLineOutput": "wedgwoodBlue",
-		"statusLineCost": "goldTrim",
-		"statusLineSubagents": "deepWedgwood",
-		"pythonMode": "#f0c040"
+		"bashMode": "goldTrim"
 	},
 	"export": {
 		"pageBg": "porcelainWhite",

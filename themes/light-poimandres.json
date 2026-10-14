@@ -1,7 +1,6 @@
 {
   "name": "light-poimandres",
   "vars": {
-    "poimandresBg": "#e4f0fb",
     "poimandresFocus": "#303340",
     "poimandresGray": "#a6accd",
     "poimandresDarkerGray": "#767c9d",
@@ -9,35 +8,13 @@
     "poimandresOffWhite": "#e4f0fb",
     "poimandresBrightMint": "#5DE4c7",
     "poimandresStrongTurquoise": "#00CED1",
-    "poimandresLowerMint": "#5fb3a1",
-    "poimandresLightBlue": "#ADD7FF",
-    "poimandresLowerBlue": "#89ddff",
     "poimandresDesaturatedGreen": "#7AC6B6",
     "poimandresHotRed": "#d0679d",
     "poimandresPink": "#f087bd",
     "poimandresBrightYellow": "#fffac2",
     "poimandresBluishGrayBrighter": "#7390AA",
     "poimandresSelection": "#717cb4",
-    "poimandresWhite": "#ffffff",
-    "poimandresBlack": "#000000",
-    "poimandresBg256": 235,
-    "poimandresFocus256": 238,
-    "poimandresGray256": 109,
-    "poimandresDarkerGray256": 103,
-    "poimandresBluishGray256": 66,
-    "poimandresBrightMint256": 86,
-    "poimandresStrongTurquoise256": 44,
-    "poimandresLowerMint256": 79,
-    "poimandresLightBlue256": 153,
-    "poimandresLowerBlue256": 117,
-    "poimandresDesaturatedGreen256": 79,
-    "poimandresHotRed256": 169,
-    "poimandresPink256": 211,
-    "poimandresBrightYellow256": 229,
-    "poimandresBluishGrayBrighter256": 110,
-    "poimandresSubtleBg": "#e4f0fb",
-    "poimandresMediumBg": "#d0d7e5",
-    "poimandresBrightBg": "#7390AA"
+    "poimandresWhite": "#ffffff"
   },
   "colors": {
     "accent": "poimandresStrongTurquoise",
@@ -90,26 +67,12 @@
     "thinkingMedium": "poimandresStrongTurquoise",
     "thinkingHigh": "poimandresPink",
     "thinkingXhigh": "poimandresHotRed",
-    "bashMode": "poimandresDesaturatedGreen",
-    "pythonMode": "poimandresStrongTurquoise",
-    "statusLineBg": "poimandresBluishGrayBrighter",
-    "statusLineSep": 103,
-    "statusLineModel": "poimandresBrightMint",
-    "statusLinePath": "poimandresBluishGray",
-    "statusLineGitClean": "poimandresStrongTurquoise",
-    "statusLineGitDirty": "poimandresHotRed",
-    "statusLineContext": "poimandresBluishGray",
-    "statusLineSpend": "poimandresLowerMint",
-    "statusLineStaged": 44,
-    "statusLineDirty": 169,
-    "statusLineUntracked": 229,
-    "statusLineOutput": "poimandresLowerBlue",
-    "statusLineCost": "poimandresPink",
-    "statusLineSubagents": "poimandresDesaturatedGreen"
+    "bashMode": "poimandresDesaturatedGreen"
   },
   "export": {
     "pageBg": "poimandresOffWhite",
     "cardBg": "poimandresBluishGrayBrighter",
     "infoBg": "poimandresFocus"
-  }
+  },
+  "$schema": "https://pi.dev/schemas/theme.schema.json"
 }

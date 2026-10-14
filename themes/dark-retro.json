@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-retro",
 	"vars": {
 		"phosphor": "#ffb000",
@@ -51,7 +51,6 @@
 		"toolDiffAdded": "successGreen",
 		"toolDiffRemoved": "errorRed",
 		"toolDiffContext": "phosphorDim",
-		"link": "glowBlue",
 		"syntaxComment": "phosphorVeryDim",
 		"syntaxKeyword": "phosphorBright",
 		"syntaxFunction": "phosphor",
@@ -67,22 +66,7 @@
 		"thinkingMedium": "phosphor",
 		"thinkingHigh": "phosphorBright",
 		"thinkingXhigh": "crtGlow",
-		"bashMode": "glowBlue",
-		"statusLineBg": "crtBlack",
-		"statusLineSep": 238,
-		"statusLineModel": "phosphorBright",
-		"statusLinePath": "glowBlue",
-		"statusLineGitClean": "successGreen",
-		"statusLineGitDirty": "warnYellow",
-		"statusLineContext": "phosphorDim",
-		"statusLineSpend": "phosphor",
-		"statusLineStaged": 142,
-		"statusLineDirty": 214,
-		"statusLineUntracked": 39,
-		"statusLineOutput": 209,
-		"statusLineCost": 209,
-		"statusLineSubagents": "phosphorBright",
-		"pythonMode": "#f0c040"
+		"bashMode": "glowBlue"
 	},
 	"export": {
 		"pageBg": "crtBlack",

@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-lunar",
 	"vars": {
 		"night": "#0b0d12",
@@ -64,22 +64,7 @@
 		"thinkingMedium": "glow",
 		"thinkingHigh": "moonlight",
 		"thinkingXhigh": "#eef3f8",
-		"bashMode": "ice",
-		"statusLineBg": "#0a0c11",
-		"statusLineSep": "#2b2f3a",
-		"statusLineModel": "glow",
-		"statusLinePath": "ice",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "moonlight",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "ice",
-		"statusLineOutput": "moonlight",
-		"statusLineCost": "glow",
-		"statusLineSubagents": "moonlight",
-		"pythonMode": "#f0c040"
+		"bashMode": "ice"
 	},
 	"export": {
 		"pageBg": "#0a0c11",

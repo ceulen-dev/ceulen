@@ -1,13 +1,10 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-catppuccin",
 	"vars": {
-		"rosewater": "#dc8a78",
-		"flamingo": "#dd7878",
 		"pink": "#ea76cb",
 		"mauve": "#8839ef",
 		"red": "#d20f39",
-		"maroon": "#e64553",
 		"peach": "#fe640b",
 		"yellow": "#df8e1d",
 		"green": "#40a02b",
@@ -17,7 +14,6 @@
 		"blue": "#1e66f5",
 		"lavender": "#7287fd",
 		"text": "#4c4f69",
-		"subtext1": "#5c5f77",
 		"subtext0": "#6c6f85",
 		"overlay2": "#7c7f93",
 		"overlay1": "#8c8fa1",
@@ -26,8 +22,7 @@
 		"surface1": "#bcc0cc",
 		"surface0": "#ccd0da",
 		"base": "#eff1f5",
-		"mantle": "#e6e9ef",
-		"crust": "#dce0e8"
+		"mantle": "#e6e9ef"
 	},
 	"colors": {
 		"accent": "mauve",
@@ -65,7 +60,6 @@
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "red",
 		"toolDiffContext": "overlay0",
-		"link": "blue",
 		"syntaxComment": "overlay1",
 		"syntaxKeyword": "mauve",
 		"syntaxFunction": "blue",
@@ -81,22 +75,7 @@
 		"thinkingMedium": "sapphire",
 		"thinkingHigh": "mauve",
 		"thinkingXhigh": "pink",
-		"bashMode": "green",
-		"statusLineBg": "crust",
-		"statusLineSep": "surface1",
-		"statusLineModel": "pink",
-		"statusLinePath": "teal",
-		"statusLineGitClean": "green",
-		"statusLineGitDirty": "yellow",
-		"statusLineContext": "lavender",
-		"statusLineSpend": "sapphire",
-		"statusLineStaged": "green",
-		"statusLineDirty": "peach",
-		"statusLineUntracked": "sky",
-		"statusLineOutput": "mauve",
-		"statusLineCost": "maroon",
-		"statusLineSubagents": "mauve",
-		"pythonMode": "yellow"
+		"bashMode": "green"
 	},
 	"export": {
 		"pageBg": "base",

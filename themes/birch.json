@@ -1,8 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "birch",
 	"vars": {
-		"barkCream": "#f9f7f1",
 		"barkCharcoal": "#505048",
 		"mossSage": "#608058",
 		"barkStriation": "#c8c4b8",
@@ -11,7 +10,6 @@
 		"darkMoss": "#4a603f",
 		"warmGray": "#9a958a",
 		"mutedSage": "#8a9d84",
-		"deepBark": "#3a3832",
 		"selectedBg": "#ede9df",
 		"userMsgBg": "#f2efe7",
 		"toolPendingBg": "#eef0ed",
@@ -70,22 +68,7 @@
 		"thinkingMedium": "mossSage",
 		"thinkingHigh": "#5a7a60",
 		"thinkingXhigh": "#4a6050",
-		"bashMode": "lightMoss",
-		"statusLineBg": "#ebe7dc",
-		"statusLineSep": "barkStriation",
-		"statusLineModel": "#5a6a5a",
-		"statusLinePath": "#4a5a60",
-		"statusLineGitClean": "darkMoss",
-		"statusLineGitDirty": "#9a7040",
-		"statusLineContext": "#6a6a70",
-		"statusLineSpend": "#4a6a6a",
-		"statusLineStaged": 28,
-		"statusLineDirty": 136,
-		"statusLineUntracked": 31,
-		"statusLineOutput": 133,
-		"statusLineCost": 133,
-		"statusLineSubagents": "mossSage",
-		"pythonMode": "#f0c040"
+		"bashMode": "lightMoss"
 	},
 	"export": {
 		"pageBg": "#f9f7f1",

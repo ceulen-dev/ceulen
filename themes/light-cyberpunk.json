@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-cyberpunk",
 	"vars": {
 		"neonPink": "#FF007A",
@@ -39,7 +39,6 @@
 		"toolPendingBg": "purpleTint",
 		"toolSuccessBg": "greenTint",
 		"toolErrorBg": "pinkTint",
-		"toolText": "darkNavy",
 		"toolTitle": "neonMagenta",
 		"toolOutput": "mediumGray",
 		"mdHeading": "neonMagenta",
@@ -55,7 +54,6 @@
 		"toolDiffAdded": "acidGreen",
 		"toolDiffRemoved": "neonPink",
 		"toolDiffContext": "mediumGray",
-		"link": "electricBlue",
 		"syntaxComment": "#6B6B70",
 		"syntaxKeyword": "#D600FF",
 		"syntaxFunction": "#EA00D9",
@@ -71,22 +69,7 @@
 		"thinkingMedium": "cyberPurple",
 		"thinkingHigh": "neonMagenta",
 		"thinkingXhigh": "deepMagenta",
-		"bashMode": "acidGreen",
-		"statusLineBg": "lightGray",
-		"statusLineSep": "neonMagenta",
-		"statusLineModel": "deepMagenta",
-		"statusLinePath": "electricBlue",
-		"statusLineGitClean": "acidGreen",
-		"statusLineGitDirty": "neonPink",
-		"statusLineContext": "cyberPurple",
-		"statusLineSpend": "neonMagenta",
-		"statusLineStaged": "#00FF9F",
-		"statusLineDirty": "#FFEA00",
-		"statusLineUntracked": "#00BFFF",
-		"statusLineOutput": "deepMagenta",
-		"statusLineCost": "neonPink",
-		"statusLineSubagents": "neonMagenta",
-		"pythonMode": "#f0c040"
+		"bashMode": "acidGreen"
 	},
 	"export": {
 		"pageBg": "offWhite",

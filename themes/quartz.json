@@ -1,12 +1,10 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "quartz",
 	"vars": {
 		"rosePink": "#c07088",
 		"quartzPurple": "#8070a0",
 		"softRose": "#e8dce0",
-		"deepRoseGray": "#3a2830",
-		"palePink": "#f5e8ed",
 		"dustyRose": "#9e6b7b",
 		"lavenderGray": "#a898b0",
 		"crystalMint": "#7fa090",
@@ -71,22 +69,7 @@
 		"thinkingMedium": "#c07088",
 		"thinkingHigh": "#9e6b7b",
 		"thinkingXhigh": "#8b4560",
-		"bashMode": "roseGreen",
-		"statusLineBg": "#f5e8ed",
-		"statusLineSep": "#9e6b7b",
-		"statusLineModel": "#8070a0",
-		"statusLinePath": "#7fa090",
-		"statusLineGitClean": "#5f875f",
-		"statusLineGitDirty": "#c09870",
-		"statusLineContext": "#8070a0",
-		"statusLineSpend": "#7fa090",
-		"statusLineStaged": 108,
-		"statusLineDirty": 180,
-		"statusLineUntracked": 139,
-		"statusLineOutput": 132,
-		"statusLineCost": 132,
-		"statusLineSubagents": "rosePink",
-		"pythonMode": "#f0c040"
+		"bashMode": "roseGreen"
 	},
 	"export": {
 		"pageBg": "#fbf7f9",

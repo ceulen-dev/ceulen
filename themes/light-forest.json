@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-forest",
 	"vars": {
 		"fernGreen": "#4f7942",
@@ -8,7 +8,6 @@
 		"oliveBrown": "#636b2f",
 		"cream": "#fdfbd4",
 		"bark": "#8b7355",
-		"softBrown": "#a0877f",
 		"lichen": "#c2c6a7",
 		"sunlitGreen": "#b5c99a",
 		"forestShadow": "#3d5a3c",
@@ -17,11 +16,7 @@
 		"burnishedOrange": "#be5103",
 		"deepOlive": "#4f5c2e",
 		"paleLeaf": "#dde5b6",
-		"softMint": "#d4e4c9",
-		"acornBrown": "#8c6d46",
-		"morningDew": "#f8f6e8",
-		"twilightGreen": "#2d4a2c",
-		"amberGlow": "#c99a3e"
+		"softMint": "#d4e4c9"
 	},
 	"colors": {
 		"accent": "fernGreen",
@@ -59,7 +54,6 @@
 		"toolDiffAdded": "sageGreen",
 		"toolDiffRemoved": "burnishedOrange",
 		"toolDiffContext": "earthGray",
-		"link": "fernGreen",
 		"syntaxComment": "#7a7466",
 		"syntaxKeyword": "#3d5a3c",
 		"syntaxFunction": "#636b2f",
@@ -75,22 +69,7 @@
 		"thinkingMedium": "#4f7942",
 		"thinkingHigh": "#3d5a3c",
 		"thinkingXhigh": "#2d4a2c",
-		"bashMode": "sageGreen",
-		"statusLineBg": "morningDew",
-		"statusLineSep": 144,
-		"statusLineModel": "deepOlive",
-		"statusLinePath": "fernGreen",
-		"statusLineGitClean": "sageGreen",
-		"statusLineGitDirty": "amberGlow",
-		"statusLineContext": "mossGreen",
-		"statusLineSpend": "acornBrown",
-		"statusLineStaged": 107,
-		"statusLineDirty": 136,
-		"statusLineUntracked": 65,
-		"statusLineOutput": 131,
-		"statusLineCost": 131,
-		"statusLineSubagents": "oliveBrown",
-		"pythonMode": "#f0c040"
+		"bashMode": "sageGreen"
 	},
 	"export": {
 		"pageBg": "#f5f3ed",

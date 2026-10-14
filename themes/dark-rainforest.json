@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-rainforest",
 	"vars": {
 		"canopyBlack": "#0A0D0B",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "orchidPurple",
 		"thinkingHigh": "treefrogOrange",
 		"thinkingXhigh": "fireflyGold",
-		"bashMode": "orchidPurple",
-		"statusLineBg": "#080C0A",
-		"statusLineSep": "barkBorder",
-		"statusLineModel": "orchidPurple",
-		"statusLinePath": "treefrogOrange",
-		"statusLineGitClean": "successGreen",
-		"statusLineGitDirty": "fireflyGold",
-		"statusLineContext": "mutedLeaf",
-		"statusLineSpend": "orchidPurple",
-		"statusLineStaged": "successGreen",
-		"statusLineDirty": "fireflyGold",
-		"statusLineUntracked": "orchidPurple",
-		"statusLineOutput": "treefrogOrange",
-		"statusLineCost": "fireflyGold",
-		"statusLineSubagents": "orchidPurple",
-		"pythonMode": "#f0c040"
+		"bashMode": "orchidPurple"
 	},
 	"export": {
 		"pageBg": "#080C0A",

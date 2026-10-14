@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-dawn",
 	"vars": {
 		"sunrise": "#f7d8c1",
@@ -65,22 +65,7 @@
 		"thinkingMedium": "sky",
 		"thinkingHigh": "gold",
 		"thinkingXhigh": "sunrise",
-		"bashMode": "sky",
-		"statusLineBg": "#f4f6fa",
-		"statusLineSep": "#c9d1dc",
-		"statusLineModel": "gold",
-		"statusLinePath": "sky",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "sunrise",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "sky",
-		"statusLineOutput": "ink",
-		"statusLineCost": "sunrise",
-		"statusLineSubagents": "gold",
-		"pythonMode": "gold"
+		"bashMode": "sky"
 	},
 	"export": {
 		"pageBg": "#faf7f2",

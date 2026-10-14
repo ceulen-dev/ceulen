@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-rose-pine",
 	"vars": {
 		"base": "#191724",
@@ -15,8 +15,7 @@
 		"foam": "#9ccfd8",
 		"iris": "#c4a7e7",
 		"highlightLow": "#21202e",
-		"highlightMed": "#403d52",
-		"highlightHigh": "#524f67"
+		"highlightMed": "#403d52"
 	},
 	"colors": {
 		"accent": "iris",
@@ -40,7 +39,6 @@
 		"toolSuccessBg": "highlightLow",
 		"toolErrorBg": "#2d1f26",
 		"toolTitle": "foam",
-		"toolText": "",
 		"toolOutput": "muted",
 		"mdHeading": "iris",
 		"mdLink": "foam",
@@ -55,7 +53,6 @@
 		"toolDiffAdded": "foam",
 		"toolDiffRemoved": "love",
 		"toolDiffContext": "muted",
-		"link": "foam",
 		"syntaxComment": "muted",
 		"syntaxKeyword": "pine",
 		"syntaxFunction": "rose",
@@ -71,22 +68,7 @@
 		"thinkingMedium": "foam",
 		"thinkingHigh": "iris",
 		"thinkingXhigh": "#e0c1ff",
-		"bashMode": "foam",
-		"statusLineBg": "overlay",
-		"statusLineSep": "highlightMed",
-		"statusLineModel": "iris",
-		"statusLinePath": "foam",
-		"statusLineGitClean": "foam",
-		"statusLineGitDirty": "gold",
-		"statusLineContext": "subtle",
-		"statusLineSpend": "rose",
-		"statusLineStaged": "foam",
-		"statusLineDirty": "gold",
-		"statusLineUntracked": "love",
-		"statusLineOutput": "pine",
-		"statusLineCost": "rose",
-		"statusLineSubagents": "iris",
-		"pythonMode": "gold"
+		"bashMode": "foam"
 	},
 	"export": {
 		"pageBg": "base",

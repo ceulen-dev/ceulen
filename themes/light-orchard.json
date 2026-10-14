@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-orchard",
 	"vars": {
 		"orchardBg": "#F7F2E8",
@@ -8,7 +8,6 @@
 		"orchardBorder": "#E2D5C2",
 		"blossomPink": "#D97A9B",
 		"leafGreen": "#6FA84B",
-		"barkBrown": "#8B6A4A",
 		"honeyGold": "#C98A3A",
 		"plumPurple": "#7A5BA6",
 		"mutedText": "#6D5F4C",
@@ -66,22 +65,7 @@
 		"thinkingMedium": "blossomPink",
 		"thinkingHigh": "leafGreen",
 		"thinkingXhigh": "honeyGold",
-		"bashMode": "leafGreen",
-		"statusLineBg": "#F1EBE1",
-		"statusLineSep": "orchardBorder",
-		"statusLineModel": "blossomPink",
-		"statusLinePath": "plumPurple",
-		"statusLineGitClean": "leafGreen",
-		"statusLineGitDirty": "honeyGold",
-		"statusLineContext": "mutedText",
-		"statusLineSpend": "blossomPink",
-		"statusLineStaged": "leafGreen",
-		"statusLineDirty": "honeyGold",
-		"statusLineUntracked": "plumPurple",
-		"statusLineOutput": "blossomPink",
-		"statusLineCost": "honeyGold",
-		"statusLineSubagents": "blossomPink",
-		"pythonMode": "#f0c040"
+		"bashMode": "leafGreen"
 	},
 	"export": {
 		"pageBg": "#F7F2E8",

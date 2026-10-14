@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-lagoon",
 	"vars": {
 		"lagoonBg": "#EEF6F8",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "turquoise",
 		"thinkingHigh": "palmGreen",
 		"thinkingXhigh": "coral",
-		"bashMode": "turquoise",
-		"statusLineBg": "#E7F1F4",
-		"statusLineSep": "lagoonBorder",
-		"statusLineModel": "turquoise",
-		"statusLinePath": "lagoonTeal",
-		"statusLineGitClean": "palmGreen",
-		"statusLineGitDirty": "coral",
-		"statusLineContext": "mutedText",
-		"statusLineSpend": "turquoise",
-		"statusLineStaged": "palmGreen",
-		"statusLineDirty": "coral",
-		"statusLineUntracked": "lagoonTeal",
-		"statusLineOutput": "turquoise",
-		"statusLineCost": "coral",
-		"statusLineSubagents": "turquoise",
-		"pythonMode": "#f0c040"
+		"bashMode": "turquoise"
 	},
 	"export": {
 		"pageBg": "#EEF6F8",

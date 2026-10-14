@@ -1,11 +1,10 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-reef",
 	"vars": {
 		"deepBlue": "#0A0F14",
 		"abyssBlue": "#101A22",
 		"reefBlue": "#16242E",
-		"currentBlue": "#1C2E3B",
 		"borderBlue": "#294052",
 		"coralPink": "#F07F6A",
 		"anemonePurple": "#9B6AD4",
@@ -66,22 +65,7 @@
 		"thinkingMedium": "anemonePurple",
 		"thinkingHigh": "coralPink",
 		"thinkingXhigh": "fishYellow",
-		"bashMode": "coralPink",
-		"statusLineBg": "#070B10",
-		"statusLineSep": "borderBlue",
-		"statusLineModel": "anemonePurple",
-		"statusLinePath": "coralPink",
-		"statusLineGitClean": "kelpGreen",
-		"statusLineGitDirty": "fishYellow",
-		"statusLineContext": "mutedSea",
-		"statusLineSpend": "coralPink",
-		"statusLineStaged": "kelpGreen",
-		"statusLineDirty": "fishYellow",
-		"statusLineUntracked": "anemonePurple",
-		"statusLineOutput": "coralPink",
-		"statusLineCost": "fishYellow",
-		"statusLineSubagents": "anemonePurple",
-		"pythonMode": "#f0c040"
+		"bashMode": "coralPink"
 	},
 	"export": {
 		"pageBg": "#070B10",

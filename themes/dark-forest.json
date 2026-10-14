@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-forest",
 	"vars": {
 		"moss": "#8FBC8F",
@@ -7,9 +7,6 @@
 		"pine": "#01796F",
 		"hunter": "#355E3B",
 		"sage": "#9CAF88",
-		"bark": "#8B4513",
-		"earth": "#A0522D",
-		"walnut": "#773F1A",
 		"forest": "#1B3A2F",
 		"deepForest": "#0F1F19",
 		"lichen": "#B8C5A0",
@@ -55,7 +52,6 @@
 		"toolDiffAdded": "fern",
 		"toolDiffRemoved": "#C44C3C",
 		"toolDiffContext": "stone",
-		"link": "sage",
 		"syntaxComment": "#6B8E70",
 		"syntaxKeyword": "pine",
 		"syntaxFunction": "clay",
@@ -71,22 +67,7 @@
 		"thinkingMedium": "hunter",
 		"thinkingHigh": "fern",
 		"thinkingXhigh": "moss",
-		"bashMode": "sage",
-		"statusLineBg": "#0A120E",
-		"statusLineSep": "#3A4A40",
-		"statusLineModel": "clay",
-		"statusLinePath": "pine",
-		"statusLineGitClean": "fern",
-		"statusLineGitDirty": "amber",
-		"statusLineContext": "hunter",
-		"statusLineSpend": "sage",
-		"statusLineStaged": "fern",
-		"statusLineDirty": "amber",
-		"statusLineUntracked": "lichen",
-		"statusLineOutput": "walnut",
-		"statusLineCost": "earth",
-		"statusLineSubagents": "moss",
-		"pythonMode": "amber"
+		"bashMode": "sage"
 	},
 	"export": {
 		"pageBg": "#0A120E",

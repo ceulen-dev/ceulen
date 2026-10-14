@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-monochrome",
 	"vars": {
 		"accent": "#5fafaf",
@@ -37,7 +37,6 @@
 		"toolPendingBg": "gray1",
 		"toolSuccessBg": "gray2",
 		"toolErrorBg": "#2a1a1a",
-		"toolText": "",
 		"toolTitle": "gray8",
 		"toolOutput": "gray6",
 		"mdHeading": "gray9",
@@ -53,7 +52,6 @@
 		"toolDiffAdded": "successGreen",
 		"toolDiffRemoved": "errorRed",
 		"toolDiffContext": "gray6",
-		"link": "accent",
 		"syntaxComment": "gray5",
 		"syntaxKeyword": "gray8",
 		"syntaxFunction": "gray9",
@@ -69,22 +67,7 @@
 		"thinkingMedium": "gray6",
 		"thinkingHigh": "gray7",
 		"thinkingXhigh": "gray8",
-		"bashMode": "accent",
-		"statusLineBg": "#0d0d0d",
-		"statusLineSep": "gray4",
-		"statusLineModel": "gray7",
-		"statusLinePath": "accent",
-		"statusLineGitClean": "successGreen",
-		"statusLineGitDirty": "warningYellow",
-		"statusLineContext": "gray6",
-		"statusLineSpend": "accent",
-		"statusLineStaged": "successGreen",
-		"statusLineDirty": "warningYellow",
-		"statusLineUntracked": "gray6",
-		"statusLineOutput": "gray7",
-		"statusLineCost": "gray7",
-		"statusLineSubagents": "accent",
-		"pythonMode": "#f0c040"
+		"bashMode": "accent"
 	},
 	"export": {
 		"pageBg": "#0d0d0d",

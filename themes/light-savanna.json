@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-savanna",
 	"vars": {
 		"savannaBg": "#F8F1E6",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "sunsetOrange",
 		"thinkingHigh": "riverBlue",
 		"thinkingXhigh": "acaciaGreen",
-		"bashMode": "acaciaGreen",
-		"statusLineBg": "#F3EBDD",
-		"statusLineSep": "savannaBorder",
-		"statusLineModel": "sunsetOrange",
-		"statusLinePath": "riverBlue",
-		"statusLineGitClean": "acaciaGreen",
-		"statusLineGitDirty": "warningOrange",
-		"statusLineContext": "mutedText",
-		"statusLineSpend": "sunsetOrange",
-		"statusLineStaged": "acaciaGreen",
-		"statusLineDirty": "warningOrange",
-		"statusLineUntracked": "riverBlue",
-		"statusLineOutput": "sunsetOrange",
-		"statusLineCost": "warningOrange",
-		"statusLineSubagents": "sunsetOrange",
-		"pythonMode": "#f0c040"
+		"bashMode": "acaciaGreen"
 	},
 	"export": {
 		"pageBg": "#F8F1E6",

@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-wetland",
 	"vars": {
 		"wetlandBg": "#F1F5F3",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "heronBlue",
 		"thinkingHigh": "marshGreen",
 		"thinkingXhigh": "warningGold",
-		"bashMode": "marshGreen",
-		"statusLineBg": "#E9F0EC",
-		"statusLineSep": "wetlandBorder",
-		"statusLineModel": "heronBlue",
-		"statusLinePath": "heronBlue",
-		"statusLineGitClean": "marshGreen",
-		"statusLineGitDirty": "warningGold",
-		"statusLineContext": "mutedText",
-		"statusLineSpend": "heronBlue",
-		"statusLineStaged": "marshGreen",
-		"statusLineDirty": "warningGold",
-		"statusLineUntracked": "heronBlue",
-		"statusLineOutput": "heronBlue",
-		"statusLineCost": "warningGold",
-		"statusLineSubagents": "heronBlue",
-		"pythonMode": "#f0c040"
+		"bashMode": "marshGreen"
 	},
 	"export": {
 		"pageBg": "#F1F5F3",

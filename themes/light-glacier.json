@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-glacier",
 	"vars": {
 		"glacierBg": "#F2F7FA",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "crevasseBlue",
 		"thinkingHigh": "iceTeal",
 		"thinkingXhigh": "warningAmber",
-		"bashMode": "crevasseBlue",
-		"statusLineBg": "#EEF5F9",
-		"statusLineSep": "glacierBorder",
-		"statusLineModel": "crevasseBlue",
-		"statusLinePath": "frostBlue",
-		"statusLineGitClean": "iceTeal",
-		"statusLineGitDirty": "warningAmber",
-		"statusLineContext": "mutedText",
-		"statusLineSpend": "crevasseBlue",
-		"statusLineStaged": "iceTeal",
-		"statusLineDirty": "warningAmber",
-		"statusLineUntracked": "frostBlue",
-		"statusLineOutput": "crevasseBlue",
-		"statusLineCost": "warningAmber",
-		"statusLineSubagents": "crevasseBlue",
-		"pythonMode": "#f0c040"
+		"bashMode": "crevasseBlue"
 	},
 	"export": {
 		"pageBg": "#F2F7FA",

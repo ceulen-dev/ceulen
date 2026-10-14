@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-meadow",
 	"vars": {
 		"meadowBg": "#F3F7F1",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "wildflowerPurple",
 		"thinkingHigh": "skyTeal",
 		"thinkingXhigh": "successGreen",
-		"bashMode": "grassGreen",
-		"statusLineBg": "#EEF4EB",
-		"statusLineSep": "meadowBorder",
-		"statusLineModel": "wildflowerPurple",
-		"statusLinePath": "skyTeal",
-		"statusLineGitClean": "successGreen",
-		"statusLineGitDirty": "warningGold",
-		"statusLineContext": "mutedText",
-		"statusLineSpend": "wildflowerPurple",
-		"statusLineStaged": "successGreen",
-		"statusLineDirty": "warningGold",
-		"statusLineUntracked": "skyTeal",
-		"statusLineOutput": "wildflowerPurple",
-		"statusLineCost": "warningGold",
-		"statusLineSubagents": "wildflowerPurple",
-		"pythonMode": "#f0c040"
+		"bashMode": "grassGreen"
 	},
 	"export": {
 		"pageBg": "#F3F7F1",

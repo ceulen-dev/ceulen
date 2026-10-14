@@ -410,6 +410,118 @@ describe("plan mode — branch restore", () => {
   });
 });
 
+describe("ask_user_question ask-loop dampener", () => {
+  /** ctx whose ui.select answers `answers` in order and counts dialogs shown. */
+  function askingCtx(h: ReturnType<typeof createFakePi>, answers: string[]) {
+    const shown: string[] = [];
+    let i = 0;
+    const ctx = h.ctx({
+      ui: {
+        notify: () => {},
+        select: async (question: string) => { shown.push(question); return answers[i++]; },
+        editor: async () => undefined,
+        setStatus: () => {},
+        setEditorText: () => {},
+        theme: { fg: (_c: string, t: string) => t },
+      },
+    });
+    return { ctx, shown };
+  }
+  const ask = (h: ReturnType<typeof createFakePi>, ctx: any, question: string) =>
+    h.tools.ask_user_question.execute(`tc-${question}`, { question, options: [{ label: "Send it" }, { label: "Stop" }] }, undefined, undefined, ctx);
+  const text = (r: any) => String(r?.content?.[0]?.text ?? "");
+
+  it("refuses a near-duplicate of an already-answered question", async () => {
+    const h = await start();
+    const { ctx, shown } = askingCtx(h, ["Send it"]);
+    const first = await ask(h, ctx, "Ready to execute the confirmed plan — dispatch the NAK diagnosis to the peer now?");
+    assert.equal(text(first), "User selected: Send it", "1st ask shows the dialog");
+    // The incident's exact drift: same intent, reworded, shrinking.
+    const second = await ask(h, ctx, "Execute: dispatch to peer now?");
+    assert.match(text(second), /Loop guard/, "reworded repeat is refused");
+    assert.match(text(second), /already asked this and the user answered/, "guard explains why");
+    assert.match(text(second), /"Send it"/, "guard hands back the earlier answer");
+    assert.equal(shown.length, 1, "the repeat NEVER opened a second dialog");
+    assert.equal(second.details.loopGuard, true, "details mark the loop guard");
+  });
+
+  it("genuinely different questions are NOT blocked", async () => {
+    const h = await start();
+    const { ctx, shown } = askingCtx(h, ["Send it", "Send it", "Send it"]);
+    await ask(h, ctx, "Which port profile should the uplink use?");
+    await ask(h, ctx, "Which RADIUS secret belongs on the controller?");
+    const third = await ask(h, ctx, "How long should the capture run stay armed?");
+    assert.equal(text(third), "User selected: Send it", "a distinct question still opens");
+    assert.equal(shown.length, 3, "all three dialogs shown");
+  });
+
+  it("same verb, different object is NOT a duplicate (measured at 0.67)", async () => {
+    const h = await start();
+    const { ctx } = askingCtx(h, ["Go", "Go"]);
+    await ask(h, ctx, "Should I restart the radius unit?");
+    const second = await ask(h, ctx, "Should I restart the nginx unit?");
+    assert.equal(text(second), "User selected: Go", "different target still asks");
+  });
+
+  it("an explicit answer stays reusable while the loop guard holds", async () => {
+    const h = await start();
+    const { ctx, shown } = askingCtx(h, ["Dispatch now, store memories"]);
+    await ask(h, ctx, "Ready to execute — dispatch the NAK diagnosis to the peer now?");
+    const again = await ask(h, ctx, "Execute: dispatch to peer now?");
+    assert.match(text(again), /Dispatch now, store memories/, "guard hands the exact earlier choice back");
+    assert.equal(shown.length, 1, "user is not asked twice");
+  });
+
+  it("the count backstop catches wording drift the similarity arm misses", async () => {
+    const h = await start();
+    // Four asks that are all DIFFERENT enough to beat the similarity arm, yet a
+    // loop by the only wording-independent signal: no tool call in between.
+    const { ctx, shown } = askingCtx(h, ["A", "B", "C", "D"]);
+    await ask(h, ctx, "Which port profile?");
+    await ask(h, ctx, "Which RADIUS secret?");
+    await ask(h, ctx, "How long is the capture?");
+    assert.equal(shown.length, 3, "three distinct questions are a legitimate flow");
+    const fourth = await ask(h, ctx, "Pick a colour for the dashboard?");
+    assert.match(text(fourth), /Loop guard/, "4th consecutive ask with no tool call is refused");
+    assert.match(text(fourth), /call #4 in a row/, "guard names the run length");
+    assert.equal(shown.length, 3, "the 4th ask never opened a dialog");
+  });
+
+  it("any other tool call re-arms the dampener", async () => {
+    const h = await start();
+    const { ctx, shown } = askingCtx(h, ["Send it", "Send it"]);
+    await ask(h, ctx, "Dispatch now?");
+    // The model finally does the work instead of asking again.
+    await h.fire("tool_call", { toolName: "bash", input: { command: "ls" } }, ctx);
+    const after = await ask(h, ctx, "Dispatch now?");
+    assert.equal(text(after), "User selected: Send it", "re-armed after another tool call");
+    assert.equal(shown.length, 2, "the dialog opened again");
+  });
+
+  it("a fresh session re-arms the dampener", async () => {
+    const h = await start();
+    const { ctx } = askingCtx(h, ["Send it"]);
+    await ask(h, ctx, "Dispatch now?");
+    await start(h); // session_start clears the run
+    const { ctx: ctx2, shown } = askingCtx(h, ["Send it"]);
+    const after = await ask(h, ctx2, "Dispatch now?");
+    assert.equal(text(after), "User selected: Send it", "new session asks normally");
+    assert.equal(shown.length, 1, "dialog shown in the new session");
+  });
+
+  it("cancelled asks do not count as an answer to reuse", async () => {
+    const h = await start();
+    // ctx.ui.select returning undefined = user cancelled.
+    const cancelledCtx = h.ctx({ ui: { notify: () => {}, select: async () => undefined, editor: async () => undefined, setStatus: () => {}, setEditorText: () => {}, theme: { fg: (_c: string, t: string) => t } } });
+    await ask(h, cancelledCtx, "Dispatch now?");
+    const { ctx, shown } = askingCtx(h, ["Send it"]);
+    const repeat = await ask(h, ctx, "Dispatch now?");
+    assert.equal(text(repeat), "User selected: Send it", "no stale answer to hand back — dialog opens");
+    assert.equal(shown.length, 1);
+  });
+});
+
+
 /** Recursively collect file names under dir ([] when missing). */
 function readSyncRecursive(dir: string, prefix = ""): string[] {
   if (!existsSync(dir)) return [];

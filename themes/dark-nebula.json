@@ -1,8 +1,7 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-nebula",
 	"vars": {
-		"void": "#07060b",
 		"nebula": "#2b1b3d",
 		"magenta": "#d66bd8",
 		"teal": "#35b4c3",
@@ -65,22 +64,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "magenta",
 		"thinkingXhigh": "star",
-		"bashMode": "teal",
-		"statusLineBg": "#0a0a13",
-		"statusLineSep": "#2a2336",
-		"statusLineModel": "magenta",
-		"statusLinePath": "teal",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "violet",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "teal",
-		"statusLineOutput": "star",
-		"statusLineCost": "magenta",
-		"statusLineSubagents": "magenta",
-		"pythonMode": "#f0c040"
+		"bashMode": "teal"
 	},
 	"export": {
 		"pageBg": "#0a0912",

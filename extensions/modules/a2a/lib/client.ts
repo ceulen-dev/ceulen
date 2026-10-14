@@ -224,7 +224,8 @@ async function postJsonRpc(
     } catch (e: any) {
       if (ctrl.signal.aborted) {
         throw new Error(
-          `reply timed out after ${timeoutMs}ms; delivery status unknown (requestId=${String(body.id)})`,
+          `reply timed out after ${timeoutMs}ms; delivery status unknown (requestId=${String(body.id)}). ` +
+          `The peer may still be working: check a2a_status before re-sending, and use async_dispatch: true for a peer that is routinely slow — a second synchronous send can double-deliver the work.`,
         );
       }
       throw new Error(`connection failed — ${e?.message || String(e)}`);

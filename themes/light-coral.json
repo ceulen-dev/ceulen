@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-coral",
 	"vars": {
 		"cyan": "#00acc1",
@@ -54,7 +54,6 @@
 		"toolDiffAdded": "green",
 		"toolDiffRemoved": "red",
 		"toolDiffContext": "gray",
-		"link": "#1e88e5",
 		"syntaxComment": "#546e7a",
 		"syntaxKeyword": "#1e88e5",
 		"syntaxFunction": "#fdd835",
@@ -70,22 +69,7 @@
 		"thinkingMedium": "cyan",
 		"thinkingHigh": "accent",
 		"thinkingXhigh": "red",
-		"bashMode": "accent",
-		"statusLineBg": "#fff3e0",
-		"statusLineSep": "#90a4ae",
-		"statusLineModel": "accent",
-		"statusLinePath": "blue",
-		"statusLineGitClean": "green",
-		"statusLineGitDirty": "yellow",
-		"statusLineContext": "gray",
-		"statusLineSpend": "cyan",
-		"statusLineStaged": 28,
-		"statusLineDirty": 178,
-		"statusLineUntracked": 39,
-		"statusLineOutput": 205,
-		"statusLineCost": 205,
-		"statusLineSubagents": "accent",
-		"pythonMode": "yellow"
+		"bashMode": "accent"
 	},
 	"export": {
 		"pageBg": "#fff8e1",

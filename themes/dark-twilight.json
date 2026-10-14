@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-twilight",
 	"vars": {
 		"indigo": "#15142a",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "rose",
 		"thinkingXhigh": "afterglow",
-		"bashMode": "teal",
-		"statusLineBg": "#121025",
-		"statusLineSep": "#2c2644",
-		"statusLineModel": "rose",
-		"statusLinePath": "teal",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "sunset",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "teal",
-		"statusLineOutput": "afterglow",
-		"statusLineCost": "sunset",
-		"statusLineSubagents": "rose",
-		"pythonMode": "#f0c040"
+		"bashMode": "teal"
 	},
 	"export": {
 		"pageBg": "#0f0e21",

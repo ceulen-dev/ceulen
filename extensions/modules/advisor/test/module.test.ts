@@ -683,3 +683,29 @@ describe("writeAdvisorSettings integration", () => {
 function cmdStatus(state: any, ctx: any): void {
   state.commands.get("advisor").handler("status", ctx);
 }
+
+describe("consult tool — chain exhaustion message", () => {
+  it("wraps a raw provider failure with what it means and what to do", async () => {
+    writeSettings({ advisor: { enabled: true, models: [MODEL] } });
+    const { pi, state } = createFakePi();
+    advisorModule(pi);
+    const ctx = available(fakeCtx([]));
+    await fire(pi, state, "session_start", ctx);
+    const tool = state.tools.get("advisor");
+    assert.ok(tool, "consult tool registered");
+    // The provider rejects the call (the 400 "insufficient credits" shape).
+    ctx.modelRegistry.streamSimple = () => {
+      throw new Error('400: {"message":"You have insufficient credits to make this request."}');
+    };
+    await assert.rejects(
+      () => tool.execute("tc1", {}, undefined, undefined, ctx),
+      (err: Error) => {
+        assert.match(err.message, /Advisor unavailable \(chain /, "names the failed chain");
+        assert.match(err.message, /insufficient credits/, "keeps the provider reason");
+        assert.match(err.message, /Continue the task without advisor guidance/, "tells the model to proceed");
+        assert.match(err.message, /Do not tell the user the advisor failed/, "forbids the stall-and-ask loop");
+        return true;
+      },
+    );
+  });
+});

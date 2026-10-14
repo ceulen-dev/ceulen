@@ -119,18 +119,28 @@ export function registerAdvisor(pi: ExtensionAPI, state: AdvisorState): AdvisorH
       // must not leave its partial output above the next candidate's response.
       let output = "";
       let attempt = 0;
-      const result = await runIsolatedChain(ctx, models, {
-        systemPrompt: `${SYSTEM}\n\nPRIMARY AGENT SYSTEM PROMPT:\n${ctx.getSystemPrompt()}`,
-        messages: [{
-          role: "user",
-          content: [{ type: "text", text: `<transcript>${transcriptEvidence}</transcript>\n\nProvide strategic guidance for the executor.` }],
-          timestamp: Date.now(),
-        }],
-      }, (delta, forAttempt) => {
-        if (forAttempt !== attempt) { attempt = forAttempt; output = ""; }
-        output += delta;
-        onUpdate?.({ content: [{ type: "text", text: output }], details: { models } });
-      }, signal);
+      let result;
+      try {
+        result = await runIsolatedChain(ctx, models, {
+          systemPrompt: `${SYSTEM}\n\nPRIMARY AGENT SYSTEM PROMPT:\n${ctx.getSystemPrompt()}`,
+          messages: [{
+            role: "user",
+            content: [{ type: "text", text: `<transcript>${transcriptEvidence}</transcript>\n\nProvide strategic guidance for the executor.` }],
+            timestamp: Date.now(),
+          }],
+        }, (delta, forAttempt) => {
+          if (forAttempt !== attempt) { attempt = forAttempt; output = ""; }
+          output += delta;
+          onUpdate?.({ content: [{ type: "text", text: output }], details: { models } });
+        }, signal);
+      } catch (error) {
+        // The whole chain failed (provider/key/quota — e.g. a 400 "insufficient
+        // credits"). A bare provider string reads to weak models as "the session
+        // is broken, so stall and ask the user" — the 2026-10-14 ask-loop
+        // incident started exactly here. Say what it means and what to do.
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(`Advisor unavailable (chain ${chain}): ${reason}\nContinue the task without advisor guidance. Do not tell the user the advisor failed and do not ask them to retry it — it is an optional second opinion, not a gate.`);
+      }
       return {
         content: [{ type: "text", text: `Advice from ${result.model}:\n${result.text}\n\nAdvisor usage: ${usageLine(result.usage.input, result.usage.output, result.usage.cost)}` }],
         details: { models, served: result.model },

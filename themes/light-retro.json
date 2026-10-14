@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-retro",
 	"vars": {
 		"paper": "#f4f1e8",
@@ -17,8 +17,7 @@
 		"paperShadow": "#d8d4c8",
 		"toolBgPending": "#fff8e8",
 		"toolBgSuccess": "#e8f4e8",
-		"toolBgError": "#f8e8e8",
-		"statusBg": "#e0dcd0"
+		"toolBgError": "#f8e8e8"
 	},
 	"colors": {
 		"accent": "amber",
@@ -33,7 +32,6 @@
 		"text": "printBlack",
 		"thinkingText": "fadedInk",
 		"selectedBg": "paperHighlight",
-		"link": "vintageBlue",
 		"userMessageBg": "greenBar",
 		"userMessageText": "printBlack",
 		"customMessageBg": "paperHighlight",
@@ -42,7 +40,6 @@
 		"toolPendingBg": "toolBgPending",
 		"toolSuccessBg": "toolBgSuccess",
 		"toolErrorBg": "toolBgError",
-		"toolText": "printBlack",
 		"toolTitle": "printBlack",
 		"toolOutput": "fadedInk",
 		"mdHeading": "amberDark",
@@ -73,22 +70,7 @@
 		"thinkingMedium": "#cc9900",
 		"thinkingHigh": "#cc6600",
 		"thinkingXhigh": "#993300",
-		"bashMode": "dotMatrixGreen",
-		"statusLineBg": "statusBg",
-		"statusLineSep": "#a09880",
-		"statusLineModel": "#996699",
-		"statusLinePath": "#336699",
-		"statusLineGitClean": "#2d6632",
-		"statusLineGitDirty": "#cc6600",
-		"statusLineContext": "#666699",
-		"statusLineSpend": "#336666",
-		"statusLineStaged": 28,
-		"statusLineDirty": 136,
-		"statusLineUntracked": 94,
-		"statusLineOutput": 133,
-		"statusLineCost": 133,
-		"statusLineSubagents": "amberDark",
-		"pythonMode": "amber"
+		"bashMode": "dotMatrixGreen"
 	},
 	"export": {
 		"pageBg": "paper",

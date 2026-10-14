@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "amethyst",
 	"vars": {
 		"amethyst": "#b48eff",
@@ -11,7 +11,6 @@
 		"lavender": "#c8a8e9",
 		"crystalFacet": "#2a2435",
 		"caveDark": "#140f18",
-		"caveDeep": "#0f0b13",
 		"selectedBg": "#221b28",
 		"userMsgBg": "#1a1420",
 		"toolPendingBg": "#1b1624",
@@ -55,7 +54,6 @@
 		"toolDiffAdded": "#8eb897",
 		"toolDiffRemoved": "#d96c75",
 		"toolDiffContext": "#8b7a99",
-		"link": "violet",
 		"syntaxComment": "#7a6b88",
 		"syntaxKeyword": "amethyst",
 		"syntaxFunction": "gold",
@@ -71,22 +69,7 @@
 		"thinkingMedium": "violet",
 		"thinkingHigh": "amethyst",
 		"thinkingXhigh": "lavender",
-		"bashMode": "amethyst",
-		"statusLineBg": "caveDeep",
-		"statusLineSep": 240,
-		"statusLineModel": "roseQuartz",
-		"statusLinePath": "violet",
-		"statusLineGitClean": "#8eb897",
-		"statusLineGitDirty": "gold",
-		"statusLineContext": "lavender",
-		"statusLineSpend": "deepPurple",
-		"statusLineStaged": 141,
-		"statusLineDirty": 179,
-		"statusLineUntracked": 183,
-		"statusLineOutput": 213,
-		"statusLineCost": 213,
-		"statusLineSubagents": "amethyst",
-		"pythonMode": "gold"
+		"bashMode": "amethyst"
 	},
 	"export": {
 		"pageBg": "caveDark",

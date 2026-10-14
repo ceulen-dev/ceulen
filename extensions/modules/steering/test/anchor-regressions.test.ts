@@ -90,4 +90,42 @@ describe("ds-anchor regressions", () => {
     assert.equal(out.max_completion_tokens, 256000, "budget pinned on the field the payload already carries");
     assert.equal(out.max_tokens, undefined, "conflicting max_tokens dropped");
   });
+
+  // pi 1.2.0: before_agent_start also fires for sendMessage({triggerTurn: true})
+  // runs (cron fires, auto-bg receipts) with messageType "custom" and NO prompt.
+  it("a custom-triggered run does NOT consume the bootstrap; the next user turn still gets it", () => {
+    const h = createFakePi();
+    h.setEntries([]);
+    h.fire("session_start", {}, h.ctx("deepseek-v4-pro"));
+    // cron-style custom run (no `prompt` field — pi's custom variant)
+    const custom = h.fire("before_agent_start", {
+      messageType: "custom", message: { customType: "ceulen-cron-fire", content: "job fired" },
+      systemPrompt: "FULL PI PROMPT", systemPromptOptions: {},
+    }, h.ctx("deepseek-v4-pro"));
+    assert.notEqual(custom?.systemPrompt, MINIMAL, "custom run must not get the minimal prompt");
+    const out = h.fire("before_provider_request", { payload: { tools: [{ name: "bash" }, { name: "str_replace_editor" }, { name: "edit" }] } }, h.ctx("deepseek-v4-pro"));
+    assert.equal(out?.tools, undefined, "custom run keeps the full tool catalog");
+    assert.equal(out?.max_tokens, undefined, "custom run gets no budget pin");
+    // the bootstrap stayed pending for the next user turn
+    const user = h.fire("before_agent_start", { messageType: "user", prompt: "do a task", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
+    assert.equal(user?.systemPrompt, MINIMAL, "the next USER turn still bootstraps");
+  });
+
+  it("a custom-triggered run gets no first-tool hints (no prompt to read)", () => {
+    const h = createFakePi(["bash", "read", "edit", "grep"]);
+    h.setEntries([]);
+    h.fire("session_start", {}, h.ctx("deepseek-v4-flash"));
+    const custom = h.fire("before_agent_start", {
+      messageType: "custom", message: { customType: "ceulen-cron-fire", content: "run the task" },
+      systemPrompt: "FULL", systemPromptOptions: {},
+    }, h.ctx("deepseek-v4-flash"));
+    // The static family guidance still composes; what must NOT appear is the
+    // prompt-derived dynamic hint (recognisable by its "Do NOT spawn a task
+    // agent" / task-shaped preamble). A user turn with the same text DOES add it.
+    const customDynamic = (custom?.systemPrompt ?? "").length;
+    const user = h.fire("before_agent_start", { messageType: "user", prompt: "refactor everything in the repo", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-flash"));
+    assert.equal(user?.systemPrompt, custom?.systemPrompt, "a custom run adds no dynamic hint");
+    assert.ok(String(custom?.systemPrompt ?? "").startsWith("DeepSeek V4"), "static family guidance still composes on custom runs");
+    assert.ok(customDynamic > "FULL".length, "static guidance present");
+  });
 });

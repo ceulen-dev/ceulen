@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "onyx",
 	"vars": {
 		"stone": "#0f0f14",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "veinDim",
 		"thinkingHigh": "vein",
 		"thinkingXhigh": "bronze",
-		"bashMode": "vein",
-		"statusLineBg": "band1",
-		"statusLineSep": "band3",
-		"statusLineModel": "vein",
-		"statusLinePath": "cream",
-		"statusLineGitClean": "emerald",
-		"statusLineGitDirty": "bronze",
-		"statusLineContext": "warmGray",
-		"statusLineSpend": "copper",
-		"statusLineStaged": "emerald",
-		"statusLineDirty": "bronze",
-		"statusLineUntracked": "warmGray",
-		"statusLineOutput": "cream",
-		"statusLineCost": "copper",
-		"statusLineSubagents": "vein",
-		"pythonMode": "#f0c040"
+		"bashMode": "vein"
 	},
 	"export": {
 		"pageBg": "stone",

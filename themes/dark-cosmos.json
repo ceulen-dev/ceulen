@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "dark-cosmos",
 	"vars": {
 		"void": "#040406",
@@ -65,22 +65,7 @@
 		"thinkingMedium": "galaxy",
 		"thinkingHigh": "nebula",
 		"thinkingXhigh": "starlight",
-		"bashMode": "starblue",
-		"statusLineBg": "#07070d",
-		"statusLineSep": "#26223a",
-		"statusLineModel": "nebula",
-		"statusLinePath": "starblue",
-		"statusLineGitClean": "success",
-		"statusLineGitDirty": "warning",
-		"statusLineContext": "muted",
-		"statusLineSpend": "galaxy",
-		"statusLineStaged": "success",
-		"statusLineDirty": "warning",
-		"statusLineUntracked": "starblue",
-		"statusLineOutput": "starlight",
-		"statusLineCost": "nebula",
-		"statusLineSubagents": "nebula",
-		"pythonMode": "#f0c040"
+		"bashMode": "starblue"
 	},
 	"export": {
 		"pageBg": "#07070d",

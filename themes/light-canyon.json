@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "light-canyon",
 	"vars": {
 		"canyonBg": "#F8F1EA",
@@ -66,22 +66,7 @@
 		"thinkingMedium": "ironRed",
 		"thinkingHigh": "riverTeal",
 		"thinkingXhigh": "pinonGreen",
-		"bashMode": "pinonGreen",
-		"statusLineBg": "#F2E8DD",
-		"statusLineSep": "canyonBorder",
-		"statusLineModel": "ironRed",
-		"statusLinePath": "riverTeal",
-		"statusLineGitClean": "pinonGreen",
-		"statusLineGitDirty": "sunsetOrange",
-		"statusLineContext": "mesaBrown",
-		"statusLineSpend": "ironRed",
-		"statusLineStaged": "pinonGreen",
-		"statusLineDirty": "sunsetOrange",
-		"statusLineUntracked": "riverTeal",
-		"statusLineOutput": "ironRed",
-		"statusLineCost": "sunsetOrange",
-		"statusLineSubagents": "ironRed",
-		"pythonMode": "#f0c040"
+		"bashMode": "pinonGreen"
 	},
 	"export": {
 		"pageBg": "#F8F1EA",

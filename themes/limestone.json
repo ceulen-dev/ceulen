@@ -1,5 +1,5 @@
 {
-	"$schema": "https://raw.githubusercontent.com/earendil-works/pi/main/packages/coding-agent/src/modes/interactive/theme/theme-schema.json",
+	"$schema": "https://pi.dev/schemas/theme.schema.json",
 	"name": "limestone",
 	"vars": {
 		"amber": "#a07840",
@@ -7,10 +7,8 @@
 		"warmBrown": "#907050",
 		"clay": "#886030",
 		"sediment": "#d4cec0",
-		"darkEarth": "#302c24",
 		"mediumEarth": "#504838",
 		"mutedSage": "#909080",
-		"lightSediment": "#e8e4d8",
 		"selectedBg": "#ebe6d4",
 		"userMsgBg": "#f0ece0",
 		"toolPendingBg": "#ebe8dc",
@@ -69,22 +67,7 @@
 		"thinkingMedium": "#a07840",
 		"thinkingHigh": "#886030",
 		"thinkingXhigh": "#704020",
-		"bashMode": "sage",
-		"statusLineBg": "#e8e4d8",
-		"statusLineSep": "#a0988c",
-		"statusLineModel": "#886030",
-		"statusLinePath": "#907050",
-		"statusLineGitClean": "#607040",
-		"statusLineGitDirty": "#a87040",
-		"statusLineContext": "#806848",
-		"statusLineSpend": "#708060",
-		"statusLineStaged": 100,
-		"statusLineDirty": 136,
-		"statusLineUntracked": 94,
-		"statusLineOutput": 130,
-		"statusLineCost": 130,
-		"statusLineSubagents": "amber",
-		"pythonMode": "amber"
+		"bashMode": "sage"
 	},
 	"export": {
 		"pageBg": "#f5f1e8",
