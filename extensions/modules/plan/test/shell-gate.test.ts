@@ -54,7 +54,7 @@ describe("plan shell gate — writers hard-block", () => {
     "git commit -m x",
     "git checkout main",
     "git config user.email x@y.z",
-    "echo $(date)",
+    "echo $(rm -rf x)",
     "echo a | xargs rm",
     "echo a | xargs --null rm",
   ]) {
@@ -78,6 +78,58 @@ describe("plan shell gate — unknown executables confirm", () => {
       if (cmd.startsWith("git ")) assert.equal(disposition, "read", cmd);
       else assert.equal(disposition, "confirm", cmd);
     });
+  }
+});
+
+// 2026-10-15 rework (plan 2026-10-15T08-50-03-167Z): the six false-block
+// classes mined from 2 weeks of session history. Each command below was a
+// REAL hard-block in a live session except the regression writers.
+describe("plan shell gate — false-block rework fixtures", () => {
+  const cases: Array<[string, "read" | "write" | "confirm"]> = [
+    // A6: sed s-command flag scan no longer parses file PATHS.
+    ["sed -n '800,845p' extensions/modules/plan/index.ts", "read"],
+    ["sed -n '1,12p' extensions/modules/web/index.ts", "read"],
+    // A5: bare `env` prints the environment.
+    [`env | grep -i "PI_"`, "read"],
+    ["env FOO=1 grep x f", "read"],
+    ["env rm -rf x", "write"],
+    // A1: quoted `<`/`>` are data, not redirects.
+    [`jq -r 'select(.timestamp > "2026-10-14") | .x' sessions.jsonl`, "read"],
+    [`grep -oE "CgroupNS[^<]{0,120}" page.html`, "read"],
+    // A2: substitution classifies its INNER command.
+    [`TOKEN=$(curl -s https://x.test/t); curl -s https://x.test/v`, "confirm"],
+    ["echo $(date)", "confirm"],
+    // Substitution AS the sed script is uninspectable (its w/e flags are
+    // runtime-computed) → confirm even with a read-only inner. REAL failing
+    // command from classifier.log (advisor-flagged A5 misreport, 2026-10-15):
+    [`sed -n "$(grep -n 'function planGateAutoRun' extensions/modules/plan/index.ts | cut -d: -f1),+2p" extensions/modules/plan/index.ts`, "confirm"],
+    // A3: process substitution demotes to confirm.
+    [`comm -23 <(ls themes/*.json | sort) <(jq -r '.x' themes/a.json)`, "confirm"],
+    // A4: heredoc feeding an interpreter is confirm, not write.
+    ["python3 - <<'EOF'\nprint(1)\nEOF", "confirm"],
+    // `<` file input reads a file — demote to confirm, never auto-read.
+    ["wc -l < notes.md", "confirm"],
+    // True writers stay hard-blocked.
+    ["echo hi > /tmp/x", "write"],
+    ["rm file.txt", "write"],
+    ["cat > newf.ts <<'EOF'\nx\nEOF", "write"],
+    ["cat <<EOF > x.md\nhello\nEOF", "write"],
+    // Controls (regression pins from the live probe).
+    ["diff pi-web/a.d.ts /Users/x/node_modules/a.d.ts", "read"],
+    ["R=/rel1/dist; L=/rel2/dist; diff \"$R/types.d.ts\" \"$L/types.d.ts\" | head -5", "read"],
+    ["node --import tsx -e \"console.log(1)\"", "confirm"],
+    ["npm test", "confirm"],
+    ["for f in ~/.pi/agent/sessions/*/*.jsonl; do jq -r '.x' \"$f\"; done", "confirm"],
+    ["git log --oneline | head -3", "read"],
+    ["grep -rn \"exposure\" pi-*/extensions/*.ts | head", "read"],
+    ["python3 -c 'import json; print(json.load(open(\"p.json\"))[\"a\"])'", "confirm"],
+    ["git diff --stat", "read"],
+    ["curl -s https://example.com | grep title", "confirm"],
+    ["which pi; pi --version 2>/dev/null", "confirm"],
+    ["wc -l extensions/modules/plan/index.ts", "read"],
+  ];
+  for (const [cmd, expected] of cases) {
+    it(`${expected}: ${cmd.split("\n")[0]}`, () => assert.equal(classifyCommand(cmd), expected, cmd));
   }
 });
 

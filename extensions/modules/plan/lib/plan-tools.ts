@@ -33,6 +33,17 @@ export const READ_ONLY_TOOLS = new Set([
   // Rendered-page accessibility audit — reads the page in a local headless
   // Chrome, mutates nothing.
   "web_a11y",
+  // Web research reads: search results, page→markdown, site URL map, page
+  // capture/PDF text. Plan mode IS research; these fetch remote content and
+  // write nothing (web_interact/web_crawl/web_research/web_image/web_chat
+  // act on external services and stay at the confirm tier).
+  "web_search", "web_extract", "web_map", "web_screenshot", "web_pdf",
+  // tool_search loads a deferred tool onto the request — no side effects; it
+  // is the only path to the deferred munin/web reads inside plan mode.
+  "tool_search",
+  // Todo phases persist session-transcript entries only (pi.appendEntry) —
+  // never the repo; OMP plans track phases while planning.
+  "todo",
   // PDF text extraction (vendored pdf.js, in-process) — reads a local file.
   "read_pdf",
   // Semantic find — read-only judging over the workspace; costs model calls

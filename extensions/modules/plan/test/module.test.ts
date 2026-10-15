@@ -109,6 +109,15 @@ describe("plan mode — tool gating", () => {
     const deny = await h.fire("tool_call", { toolName: "some_mcp_tool", input: {} }, h.ctx({ cwd: REPO, ui: { ...h.ctx().ui, select: async () => undefined } }));
     assert.equal(deny.block, true);
   });
+
+  it("2026-10-15 rework: web reads, tool_search, and todo auto-allow in plan mode", async () => {
+    const h = await start();
+    await h.commands.plan.handler("", h.ctx({ cwd: REPO }));
+    for (const toolName of ["web_search", "web_extract", "web_map", "web_screenshot", "web_pdf", "tool_search", "todo"]) {
+      const result = await h.fire("tool_call", { toolName, input: {} }, h.ctx({ cwd: REPO }));
+      assert.equal(result, undefined, `${toolName} must auto-allow (got ${JSON.stringify(result)})`);
+    }
+  });
 });
 
 describe("plan mode — classifier planGate", () => {
@@ -363,8 +372,11 @@ describe("plan mode — prompt + approval flow", () => {
     assert.match(h.newSessionMessages[0].content, /Execute the approved plan/);
 
     // Regression: re-entering plan mode after the handoff must NOT reuse the
-    // child's plan path — a new plan writes a NEW file.
+    // child's plan path — a new plan writes a NEW file. (2ms delay: two plans
+    // in the same millisecond share a `<timestamp>-<slug>` name and the test
+    // would flake on second-granularity file identity, not module logic.)
     await h.commands.plan.handler("", h.ctx({ cwd: REPO }));
+    await new Promise((r) => setTimeout(r, 2));
     await h.tools.write_plan.execute("tc2", { title: "Handoff", content: "v2" }, undefined, undefined, h.ctx({ cwd: REPO }));
     assert.equal(readSyncRecursive(join(REPO, ".pi", "plans")).filter((n) => n.includes("handoff")).length, 2, "fresh plan file, not an in-place refinement");
   });

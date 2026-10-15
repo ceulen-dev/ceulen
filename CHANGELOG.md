@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.19.0 — 2026-10-15
+
+Plan-mode false-block rework — mined from two weeks of session history
+(155 sessions: 54 hard-blocked read-only commands, 28 headless confirm-blocks,
+15 user rejects; several reproduced live during the analysis itself):
+
+- **plan/shell-gate**: `classifyCommand`'s redirect/substitution pre-check was
+  quote-blind and substitution-hostile. Six false-positive classes fixed:
+  `<`/`>` inside quoted strings (`jq 'select(.x > "1")'`, `grep -oE "[^<]"`)
+  are data, not redirects; `$(…)`/backticks/`<(…)` classify their INNER command
+  recursively (read inner → read, unknown → confirm, write inner → write)
+  instead of blanket-hard-block; heredocs feeding an interpreter
+  (`python3 - <<'EOF'`) demote from write-block to the confirm tier; bare
+  `env` (`env | grep -i PI_`) reads instead of writing; sed's s-command flag
+  scan no longer parses file PATHS (`…/modules/plan/index.ts` faked
+  `s/modules/plan/index` with flags containing `e`), is anchored against
+  word-char/`/`-preceded `s`, and treats a substitution AS the script as
+  uninspectable → confirm. True writers (`echo x > f`, `rm`, `cat > f <<EOF`)
+  stay hard-blocked. Regression fixture table pins 29 real commands from the
+  logs.
+- **plan/plan-tools**: `READ_ONLY_TOOLS` gains the research set —
+  `web_search`, `web_extract`, `web_map`, `web_screenshot`, `web_pdf`,
+  `tool_search`, `todo`. `web_interact`/`web_crawl`/`web_research`/
+  `web_image`/`web_chat` stay at the confirm tier (external side effects).
+- **classifier.planGate.observe**: recommended-first configuration step (a
+  settings change, not code): observe mode logs safe/unsafe verdicts for
+  confirm-tier commands to classifier.log under `ceulen-plan-gate`; review
+  before flipping `classifier.planGate.enabled` to auto-run safe commands
+  without prompting.
+- **test**: fix the plan handoff test flake (two `write_plan` calls in the
+  same millisecond shared a `<timestamp>-<slug>` filename; the test now
+  sleeps 2ms — the module keeps overwrite semantics).
+
 ## 0.18.0 — 2026-10-14
 
 pi 1.2.0 compatibility + the ask_user_question confirmation loop (incident
