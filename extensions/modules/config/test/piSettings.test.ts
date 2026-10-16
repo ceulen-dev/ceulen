@@ -12,6 +12,15 @@ const rowsOf = (m: SettingsManager) => buildPiSettingsGroups(m).flatMap((g) => g
 const rowAt = (m: SettingsManager, key: string) => rowsOf(m).find((r) => r.key === key)!;
 
 describe("pi settings contribution", () => {
+  it("session share destination row round-trips auto/gist/radius", () => {
+    const m = SettingsManager.inMemory();
+    assert.equal(rowAt(m, "pi.sessionShareDestination").value, "auto");
+    for (const v of ["gist", "radius", "auto"] as const) {
+      rowAt(m, "pi.sessionShareDestination").set(v);
+      assert.equal(m.getSessionShareDestination(), v);
+    }
+  });
+
   it("builds OMP-taxonomy tabs with unique keys and sections", () => {
     const groups = buildPiSettingsGroups(SettingsManager.inMemory());
     const keys = groups.flatMap((g) => g.rows.map((r) => r.key));

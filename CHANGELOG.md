@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.20.0 — 2026-10-16
+
+pi 1.3.0 compatibility pass (verified by diffing the 1.2.0 and 1.3.0
+releases surface by surface — ExtensionAPI types, root exports,
+SettingsManager, settings schema, stock settings-selector, pi-tui,
+agent-session tool restore): **no breaking changes**. The 1.3.0 delta is
+additive for every ceulen-coupled surface; the resumed-session tool-restore
+change runs before `session_start` and ceulen's append-only `tool_search`
+re-arm composes with it; the overlay `done()` fix (#10648) removes a real
+`/config`-overlay hazard when panels stack. Changes shipped:
+
+- **peerDependencies** for both `@earendil-works/pi-*` packages widened
+  `>=0.99.1 <1.3.0` → `>=0.99.1 <1.4.0` (the old range excluded pi 1.3.0,
+  breaking fresh installs on the current release).
+- **/config → Providers → Protocol** gains the `Session share destination`
+  row (`pi.sessionShareDestination`, auto/gist/radius) — stock-`/settings`
+  parity for pi 1.3.0's new `/share` destination setting (typed setter, so
+  it rides the existing SettingsManager save path).
+- AGENTS.md inline peer range updated to match.
+
 ## 0.19.0 — 2026-10-15
 
 Plan-mode false-block rework — mined from two weeks of session history

@@ -547,6 +547,12 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
       set: (v) => m.setTransport(str(v) as never),
     },
     {
+      key: "pi.sessionShareDestination", tab: "Providers", section: "Protocol", label: "Session share destination",
+      kind: "string", value: m.getSessionShareDestination(), values: ["auto", "gist", "radius"], defaultValue: "auto",
+      description: "Where to upload sessions with /share (auto prefers Radius when authenticated, otherwise GitHub Gist).",
+      set: (v) => m.setSessionShareDestination(str(v) as never),
+    },
+    {
       key: "pi.httpIdleTimeoutMs", tab: "Providers", section: "Timeouts", label: "HTTP idle timeout",
       kind: "string", value: httpTimeoutLabel(m.getHttpIdleTimeoutMs()), defaultValue: "5 min",
       description: "Maximum idle gap while waiting for HTTP headers or body chunks. Disable for local models that pause longer than five minutes.",
