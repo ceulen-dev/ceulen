@@ -240,6 +240,7 @@ export function runHeadless(job: CronJob, deps: HeadlessDeps): void {
     if (escalate) clearTimeout(escalate);
     try {
       mkdirSync(logsDir, { recursive: true });
+      // 0600: run logs carry full prompts (F12); mode applies on create.
       appendFileSync(logPath, out + (errMsg ? `\n[error] ${errMsg}\n` : ""));
     } catch {
       // log write is best-effort

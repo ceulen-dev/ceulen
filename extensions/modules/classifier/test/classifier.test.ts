@@ -320,6 +320,7 @@ function hookFixture(registry: RegistryStub, settings: Record<string, unknown> =
     const hookCtx = { ...fakeCtx, modelRegistry: registry };
     return {
       call: (command: string, ctx = hookCtx) => handlers.tool_call(bashEvent(command), ctx),
+      callEvent: (event: { toolName: string; input: Record<string, unknown> }, ctx = hookCtx) => handlers.tool_call(event, ctx),
       messageEnd: (content: unknown) => handlers.message_end({ message: { role: "user", content } }, {}),
       logPath: join(dir, "classifier.log"),
       cleanup: () => {
@@ -541,5 +542,29 @@ describe("config contribution", () => {
 
     // foreign keys → no-op
     await cfg.save(new Set(["router.baseUrl"]), { ui: { notify: () => {} }, cwd: "/p" } as never);
+  });
+});
+
+// F4 (security review 2026-10-17): a shell START runs shell:true with a
+// command — same exposure as bash, so the risky hook annotates it too.
+describe("permission hook — shell start parity (F4)", () => {
+  it("risky shell-start never reaches Jev; benign shell-start is consulted", async () => {
+    let classifyCalls = 0;
+    const counts = () => ({ classify: async () => { classifyCalls++; return { stopReason: "stop", answers: {} }; } });
+    const fx = await hookFixture(stubRegistry(counts()));
+    try {
+      const shellEvent = (input: Record<string, unknown>) => ({ toolName: "shell", input, toolCallId: "t2" });
+      // risky: static list refuses, no Jev round-trip
+      assert.equal(await fx.callEvent(shellEvent({ action: "start", command: "rm -rf /tmp/f4x" })), undefined);
+      assert.equal(classifyCalls, 0);
+      // benign: the hook consults Jev exactly like a bash call
+      await fx.callEvent(shellEvent({ action: "start", command: "git status" }));
+      assert.equal(classifyCalls, 1);
+      // non-start actions are not commands — never consulted
+      await fx.callEvent(shellEvent({ action: "output", shellId: "s1" }));
+      assert.equal(classifyCalls, 1);
+    } finally {
+      fx.cleanup();
+    }
   });
 });

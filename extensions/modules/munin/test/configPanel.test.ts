@@ -21,7 +21,7 @@ describe("buildMuninGroups", () => {
     assert.deepEqual(groups[0]!.rows.map((r) => r.key), ["munin.project", "munin.baseUrl", "munin.apiKey"]);
     const keyRow = groups[0]!.rows[2]!;
     assert.equal(keyRow.mask, true);
-    assert.match(keyRow.warning ?? "", /\.gitignore/);
+    assert.match(keyRow.warning ?? "", /\.env\.local/, "F7: the warning names the secret store");
     assert.equal(groups[0]!.rows[1]!.defaultValue, "https://munin.kalera.ai");
   });
 
@@ -104,6 +104,10 @@ describe("muninConfig save", () => {
     dirs = [];
     originalEnv = Object.fromEntries(ENV_KEYS.map((key) => [key, process.env[key]]));
     for (const key of ENV_KEYS) delete process.env[key];
+    // F7: the apiKey save writes <agentDir>/.env.local — point it at a
+    // throwaway dir so the test never touches the real one.
+    dirs.push(mkdtempSync(join(tmpdir(), "munin-agent-")));
+    process.env.PI_CODING_AGENT_DIR = dirs[dirs.length - 1];
     cwd = mkdtempSync(join(tmpdir(), "munin-save-"));
     dirs.push(cwd);
   });
@@ -131,7 +135,7 @@ describe("muninConfig save", () => {
     assert.equal(readFileSyncSafe(projectSettingsPath(cwd)), null);
   });
 
-  it("writes changed fields to the project file; untrusted save warns", async () => {
+  it("writes changed fields to the project file; the API key diverts to .env.local (F7)", async () => {
     const notes: { message: string; level?: string }[] = [];
     const contrib = muninConfig();
     // Simulate the panel edit: mutate the working copy the rows close over.
@@ -144,8 +148,10 @@ describe("muninConfig save", () => {
     const json = JSON.parse(readFileSync(projectSettingsPath(cwd), "utf8"));
     assert.equal(json.munin.project, "saved-project");
     assert.equal(json.munin.baseUrl, "https://saved.example.test");
-    assert.equal(json.munin.apiKey, "saved-key");
+    assert.equal(json.munin.apiKey, undefined, "F7: the key never lands in settings.json");
+    assert.equal(process.env.MUNIN_API_KEY, "saved-key", "F7: key mirrored into env (live session resolves it)");
     const note = notes[0]!;
+    assert.match(note.message, /\.env\.local/);
     assert.match(note.message, /saved to .*\.pi\/settings\.json/);
     assert.match(note.message, /NOT trusted/);
     assert.equal(note.level, "warning");

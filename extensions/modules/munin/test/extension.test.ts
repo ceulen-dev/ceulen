@@ -346,3 +346,34 @@ describe("loop dampener", () => {
     assert.equal(calls.length, 3);
   });
 });
+
+// F14 (security review 2026-10-17): validation runs BEFORE the dampener —
+// invalid calls return their validation error every time, never loop guidance.
+describe("validation before dampener (F14)", () => {
+  beforeEach(() => {
+    process.env.MUNIN_API_KEY = "key";
+    process.env.MUNIN_PROJECT = "project";
+  });
+
+  afterEach(() => {
+    delete process.env.MUNIN_API_KEY;
+    delete process.env.MUNIN_PROJECT;
+    delete (MuninClient.prototype as { invoke?: unknown }).invoke;
+  });
+
+  it("4 invalid munin_get calls all reject with the validation error", async () => {
+    const { tools, ctx } = harness();
+    const calls: string[] = [];
+    MuninClient.prototype.invoke = async function () { calls.push("invoke"); return { ok: true }; } as typeof MuninClient.prototype.invoke;
+    for (let i = 0; i < 4; i++) {
+      let msg = "";
+      try {
+        await tools.munin_get.execute("id", { key: "" }, undefined, undefined, ctx);
+      } catch (e) {
+        msg = (e as Error).message;
+      }
+      assert.match(msg, /key/i, "validation error, not loop guidance");
+    }
+    assert.equal(calls.length, 0);
+  });
+});

@@ -114,6 +114,51 @@ test("migrate: missing/corrupt settings.json is a silent no-op", () => {
   }
 });
 
+test("migrate: trusted project munin.apiKey moves to .env.local and is scrubbed (F7)", () => {
+  const dir = tmpDir();
+  const prevCwd = process.cwd();
+  const project = fs.mkdtempSync(path.join(os.tmpdir(), "ceulen-env-proj-"));
+  try {
+    // Isolation: a pi session that imported env.ts with a REAL ~/.pi/agent/.env.local
+    // has MUNIN_API_KEY already in process.env — onlyAbsent would keep it and the
+    // asserts below would see the ambient value, not the migrated one.
+    delete process.env.MUNIN_API_KEY;
+    // Trust the project cwd (keyed on the REAL path process.cwd() returns
+    // after chdir — path.resolve does not resolve symlinks), then give it a
+    // plaintext munin key.
+    process.chdir(project);
+    fs.writeFileSync(path.join(dir, "trust.json"), JSON.stringify({ [process.cwd()]: true }));
+    fs.mkdirSync(path.join(project, ".pi"), { recursive: true });
+    fs.writeFileSync(path.join(project, ".pi", "settings.json"), JSON.stringify({
+      munin: { apiKey: "proj-secret", project: "my-bank" },
+      other: { keep: true },
+    }));
+    migrateSecretsFromSettings();
+
+    const envText = fs.readFileSync(path.join(dir, ".env.local"), "utf8");
+    assert.match(envText, /MUNIN_API_KEY=proj-secret/, "project key migrated");
+    assert.equal(process.env.MUNIN_API_KEY, "proj-secret");
+
+    const raw = JSON.parse(fs.readFileSync(path.join(project, ".pi", "settings.json"), "utf8"));
+    assert.equal(raw.munin.apiKey, undefined, "the key is scrubbed");
+    assert.equal(raw.munin.project, "my-bank", "non-secret munin config stays");
+    assert.deepEqual(raw.other, { keep: true }, "sibling keys stay");
+
+    // Untrusted cwd: the key stays (an untrusted checkout's settings.json is
+    // never read at all — scrubbing it would change nothing effective).
+    fs.writeFileSync(path.join(dir, "trust.json"), JSON.stringify({ [process.cwd()]: false }));
+    fs.writeFileSync(path.join(project, ".pi", "settings.json"), JSON.stringify({ munin: { apiKey: "untrusted-secret" } }));
+    migrateSecretsFromSettings();
+    assert.equal(JSON.parse(fs.readFileSync(path.join(project, ".pi", "settings.json"), "utf8")).munin.apiKey, "untrusted-secret", "untrusted file untouched");
+  } finally {
+    process.chdir(prevCwd);
+    delete process.env.MUNIN_API_KEY;
+    fs.rmSync(dir, { recursive: true, force: true });
+    fs.rmSync(project, { recursive: true, force: true });
+    delete process.env.PI_CODING_AGENT_DIR;
+  }
+});
+
 test("writeSecretEnvs: upsert + create + onlyAbsent semantics, 0600", () => {
   const dir = tmpDir();
   try {

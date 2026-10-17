@@ -21,6 +21,66 @@ import { execFile } from "node:child_process";
 
 export type CommandDisposition = "read" | "write" | "confirm";
 
+/** Bash-faithful close test for the quote char at index `i` (quote is open).
+ *  Single quotes close on ANY `'` — backslash is a literal character inside
+ *  them. A double quote closes only when the run of backslashes immediately
+ *  before it is EVEN: `"a\\"` is literal-backslash + close, `"a\"` is an
+ *  escaped quote and stays open. The single-char `cmd[i-1] !== "\\"` peek
+ *  this replaces got both rules wrong (phantom-quote exploit class). */
+function quoteCloses(cmd: string, i: number, quote: "'" | '"'): boolean {
+  if (quote === "'") return true;
+  let backslashes = 0;
+  for (let k = i - 1; k >= 0 && cmd[k] === "\\"; k--) backslashes++;
+  return backslashes % 2 === 0;
+}
+
+/** Read one substitution (`$(…)`, backtick, `<(…)`, `>(…)`) starting at
+ *  `start` (the opener's first char). Walks to the matching close: paren
+ *  depth for the paren forms, escape- and quote-aware inside (single quotes
+ *  close on any `'`, double quotes on an even backslash run). Unclosed spans
+ *  read to end. `next` = index of the first char AFTER the close. */
+function readSubstitution(cmd: string, start: number): { inner: string; next: number } {
+  const opener = cmd[start] === "`"
+    ? "`"
+    : cmd[start] === "$" && cmd[start + 1] === "("
+      ? "$("
+      : `${cmd[start]}(`; // `<(` or `>(`
+  let depth = 1;
+  let innerQuote: "'" | '"' | null = null;
+  let inner = "";
+  let j = start + opener.length;
+  for (; j < cmd.length && depth > 0; j++) {
+    const c = cmd[j];
+    if (innerQuote) {
+      inner += c;
+      if (c === innerQuote && quoteCloses(cmd, j, innerQuote)) innerQuote = null;
+      continue;
+    }
+    if (c === "\\") {
+      inner += c;
+      if (j + 1 < cmd.length) { inner += cmd[j + 1]; j++; }
+      continue;
+    }
+    if (c === "'" || c === '"') { innerQuote = c; inner += c; continue; }
+    if (opener === "`") {
+      if (c === "`") depth = 0;
+    } else if (c === "(") depth++;
+    else if (c === ")") depth--;
+    inner += depth > 0 ? c : "";
+  }
+  return { inner, next: j };
+}
+
+/** Substitution openers that EXECUTE — outside quotes: `$(`, backtick,
+ *  `<(`, `>(`. */
+function substitutionOpener(cmd: string, i: number): string | null {
+  const ch = cmd[i];
+  if (ch === "`") return "`";
+  if (ch === "$" && cmd[i + 1] === "(") return "$(";
+  if ((ch === "<" || ch === ">") && cmd[i + 1] === "(") return `${ch}(`;
+  return null;
+}
+
 /** Split a shell command on separators (; & | and raw line breaks) that are OUTSIDE quotes. */
 export function splitShellSegments(cmd: string): string[] {
   const segments: string[] = [];
@@ -30,7 +90,13 @@ export function splitShellSegments(cmd: string): string[] {
     const ch = cmd[i];
     if (quote) {
       cur += ch;
-      if (ch === quote) quote = null;
+      if (ch === quote && quoteCloses(cmd, i, quote)) quote = null;
+    } else if (ch === "\\") {
+      // Outside quotes a backslash escapes the NEXT character (`\'`, `\"`,
+      // `\;` are literal two-char sequences — no quote opens, nothing
+      // separates). Escaped-quote phantom-quote exploit class, fixed.
+      cur += ch;
+      if (i + 1 < cmd.length) { cur += cmd[i + 1]; i++; }
     } else if (ch === "'" || ch === '"') {
       quote = ch;
       cur += ch;
@@ -123,14 +189,17 @@ function quotedSpans(cmd: string): string[] {
   const spans: string[] = [];
   let quote: "'" | '"' | null = null;
   let cur = "";
-  for (const ch of cmd) {
+  for (let i = 0; i < cmd.length; i++) {
+    const ch = cmd[i];
     if (quote) {
       cur += ch;
-      if (ch === quote) {
+      if (ch === quote && quoteCloses(cmd, i, quote)) {
         spans.push(cur);
         cur = "";
         quote = null;
       }
+    } else if (ch === "\\") {
+      i++; // escaped char outside quotes — never a quote opener
     } else if (ch === "'" || ch === '"') {
       quote = ch;
     }
@@ -242,35 +311,28 @@ function findExecutingSubstitutions(cmd: string): string[] {
   for (let i = 0; i < cmd.length; i++) {
     const ch = cmd[i];
     if (quote) {
-      if (ch === quote && cmd[i - 1] !== "\\") quote = null;
+      if (ch === quote && quoteCloses(cmd, i, quote)) { quote = null; continue; }
+      // Single quotes are literal — nothing executes inside them. Inside
+      // DOUBLE quotes `$()` and backticks STILL EXECUTE (bash), so keep
+      // scanning for live openers there (`echo "$(rm -rf x)"` runs the rm).
+      if (quote === "'") continue;
+      const dqOpener = ch === "`" ? "`" : ch === "$" && cmd[i + 1] === "(" ? "$(" : null;
+      if (!dqOpener) continue;
+      const r = readSubstitution(cmd, i);
+      inners.push(r.inner);
+      i = r.next - 1;
       continue;
     }
+    if (ch === "\\") { i++; continue; }
     if (ch === "'" || ch === '"') {
       quote = ch;
       continue;
     }
-    const opener = ch === "`" ? "`" : ch === "$" && cmd[i + 1] === "(" ? "$(" : (ch === "<" || ch === ">") && cmd[i + 1] === "(" ? ch + "(" : null;
+    const opener = substitutionOpener(cmd, i);
     if (!opener) continue;
-    // Walk to the matching close (paren depth, or the closing backtick),
-    // single-quote-aware inside so `'` in the payload doesn't strand us.
-    let depth = 1;
-    let j = i + opener.length;
-    let inner = "";
-    let innerQuote: "'" | '"' | null = null;
-    for (; j < cmd.length && depth > 0; j++) {
-      const c = cmd[j];
-      if (innerQuote) {
-        if (c === innerQuote && cmd[j - 1] !== "\\") innerQuote = null;
-      } else if (c === "'" || c === '"') {
-        innerQuote = c;
-      } else if (opener === "`") {
-        if (c === "`") depth = 0;
-      } else if (c === "(") depth++;
-      else if (c === ")") depth--;
-      inner += depth > 0 ? c : "";
-    }
-    inners.push(inner);
-    i = j - 1;
+    const r = readSubstitution(cmd, i);
+    inners.push(r.inner);
+    i = r.next - 1;
   }
   return inners;
 }
@@ -306,9 +368,10 @@ export function classifyCommand(cmd: string): CommandDisposition {
   for (let i = 0; i < c.length; i++) {
     const ch = c[i];
     if (quote) {
-      if (ch === quote && c[i - 1] !== "\\") quote = null;
+      if (ch === quote && quoteCloses(c, i, quote)) quote = null;
       continue;
     }
+    if (ch === "\\") { i++; continue; }
     if (ch === "'" || ch === '"') {
       quote = ch;
       continue;
@@ -332,6 +395,10 @@ export function classifyCommand(cmd: string): CommandDisposition {
       inputRedirect = true; // `<` file input or `<(…)`, `>(…)` — executes/reads, demotes
     }
   }
+  // Dangling quote (unclosed at end — `echo 'it\'s'`, `ls "a\" ; rm x`):
+  // bash rejects the command, and a quote state we cannot trust must never
+  // auto-run. Confirm, never read.
+  if (quote) return "confirm";
   const sub = substitutionDisposition(c);
   if (sub === "write") return "write";
   // `sort --output` — the one flag-form file writer checked pre-split.

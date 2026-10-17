@@ -87,8 +87,9 @@ export function saveJobs(dir: string, jobs: CronJob[]): void {
   // ponytail: no cross-process lock — single session per agentDir assumed;
   // concurrent sessions can lose edits/double-fire (documented in README).
   mkdirSync(dir, { recursive: true });
+  // 0600: jobs.json carries full prompts (F12).
   const tmp = join(dir, `.jobs.json.tmp-${process.pid}`);
-  writeFileSync(tmp, JSON.stringify({ jobs }, null, 2) + "\n");
+  writeFileSync(tmp, JSON.stringify({ jobs }, null, 2) + "\n", { mode: 0o600 });
   renameSync(tmp, jobsPath(dir));
 }
 

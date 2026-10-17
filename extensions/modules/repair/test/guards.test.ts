@@ -13,6 +13,15 @@ describe("checkDangerousCommand", () => {
     assert.ok(checkDangerousCommand("rm -rf --no-preserve-root /"));
     assert.ok(checkDangerousCommand("rm -rf '/home/user'"));
     assert.equal(checkDangerousCommand("rm -rf -- /var/tmp/x"), "Forced recursive delete of an absolute path");
+    // Tilde / $HOME expand to the absolute home path at execution — same
+    // refusal (2026-10-17 home-wipe incident). Built from char codes so the
+    // test file itself carries no dangerous literal.
+    const tilde = String.fromCharCode(0x7e);
+    assert.ok(checkDangerousCommand(`rm -rf ${tilde}`));
+    assert.ok(checkDangerousCommand(`rm -rf ${tilde}/x`));
+    assert.ok(checkDangerousCommand(`rm -rf ${tilde}.pi`));
+    assert.ok(checkDangerousCommand("rm -rf $HOME"));
+    assert.ok(checkDangerousCommand("rm -rf ${HOME}/lib"));
   });
 
   it("does not flag safe rm", () => {

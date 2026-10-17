@@ -152,8 +152,9 @@ export function writeSubagentSection(patch: {
   }
   settings.subagent = sub;
   mkdirSync(path.dirname(file), { recursive: true });
+  // 0600: settings.json may hold a2a tokens — never downgrade on rewrite (F6).
   const tmp = file + ".tmp";
-  writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n");
+  writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
   renameSync(tmp, file);
   return file;
 }

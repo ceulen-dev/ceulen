@@ -356,10 +356,12 @@ function makeTools(dampenCheck: (name: string, params: Record<string, unknown>) 
         ),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
-        const dampened = dampenCheck("munin_search", params as Record<string, unknown>);
-        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { query, topK = 10, tags, tag_mode, since, before, include_total } = params as Record<string, any>;
         validateSearchQuery(query);
+        // F14: validation BEFORE the dampener - an invalid call must return
+        // its validation error, never loop guidance.
+        const dampened = dampenCheck("munin_search", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const tagMode = validateTagMode(tag_mode);
         const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
           const searchParams: Record<string, unknown> = { query, topK };
@@ -390,10 +392,11 @@ function makeTools(dampenCheck: (name: string, params: Record<string, unknown>) 
         key: Type.String({ description: "Key to retrieve." }),
       }),
       async execute(_id, params, _signal, _onUpdate, ctx) {
-        const dampened = dampenCheck("munin_get", params as Record<string, unknown>);
-        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const { key: rawKey } = params as Record<string, any>;
         const key = validateMemoryKey(rawKey);
+        // F14: validation BEFORE the dampener (see munin_search).
+        const dampened = dampenCheck("munin_get", params as Record<string, unknown>);
+        if (dampened) return { content: [{ type: "text" as const, text: dampened.text }], details: { dampened: true, ...dampened } };
         const result = await withMuninClient(params as Record<string, unknown>, async (client, projectId) => {
           return callMunin(client, projectId, "get", { key });
         }, ctx);

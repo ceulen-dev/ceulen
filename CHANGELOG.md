@@ -1,5 +1,63 @@
 # Changelog
 
+## 0.21.0 — 2026-10-17
+
+Security-review pass — 18 findings (1 critical, 5 high, 7 medium, 5 low),
+all verified against code and now fixed. Every finding carries a regression
+test; the plan-mode shell gate also gained live-tested hardening after the
+F1 exploit class was executed against a real session during the review
+(the home-wipe incident — see the shell-gate entry).
+
+- **plan/shell-gate (F1, critical)**: backslash handling in the quote
+  scanners created a *phantom-quote* bypass — `ls \" ; rm …` classified
+  `read` and **auto-ran in plan mode**. One shared bash-faithful helper
+  (`quoteCloses`: single quotes close on any `'`; double quotes on an EVEN
+  backslash run) now drives all four scanners; escaped quotes outside
+  quotes never open spans; `$()`/backticks inside double quotes still scan
+  as live; dangling quotes classify confirm, never read.
+- **plan gating (F2/F3/F11/F13/F15)**: a session allow ("npm test") can no
+  longer auto-run a RISKY command on the same first token ("npm publish");
+  subagent auto-allow resolves at the scope the tool actually runs (a
+  read-only project agent can no longer shadow a full-write bundled
+  namesake); the planGate static pre-check also tests a de-quoted copy
+  (`curl … | 'b''a''s''h'` never reaches Jev; `cargo publish`, `twine
+  upload`, `gem push` join the classifier RISKY list); the textconv
+  diff-driver probe is awaited before bash classification (kills the `git
+  log -p` read race); `session_tree` resets the ask-loop dampener.
+- **shell tool parity (F4)**: a `shell action:"start"` is a shell command —
+  permission `bash` rules now apply to it (deny blocks, ask shows the
+  command, session promotions key under bash) and the classifier risky hook
+  annotates it like bash.
+- **file modes (F5/F6/F12)**: permission allowlist persist, subagent
+  settings, cron jobs.json + run logs, and a2a transcripts (dir 0700) write
+  0600; subagent history switched to atomic tmp+rename 0600.
+- **munin apiKey (F7)**: the API key never lands in the git-trackable
+  project `.pi/settings.json` — the /config save diverts to
+  `<agentDir>/.env.local` (0600, mirrored live into the session env), and
+  the startup secret migration scrubs a plaintext key from a trusted
+  project file.
+- **jfind containment (F8)**: symlink entries are never followed
+  (lstat + skip in both walk branches, single-file symlink scopes yield
+  nothing) and the `path` scope must stay inside the workspace — file
+  contents ship to the classifier, so the scope is a content boundary.
+- **sg path validation (F9)**: flag-shaped paths (`paths:["-U"]` turned a
+  dry-run into a silent write) and cwd escapes are rejected; a `--`
+  separator guards every path list.
+- **herdr evidence + resources (F10/F16)**: a pane echoing the submitted
+  prompt back no longer counts as completion evidence (echo-stripped tails
+  must carry a remainder); report reads cap before buffering (256 KB);
+  evidence polls back off 1s→2s→5s; the herdr tool's prompt-wait timeout is
+  clamped to the documented 60-min ceiling.
+- **smaller fixes (F14/F17/F18)**: munin validation runs before the loop
+  dampener (invalid calls return validation errors, not loop guidance);
+  the ChatGPT OAuth refresh fetch gets a 15s timeout; the a2a gateway
+  reverse-channel dispatch gets a 120s timeout.
+- **test hygiene (home-wipe incident)**: shell-gate exploit fixtures now
+  target sacrificial `/tmp` paths (never `~`/`$HOME`), a meta-test keeps the
+  fixture file free of home-pointing `rm` lines, and the repair bash guard
+  treats `~`, `$HOME`, `${HOME}` as absolute paths in its recursive-force
+  delete refusal (live-verified: the pre-fix guard waved `rm -rf ~` through).
+
 ## 0.20.0 — 2026-10-16
 
 pi 1.3.0 compatibility pass (verified by diffing the 1.2.0 and 1.3.0

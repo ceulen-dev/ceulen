@@ -6,7 +6,7 @@
 // budgets, and constants.
 
 import { basename } from "node:path";
-import { statSync } from "node:fs";
+import { lstatSync } from "node:fs";
 import {
   fileScore,
   grepIndex,
@@ -375,7 +375,10 @@ class Cascade {
  *  scope used to list zero files and report "no hits" silently. Wrap it as a
  *  one-entry walk so the documented scope works. Exported for tests. */
 export function scopeFiles(root: string): FileEntry[] {
-  const st = statSync(root);
+  // lstat + regular-file check (F8): a single-file scope must not be a
+  // symlink (its target could ship out-of-tree contents to the classifier).
+  const st = lstatSync(root);
+  if (st.isSymbolicLink()) return [];
   if (!st.isDirectory()) {
     const rel = basename(root);
     return eligibleFile(rel, st.size, rel.startsWith(".")) ? [{ path: root, rel, size: st.size }] : [];

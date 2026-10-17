@@ -835,6 +835,9 @@ export class ChannelClient {
         method: env.method,
         headers,
         body: ["GET", "HEAD"].includes(env.method) ? undefined : binary,
+        // F18: the reverse-channel dispatch must not leak an inflight promise
+        // when the local server never answers.
+        signal: AbortSignal.timeout(120_000),
       });
       const buf = new Uint8Array(await res.arrayBuffer());
       if (buf.length > MAX_CHANNEL_BODY) {

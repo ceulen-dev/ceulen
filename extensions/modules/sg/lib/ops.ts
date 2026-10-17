@@ -7,6 +7,8 @@
 //   run -p PAT -r REW … (no -U) → per-file diff preview (dry-run).
 //   run -p PAT -r REW … -U      → writes files, prints NOTHING on success.
 
+import { isAbsolute as pathIsAbsolute, relative as relPath, resolve } from "node:path";
+
 export interface SgMatch {
   file: string;
   /** 1-based (converted from sg's 0-based range). */
@@ -38,6 +40,7 @@ export function buildRunArgs(opts: {
   paths?: string[];
   update?: boolean;
   json?: boolean;
+  cwd?: string;
 }): string[] {
   const args = ["run", "-p", opts.pattern];
   if (opts.rewrite !== undefined) args.push("-r", opts.rewrite);
@@ -45,7 +48,18 @@ export function buildRunArgs(opts: {
   for (const g of opts.globs ?? []) args.push("--globs", g);
   if (opts.update) args.push("-U");
   if (opts.json) args.push("--json=compact");
-  args.push(...(opts.paths && opts.paths.length > 0 ? opts.paths : ["."]));
+  // F9 (security review 2026-10-17): path text must never parse as a flag —
+  // `paths: ["-U"]` would turn a dry-run into a silent disk write. Reject
+  // flag-shaped paths and anything escaping cwd, then push a `--` separator.
+  const paths = opts.paths && opts.paths.length > 0 ? opts.paths : ["."];
+  for (const p of paths) {
+    if (/^-/.test(p)) throw new Error(`path looks like a flag: ${p}`);
+    if (opts.cwd) {
+      const rel = relPath(opts.cwd, resolve(opts.cwd, p));
+      if (rel.startsWith("..") || pathIsAbsolute(rel)) throw new Error(`path must be inside the workspace: ${p}`);
+    }
+  }
+  args.push("--", ...paths);
   return args;
 }
 

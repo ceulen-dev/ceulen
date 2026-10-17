@@ -26,7 +26,10 @@ export function checkDangerousCommand(command: unknown): string | undefined {
   for (const [, args] of trimmed.matchAll(/\brm\s+([^;&|\n]+)/g)) {
     const recursive = /(?:^|\s)(?:-[a-z]*r[a-z]*|--recursive)(?:\s|$)/.test(args);
     const forced = /(?:^|\s)(?:-[a-z]*f[a-z]*|--force)(?:\s|$)/.test(args);
-    const absolute = /(?:^|\s)(?:--\s+)?(?:["']\/[^"']*["']|\/\S*)(?:\s|$)/.test(args);
+    // Tilde and $HOME expand to an absolute path (the home directory) at
+    // execution — treat them as absolute too. 2026-10-17 incident: `rm -rf ~`
+    // passed the slash-only check and deleted the home directory.
+    const absolute = /(?:^|\s)(?:--\s+)?(?:["'](?:\/[^"']*|~[^"']*)["']|\/\S*|~(?:\/\S*)?|\$\{home\}|\$home\b)/.test(args);
     if (recursive && forced && absolute) return "Forced recursive delete of an absolute path";
   }
   if (/\bdd\b[^\n;&|]*\bof=["']?\/dev\/(?:sd[a-z]\d*|vd[a-z]\d*|xvd[a-z]\d*|nvme\d+n\d+(?:p\d+)?|mmcblk\d+(?:p\d+)?|disk\d+|rdisk\d+|loop\d+|md\d+|mapper\/[a-z0-9._+-]+)\b/.test(trimmed)) return "Destructive dd write to a block device";

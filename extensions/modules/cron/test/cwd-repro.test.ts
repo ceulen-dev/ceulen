@@ -15,7 +15,7 @@
  * same fire() closure, so pinning execute() pins both paths.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, realpathSync } from "node:fs";
+import { mkdtempSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -94,5 +94,14 @@ describe("cwd guard — unpinned fires must not run in a foreign-cwd session", (
         process.env.PI_CRON_DISABLED = prevCronDisabled;
       }
     }
+  });
+});
+
+// F12 (security review 2026-10-17): the job store carries full prompts.
+describe("job store file mode", () => {
+  it("jobs.json is created 0600", () => {
+    const store = mkdtempSync(join(tmpdir(), "cron-mode-"));
+    saveJobs(store, [{ id: "j1", name: "x", schedule: "0 9 * * *", prompt: "p", enabled: true, created: 0, nextRun: 1 } as never]);
+    assert.equal(statSync(join(store, "jobs.json")).mode & 0o777, 0o600, "jobs.json must be 0600");
   });
 });

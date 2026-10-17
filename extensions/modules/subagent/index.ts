@@ -2154,7 +2154,9 @@ ${lines.join("\n")}`;
           // (report file — or inline reply for read-only children).
           const text = entry ? wrapTaskPrompt(params.text, entry.resultFile, entry.readOnly) : params.text;
           if (params.wait) {
-            const timeoutMs = params.timeout ?? 120_000;
+            // F16: the schema documents the 60-min ceiling — clamp, don't
+            // trust, the model-supplied timeout.
+            const timeoutMs = Math.min(params.timeout ?? 120_000, MAX_TIMEOUT_MS);
             const fileStampBefore = entry
               ? await fs.stat(entry.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "")
               : "";

@@ -10,7 +10,7 @@
  * are marked `interrupted` — honest about the architectural ceiling.
  */
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 // ---------------------------------------------------------------------------
@@ -84,7 +84,11 @@ export function appendHistory(piDir: string, entry: HistoryEntry): void {
 export function writeHistory(piDir: string, entries: HistoryEntry[]): void {
   const file = getHistoryPath(piDir);
   mkdirSync(dirname(file), { recursive: true });
-  writeFileSync(file, `${JSON.stringify(entries, null, 2)}\n`, "utf-8");
+  // tmp+rename at 0600 (F12): task text is sensitive AND a crash mid-write
+  // must not truncate the history file.
+  const tmp = `${file}.tmp-${process.pid}`;
+  writeFileSync(tmp, `${JSON.stringify(entries, null, 2)}\n`, { encoding: "utf-8", mode: 0o600 });
+  renameSync(tmp, file);
 }
 
 export function findHistory(piDir: string, id: string): HistoryEntry | undefined {

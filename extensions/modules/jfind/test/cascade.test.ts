@@ -2,7 +2,7 @@
 // network; the classifier is injected through the Judge seam.
 
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -356,5 +356,32 @@ describe("cascade", () => {
     const sliced = readTextFile(big, 1024);
     assert.equal(sliced.truncated, true);
     assert.ok(Buffer.byteLength(sliced.text) <= 1024 + 8, "slice ends on a line boundary");
+  });
+});
+
+// ── F8 (security review 2026-10-17): symlinks never escape the root ──────
+
+describe("F8 symlink + scope containment", () => {
+  it("listFiles skips symlinks pointing outside the root", () => {
+    const outDir = mkdtempSync(path.join(tmpdir(), "ceulen-jfind-out-"));
+    const secret = path.join(outDir, "secret.txt");
+    writeFileSync(secret, "top secret");
+    const root = mkdtempSync(path.join(tmpdir(), "ceulen-jfind-root-"));
+    writeFileSync(path.join(root, "real.txt"), "hello");
+    try {
+      symlinkSync(secret, path.join(root, "leak.txt"));
+    } catch {
+      return; // filesystem without symlink support
+    }
+    try {
+    const listed = listFiles(root);
+    assert.ok(listed.some((e) => e.rel === "real.txt"), "real file listed");
+    assert.ok(!listed.some((e) => e.rel === "leak.txt"), "symlink excluded from the walk");
+    // single-file symlink scope yields nothing
+    assert.deepEqual(scopeFiles(path.join(root, "leak.txt")), [], "symlink file scope refused");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+      rmSync(outDir, { recursive: true, force: true });
+    }
   });
 });

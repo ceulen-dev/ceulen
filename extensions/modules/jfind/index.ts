@@ -3,8 +3,8 @@
 // modelRegistry.classify (System One via the router provider).
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { existsSync, statSync } from "node:fs";
-import { resolve as resolvePath } from "node:path";
+import { existsSync, lstatSync } from "node:fs";
+import { relative as relPath, resolve as resolvePath } from "node:path";
 import { Type } from "typebox";
 import { formatBytes } from "./lib/format.js";
 import { runCascade, FIND_TIMEOUT_MS, type CascadeResult } from "./lib/cascade.js";
@@ -46,8 +46,17 @@ export default function jfindModule(pi: ExtensionAPI): void {
       let root = resolvePath(cwd);
       if (scopeInput.length > 0) {
         root = resolvePath(cwd, scopeInput);
+        // F8: the scope is a content boundary — file contents ship to the
+        // third-party classifier, so the root must stay inside the workspace
+        // (the fff contract). resolvePath against cwd first, so absolute
+        // paths inside cwd still work; escapes and out-of-tree absolutes throw.
+        const rel = relPath(cwd, root);
+        if (rel.startsWith("..") || rel === "" || (root.length > cwd.length && !root.startsWith(cwd + "/") && !root.startsWith(cwd + "\\"))) {
+          throw new Error(`Path must be inside the workspace: ${scopeInput}`);
+        }
         if (!existsSync(root)) throw new Error(`Path not found: ${scopeInput}`);
-        if (!statSync(root).isFile() && !statSync(root).isDirectory()) {
+        const st = lstatSync(root);
+        if (st.isSymbolicLink() || (!st.isFile() && !st.isDirectory())) {
           throw new Error(`Path is neither a file nor a directory: ${scopeInput}`);
         }
       }
@@ -81,7 +90,7 @@ export default function jfindModule(pi: ExtensionAPI): void {
       }
       // A single-file scope that lists zero eligible files used to fall through
       // to a silent "no hits" — surface the eligibility refusal instead.
-      if (result.stats.listed === 0 && scopeInput.length > 0 && statSync(root).isFile()) {
+      if (result.stats.listed === 0 && scopeInput.length > 0 && lstatSync(root).isFile()) {
         return {
           content: [{ type: "text", text: `not searchable: ${scopeInput} (deny-listed, binary, secret, or empty by jfind's eligibility rules)` }],
           details: { query },

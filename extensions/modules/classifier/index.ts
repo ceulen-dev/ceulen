@@ -42,6 +42,7 @@ const RISKY = [
   /\bgit\s+push\b[^|;&]*--force/, /\bgit\s+push\s+-f\b/, /\bgit\s+reset\s+--hard\b/,
   /curl[^|;&]*\|\s*(ba)?sh/, /wget[^|;&]*\|\s*(ba)?sh/, // pipe-to-shell
   /\b(npm|pnpm|yarn|bun)\s+publish\b/, /\bgh\s+release\s+(create|upload)\b/,
+  /\bcargo\s+publish\b/, /\btwine\s+upload\b/, /\bgem\s+push\b/,
   /\bterraform\s+(apply|destroy)\b/, /\bkubectl\s+(delete|apply)\b/,
   /(^|\s)~?\/?\.?(ssh|aws|gnupg|kube)(\/|$)/, /id_rsa|\.pem\b|credentials\b/i,
 ];
@@ -263,7 +264,10 @@ export default function (pi: ExtensionAPI) {
   const CLASSIFIER_HOOK_BUDGET_MS = 2_500;
 
   pi.on("tool_call", async (event, ctx) => {
-    if (event.toolName !== "bash") return undefined;
+    // F4: a shell tool START runs a shell command with shell:true — the same
+    // exposure as bash, so it gets the same risky-hook annotation.
+    const isShellStart = event.toolName === "shell" && event.input?.action === "start";
+    if (event.toolName !== "bash" && !isShellStart) return undefined;
     const command = String(event.input?.command || "");
     if (!command) return undefined;
 

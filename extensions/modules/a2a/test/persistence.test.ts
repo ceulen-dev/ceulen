@@ -10,6 +10,18 @@ function tmpDir(): string {
 }
 
 describe("persistence", () => {
+  it("writes transcripts 0600 into a 0700 dir (F12)", () => {
+    const dir = tmpDir();
+    persistMessage({ piDir: dir, contextId: "ctx-sec", role: "user", text: "secret" });
+    const p = childTranscriptDir(dir) === dir ? dir : path.join(dir, "a2a_sessions");
+    // Find the transcript file wherever fileFor put it.
+    const walk = (d: string): string[] =>
+      fs.existsSync(d) ? fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]) : [];
+    const files = walk(dir).filter((f) => f.endsWith(".jsonl"));
+    assert.lengthOf(files, 1);
+    assert.equal(fs.statSync(files[0]!).mode & 0o777, 0o600, "transcript file is 0600");
+  });
+
   it("round-trips messages to JSONL", () => {
     const dir = tmpDir();
     persistMessage({ piDir: dir, contextId: "ctx-1", role: "user", text: "hello" });

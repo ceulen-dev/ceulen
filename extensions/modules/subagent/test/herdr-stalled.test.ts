@@ -115,3 +115,42 @@ test("no regression: plain timeout still short-circuits before the stalled branc
   assert.match(outcome.error ?? "", /timeout/);
   assert.equal(calls.filter((c) => c.args[1] === "read").length, 0);
 });
+
+// F10 (security review 2026-10-17): a pane merely echoing the submitted
+// prompt back must NOT settle as evidence — the child produced no output.
+test("echo-only tail times out instead of settling (F10)", async () => {
+  const P = "Summarize the ledger for October and reply with your full final report.";
+  const echo = `> ${P}\n`;
+  const calls: Call[] = [];
+  const script = new Map<string, FakeRes[]>([
+    ["agent prompt", [STALLED]],
+    // Every poll returns exactly the wrapped prompt - changed from baseline,
+    // then perfectly quiet: the pre-fix quiescence rule would settle here.
+    ["agent read", [{ code: 0, stdout: echo }]],
+  ]);
+  const outcome = await promptAndWait({
+    name: "a1", text: P, timeoutMs: 5000, exec: fakeExec(script, calls),
+    evidence: { resultFile: tmpResultFile(), readOnly: true, stamp: { fileStamp: "", paneTail: "PRE-PROMPT" }, promptText: P, graceMs: 300 },
+  });
+  assert.equal(outcome.delivered, true);
+  assert.match(outcome.error ?? "", /timeout/, "echo-only tails never settle - timeout semantics");
+});
+
+test("echo followed by real reply content still settles (F10 does not over-block)", async () => {
+  const P = "Report the build status.";
+  const tail = `> ${P}\nThe build is green; 41 checks passed.\n`;
+  const calls: Call[] = [];
+  const script = new Map<string, FakeRes[]>([
+    ["agent prompt", [STALLED]],
+    // Repeat the tail: quiescence needs 3 identical polls, and an exhausted
+    // script would answer "" and reset the stability counter instead.
+    ["agent read", [{ code: 0, stdout: tail }, { code: 0, stdout: tail }, { code: 0, stdout: tail }, { code: 0, stdout: tail }, { code: 0, stdout: tail }, { code: 0, stdout: tail }]],
+    ["agent get", [{ code: 0, stdout: idleInfo }]],
+  ]);
+  const outcome = await promptAndWait({
+    name: "a1", text: P, timeoutMs: 5000, exec: fakeExec(script, calls),
+    evidence: { resultFile: tmpResultFile(), readOnly: true, stamp: { fileStamp: "", paneTail: "PRE" }, promptText: P, graceMs: 5000 },
+  });
+  assert.equal(outcome.delivered, true);
+  assert.equal(outcome.error, undefined, "output beyond the echo settles normally");
+});

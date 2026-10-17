@@ -14,6 +14,7 @@ import {
   projectSettingsPath,
   writeMuninSection,
 } from "./lib/helpers.js";
+import { writeSecretEnvs } from "../../lib/env.js";
 
 export interface MuninSettings {
   project: string;
@@ -63,7 +64,7 @@ export function buildMuninGroups(cfg: MuninSettings): PanelGroup[] {
         }, {
           mask: true,
           description: "Bearer credential for the Munin server. MUNIN_API_KEY env / .env overrides it.",
-          warning: "Stored in this repo's .pi/settings.json — add it to .gitignore.",
+          warning: "Secrets never land in settings.json — the save writes <agentDir>/.env.local (0600), which already wins at read time.",
         }),
       ],
     },
@@ -87,15 +88,24 @@ export function muninConfig(): ModuleConfig {
       if (![...edited].some((k) => k.startsWith(OWNED_PREFIX))) return;
       const trusted = ctx.isProjectTrusted?.() === true;
       const target = projectSettingsPath(ctx.cwd);
+      // F7: the API key is a secret — it persists to <agentDir>/.env.local
+      // (0600, mirrored into process.env so the live session resolves it at
+      // once) and NEVER into the git-trackable project settings.json.
+      let apiKeyNote = "";
+      if (working.apiKey !== before.apiKey) {
+        writeSecretEnvs({ MUNIN_API_KEY: working.apiKey });
+        apiKeyNote = working.apiKey
+          ? " API key saved to your agent dir's .env.local."
+          : " API key cleared from .env.local settings tracking (set MUNIN_API_KEY env to silence a stored key).";
+      }
       writeMuninSection(
         {
           project: working.project !== before.project ? working.project : undefined,
           baseUrl: working.baseUrl !== before.baseUrl ? working.baseUrl : undefined,
-          apiKey: working.apiKey !== before.apiKey ? working.apiKey : undefined,
         },
         target,
       );
-      const notes: string[] = [`Munin config saved to ${target}.`];
+      const notes: string[] = [`Munin config saved to ${target}.${apiKeyNote}`];
       if (!trusted) {
         notes.push("This project is NOT trusted — pi ignores .pi/settings.json until you trust this repo.");
       }

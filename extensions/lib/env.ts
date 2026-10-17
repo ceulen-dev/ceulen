@@ -95,6 +95,52 @@ function agentDirsForSecrets(): string[] {
     : [path.join(os.homedir(), ".pi", "agent"), path.join(os.homedir(), ".pi", "agents")];
 }
 
+/** Trust walk for the cwd's .pi/settings.json (registry.isProjectTrusted
+ *  inlined — env.ts stays a leaf). */
+function isTrustedCwd(cwd: string): boolean {
+  const resolved = path.resolve(cwd);
+  for (const dir of agentDirsForSecrets()) {
+    const file = path.join(dir, "trust.json");
+    if (!fs.existsSync(file)) continue;
+    try {
+      const data = JSON.parse(fs.readFileSync(file, "utf8"));
+      let current = resolved;
+      for (;;) {
+        const v = data[current];
+        if (typeof v === "boolean") return v;
+        const parent = path.dirname(current);
+        if (parent === current) break;
+        current = parent;
+      }
+    } catch { /* unreadable trust.json → not trusted */ }
+  }
+  return false;
+}
+
+/** F7 (security review 2026-10-17): munin.apiKey must not sit in the
+ *  git-trackable project .pi/settings.json. When the cwd is trusted, move its
+ *  munin.apiKey into `migrate` FIRST (project beats global at read time, so
+ *  its value must win the onlyAbsent write) and scrub the file atomically. */
+function migrateProjectMuninKey(migrate: Record<string, string>): boolean {
+  try {
+    const cwd = process.cwd();
+    if (!isTrustedCwd(cwd)) return false;
+    const projectFile = path.join(cwd, ".pi", "settings.json");
+    const settings = JSON.parse(fs.readFileSync(projectFile, "utf8"));
+    const munin = settings?.munin;
+    if (!munin || typeof munin !== "object" || typeof munin.apiKey !== "string" || munin.apiKey === "") return false;
+    migrate.MUNIN_API_KEY = munin.apiKey;
+    delete munin.apiKey;
+    if (Object.keys(munin).length === 0) delete settings.munin;
+    const tmp = projectFile + ".tmp";
+    fs.writeFileSync(tmp, JSON.stringify(settings, null, 2) + "\n", { mode: 0o600 });
+    fs.renameSync(tmp, projectFile);
+    return true;
+  } catch {
+    return false; // absent/corrupt/unwritable project file — nothing to do
+  }
+}
+
 /** Read the current secrets file as parsed entries ({} when absent). */
 export function readSecretEnvs(agentDir?: string): Record<string, string> {
   return readEnvFile(secretsEnvFile(agentDir));
@@ -156,16 +202,23 @@ const WEB_SECRET_ENV_BY_KEY: Record<string, string> = {
  *  Never throws — a failed migration leaves the (working) status quo. */
 export function migrateSecretsFromSettings(): void {
   try {
+    const migrate: Record<string, string> = {};
+    const scrubWeb: string[] = [];
+    // Project munin key FIRST (F7): it must also run when the GLOBAL
+    // settings.json is absent/corrupt — its early return below still has to
+    // flush this env write.
+    migrateProjectMuninKey(migrate);
     const dir = agentDirsForSecrets()[0]!;
     const settingsFile = path.join(dir, "settings.json");
     let settings: Record<string, any>;
     try {
       settings = JSON.parse(fs.readFileSync(settingsFile, "utf8"));
     } catch {
-      return; // absent/corrupt — nothing to migrate
+      // Absent/corrupt — nothing else to migrate, but a project-file find
+      // above still lands in .env.local.
+      if (Object.keys(migrate).length > 0) writeSecretEnvs(migrate, { agentDir: dir, onlyAbsent: true });
+      return;
     }
-    const migrate: Record<string, string> = {};
-    const scrubWeb: string[] = [];
     // web section: flat or nested secret keys.
     const web = settings.web && typeof settings.web === "object" ? settings.web : {};
     for (const [key, envName] of Object.entries(WEB_SECRET_ENV_BY_KEY)) {

@@ -13,7 +13,7 @@ const LANGUAGE_PARAM = Type.Optional(
 );
 
 async function runSearch(rg: SgRunner, cwd: string, opts: { pattern: string; language?: string; globs?: string[]; paths?: string[] }, signal?: AbortSignal) {
-  return parseSearch(await rg.run(cwd, buildRunArgs({ ...opts, json: true }), signal), opts.pattern);
+  return parseSearch(await rg.run(cwd, buildRunArgs({ ...opts, json: true, cwd }), signal), opts.pattern);
 }
 
 export default function sgModule(pi: ExtensionAPI): void {
@@ -96,13 +96,13 @@ export default function sgModule(pi: ExtensionAPI): void {
           return { content: [{ type: "text", text: `no matches for ${p.pattern} — nothing to rewrite` }], details: { matches: 0 } };
         }
         if (p.write !== true) {
-          const preview = await realSg.run(cwd, buildRunArgs({ pattern: p.pattern, rewrite: p.rewrite, language: p.language, globs: p.globs, paths: p.paths }), signal);
+          const preview = await realSg.run(cwd, buildRunArgs({ pattern: p.pattern, rewrite: p.rewrite, language: p.language, globs: p.globs, paths: p.paths, cwd }), signal);
           const files = [...new Set(before.matches.map((m) => m.file))];
           let text = `DRY-RUN — ${before.matches.length} match(es) across ${files.length} file(s) would change:\n${files.map((f) => `  ${f}`).join("\n")}\n\n${preview.stdout.trim()}`;
           if (text.length > 16_000) text = `${text.slice(0, 16_000)}\n[… preview truncated — narrow paths/globs …]`;
           return { content: [{ type: "text", text }], details: { matches: before.matches.length, files } };
         }
-        const apply = await realSg.run(cwd, buildRunArgs({ pattern: p.pattern, rewrite: p.rewrite, language: p.language, globs: p.globs, paths: p.paths, update: true }), signal);
+        const apply = await realSg.run(cwd, buildRunArgs({ pattern: p.pattern, rewrite: p.rewrite, language: p.language, globs: p.globs, paths: p.paths, update: true, cwd }), signal);
         if (apply.exitCode !== 0) {
           throw new Error(`sg -U rewrite failed (exit ${apply.exitCode}): ${apply.stderr.slice(0, 300) || apply.stdout.slice(0, 300)}`);
         }

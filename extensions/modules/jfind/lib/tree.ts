@@ -5,7 +5,7 @@
 
 import { lines, clipBytes, countOccurrences } from "./lexical.js";
 import { execFileSync } from "node:child_process";
-import { closeSync, openSync, readdirSync, readSync, statSync } from "node:fs";
+import { closeSync, lstatSync, openSync, readdirSync, readSync, statSync } from "node:fs";
 import { join } from "node:path";
 
 // ── eligibility deny-lists (tree.ts, verbatim) ──────────────────────────────
@@ -155,7 +155,12 @@ export function listFiles(rootAbs: string, includeHidden = false): FileEntry[] {
       const abs = join(rootAbs, rel);
       let size = 0;
       try {
-        size = statSync(abs).size;
+        // lstat: a symlink's TARGET size/status must not leak out-of-tree
+        // file metadata (F8) — git never tracks symlinks as regular files
+        // here anyway, so skipping keeps the walk in-tree.
+        const st = lstatSync(abs);
+        if (st.isSymbolicLink()) continue;
+        size = st.size;
       } catch {
         continue;
       }
@@ -180,7 +185,7 @@ export function listFiles(rootAbs: string, includeHidden = false): FileEntry[] {
       const rel = relPrefix ? `${relPrefix}/${name}` : name;
       let st;
       try {
-        st = statSync(abs);
+        st = lstatSync(abs); // F8: never follow symlinks out of the root
       } catch {
         continue;
       }

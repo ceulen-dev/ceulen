@@ -90,6 +90,9 @@ async function waitForOutputEvidence(opts: {
   resultFile: string;
   readOnly?: boolean;
   stamp: OutputEvidenceStamp;
+  /** The exact submitted prompt — an echo-only tail (pane just repeating the
+   *  wrapped task back) is NOT evidence the child produced output (F10). */
+  promptText?: string;
   deadlineMs: number;
   pollMs?: number;
   signal?: AbortSignal;
@@ -106,6 +109,8 @@ async function waitForOutputEvidence(opts: {
   };
   let stableCount = 0;
   let lastTail = "";
+  let curPoll = pollMs;
+  let polls = 0;
   for (;;) {
     if (opts.signal?.aborted) return false;
     if (!opts.readOnly) {
@@ -120,13 +125,29 @@ async function waitForOutputEvidence(opts: {
         // so a mid-stream snapshot is not collected as the final reply.
         if (tail === lastTail) stableCount++;
         else { stableCount = 1; lastTail = tail; }
-        if (stableCount >= 3) return true;
+        if (stableCount >= 3) {
+          // F10: settle only on output BEYOND the prompt echo — a TUI echo
+          // (plus editor chrome) settling looks identical to a reply. Strip
+          // the submitted prompt (whitespace-normalized containment; TUI
+          // wrapping can break the exact substring) and require a remainder.
+          if (opts.promptText) {
+            const norm = (s: string) => s.replace(/\s+/g, " ");
+            const stripped = norm(tail).split(norm(opts.promptText)).join("");
+            if (stripped.trim().length === 0) { stableCount = 0; lastTail = ""; continue; }
+          }
+          return true;
+        }
       } else {
         stableCount = 0;
       }
     }
     if (Date.now() >= deadline) return false;
-    await sleep(pollMs);
+    // F16: back off 1s → 2s → 5s after ~10 polls — a long-lived wait must not
+    // hold a ~1/s spawn cadence for up to an hour.
+    polls++;
+    if (polls === 10) curPoll = 2_000;
+    if (polls === 20) curPoll = 5_000;
+    await sleep(curPoll);
   }
 }
 /** Reject herdr tasks above this size — the prompt travels as a CLI argv element. */
@@ -661,6 +682,7 @@ export async function promptAndWait(opts: {
     resultFile: string;
     readOnly?: boolean;
     stamp: OutputEvidenceStamp;
+    promptText?: string;
     graceMs?: number;
     signal?: AbortSignal;
   };
@@ -693,6 +715,7 @@ export async function promptAndWait(opts: {
           resultFile: opts.evidence.resultFile,
           readOnly: opts.evidence.readOnly,
           stamp: opts.evidence.stamp,
+          promptText: opts.evidence.promptText,
           // The CLI consumed ~5s observing its stall window; the evidence
           // wait gets the full dispatch budget (floored at the grace minimum
           // so very short timeouts still get a fair window).
@@ -728,7 +751,13 @@ export async function collectResult(opts: {
   exec: HerdrExec;
 }): Promise<{ output: string; source: "file" | "pane" | "none" }> {
   try {
-    const raw = await fs.readFile(opts.handle.resultFile);
+    // F16: open + stat FIRST, read at most MAX_REPORT_BYTES (+1 sentinel) —
+    // a runaway report (GBs) must not buffer whole into memory before the cap.
+    const fh = await fs.open(opts.handle.resultFile, "r");
+    const want = Math.min((await fh.stat()).size, MAX_REPORT_BYTES + 1);
+    const raw = Buffer.alloc(want);
+    await fh.read(raw, 0, want, 0);
+    await fh.close();
     const text = raw.length > MAX_REPORT_BYTES
       ? raw.subarray(0, MAX_REPORT_BYTES).toString("utf8") + "\n\n…(truncated)"
       : raw.toString("utf8");
@@ -1111,6 +1140,7 @@ export async function executeHerdrTask(
           resultFile: handle.resultFile,
           readOnly: handle.readOnly,
           stamp,
+          promptText: wrapTaskPrompt(handle.task, handle.resultFile, handle.readOnly),
           signal: opts.signal,
         },
       });

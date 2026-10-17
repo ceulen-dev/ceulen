@@ -65,6 +65,13 @@ export const PLAN_ENTRY_TYPE = "ceulen-plan";
 export const PLAN_TOOL = "write_plan";
 export const ASK_USER_QUESTION_TOOL = "ask_user_question";
 
+/** session_start arms the diff-driver probe; the bash tool_call branch awaits
+ *  it (a settled promise awaits free) before classifying. F13: the old bare
+ *  `void probeDiffDrivers(...)` raced — an early `git log -p` classified read
+ *  before the probe resolved in a textconv-configured repo. The probe swallows
+ *  its own failures, so awaiting it can never reject. */
+let diffDriverProbe: Promise<void> | undefined;
+
 // ── planGate (classifier.planGate) ──────────────────────────────────────────
 // The classifier can move a CONFIRM-tier bash command to auto-run when Jev
 // says it clearly doesn't mutate and serves the task. It can never do the
@@ -148,6 +155,10 @@ async function planGateAutoRun(command: string, ctx: ExtensionContext): Promise<
   // segments: the pipe-to-shell regexes need the unsplit command, while
   // segments expose risky commands hidden after && / ;.
   if (isRisky(command) || segments(command).some(isRisky)) return undefined;
+  // Quote-splitting beats the pipe regexes (`curl … | 'b''a''s''h'`): the
+  // de-quoted copy re-runs the same static check (F11).
+  const dequoted = command.replace(/['"\\]/g, "");
+  if (dequoted !== command && (isRisky(dequoted) || segments(dequoted).some(isRisky))) return undefined;
   const verdict = await planGateVerdict(command, ctx);
   if (verdict?.safe && planGate.enabled) {
     if (ctx.hasUI) {
@@ -729,10 +740,13 @@ export default function planModule(pi: ExtensionAPI): void {
     return undefined; // Allow once
   }
 
-  /** True when every named subagent resolves to a read-only sandbox. */
-  function subagentsReadOnly(names: string[], cwd: string): boolean {
+  /** True when every named subagent resolves to a read-only sandbox, resolved
+   *  at the scope the subagent tool will ACTUALLY run (F3: plan's "both"
+   *  lookup must not shadow a name with a project agent whose bundled
+   *  namesake is read-only while the tool runs the full-write bundled one). */
+  function subagentsReadOnly(names: string[], cwd: string, scope: "user" | "project" | "both"): boolean {
     try {
-      const { agents } = discoverAgents(cwd, "both", path.resolve(import.meta.dirname, "../subagent/agents"));
+      const { agents } = discoverAgents(cwd, scope, path.resolve(import.meta.dirname, "../subagent/agents"));
       return names.length > 0 && names.every((name) => agents.find((a) => a.name === name)?.sandbox === "read-only");
     } catch {
       return false; // fail closed → confirm tier
@@ -933,7 +947,8 @@ export default function planModule(pi: ExtensionAPI): void {
     asksSinceToolCall = 0;
     refreshSettings(ctx);
     setPlanRegistry(ctx.modelRegistry);
-    void probeDiffDrivers(ctx.cwd); // best-effort: textconv-aware bash gating
+    void (diffDriverProbe = probeDiffDrivers(ctx.cwd)); // F13: bash branch awaits this before classifying
+    diffDriverProbe = probeDiffDrivers(ctx.cwd);
     restoreStateFromBranch(ctx);
 
     // The plan tools must always be visible (unless per-tool kill-switched).
@@ -956,6 +971,10 @@ export default function planModule(pi: ExtensionAPI): void {
     const preThinking = prePlanThinking;
     restoreStateFromBranch(ctx);
     sessionAllows.clear();
+    // F15: branch restore swaps the conversation — the ask-loop dampener's
+    // memory of answered questions belongs to the OLD branch.
+    answeredAsks = [];
+    asksSinceToolCall = 0;
     if (planModeEnabled) {
       toolsBeforePlan ??= previousToolsBeforePlan ?? pi.getActiveTools();
       enablePlanTools();
@@ -995,6 +1014,7 @@ export default function planModule(pi: ExtensionAPI): void {
 
     if (isToolCallEventType("bash", event)) {
       const command = String(event.input.command || "");
+      await diffDriverProbe; // F13: classification must see the probe's verdict
       const disposition = classifyCommand(command);
       if (disposition === "read") return;
       if (disposition === "write") {
@@ -1010,7 +1030,12 @@ export default function planModule(pi: ExtensionAPI): void {
       if (!ctx.hasUI) return { block: true, reason: `plan mode: this command requires confirmation but UI is not available.\nCommand: ${command}` };
       const firstToken = command.trim().split(/\s+/)[0] || "bash";
       const allowKey = INTERPRETER_TOKENS.has(firstToken) ? `bash-cmd:${command.trim()}` : `bash:${firstToken}`;
-      if (sessionAllows.has(allowKey)) return;
+      // F2: a session allow is a first-token grant ("npm test"), not a blank
+      // cheque — RISKY-listed commands always re-prompt even under a grant.
+      const dequotedAllow = command.replace(/['"\\]/g, "");
+      const riskyNow = isRisky(command) || segments(command).some(isRisky)
+        || (dequotedAllow !== command && (isRisky(dequotedAllow) || segments(dequotedAllow).some(isRisky)));
+      if (sessionAllows.has(allowKey) && !riskyNow) return;
       const rememberNote = INTERPRETER_TOKENS.has(firstToken)
         ? '"Allow for this session" remembers only this exact command until plan mode toggles.'
         : `"Allow for this session" remembers \`${clip(firstToken)}\` commands until plan mode toggles.`;
@@ -1027,8 +1052,12 @@ export default function planModule(pi: ExtensionAPI): void {
     // Subagent delegation is auto-allowed only when every named agent is read-only.
     if (event.toolName === "subagent") {
       const names = extractSubagentNames(event.input);
-      // .pi/agents (project) + ~/.pi/agent/agents (user): the approval scope is "both".
-      if (names.length > 0 && subagentsReadOnly(names, ctx.cwd)) return;
+      // F3: resolve at the scope the subagent tool will actually run — plan's
+      // "both" lookup must not shadow a name with a read-only project agent
+      // whose bundled namesake executes full-write.
+      const inputScope = (event.input as { agentScope?: unknown } | undefined)?.agentScope;
+      const scope = inputScope === "project" || inputScope === "both" ? inputScope : "user";
+      if (names.length > 0 && subagentsReadOnly(names, ctx.cwd, scope)) return;
     }
 
     if (!READ_ONLY_TOOLS.has(event.toolName)) {

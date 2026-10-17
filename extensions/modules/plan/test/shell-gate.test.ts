@@ -3,6 +3,8 @@
 // regression-hardened upstream — these tests pin the contract, not the regexes.
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { classifyCommand, splitShellSegments, xargsPayload } from "../lib/shell-gate.js";
 
 describe("plan shell gate — reads auto-run", () => {
@@ -151,5 +153,67 @@ describe("plan shell gate — helpers", () => {
 
   it("empty command → confirm (never auto-run)", () => {
     assert.equal(classifyCommand("   "), "confirm");
+  });
+});
+
+// 2026-10-17 escape-hardening (security review F1): backslash-escaped quotes
+// outside quotes must not open phantom quotes; double-quote closes must count
+// backslash-run parity ("a\\" = literal backslash + close); $()/backticks
+// inside DOUBLE quotes still execute (bash); dangling quotes never auto-run.
+describe("plan shell gate — escape hardening (phantom-quote exploit class)", () => {
+  const cases: Array<[string, "read" | "write" | "confirm"]> = [
+    // Escaped quote OUTSIDE quotes is a literal — the ; stays a separator and
+    // the rm segment makes the whole command a write. (Pre-fix: phantom quote
+    // swallowed the ; and the command classified read → auto-run.)
+    ["ls \\' ; rm -rf /tmp/sg-fixture", "write"],
+    ["ls \\\" ; rm -rf /tmp/sg-fixture", "write"],
+    ["cat \\'$(rm -rf /tmp/sg-fixture)\\'", "write"],
+    // Even backslash run immediately before a double quote = literal
+    // backslash, then the quote CLOSES (bash-faithful; pre-fix stayed open).
+    ['ls "a\\\\" ; rm -rf /tmp/sg-fixture', "write"],
+    ['echo "x\\\\" ; rm -rf /tmp/sg-fixture/x', "write"],
+    // Odd run = escaped quote, stays open → dangling → confirm (never read).
+    ['echo "a\\" ; rm -rf /tmp/sg-fixture/x', "confirm"],
+    // Benign escaped quotes must stay reads.
+    ["grep \"a\\\"b\" f", "read"],
+    ['grep "a\\\\" f', "read"],
+    // Dangling single quote (bash: unexpected EOF) → confirm, never read.
+    ["echo 'it\\'s'", "confirm"],
+    // $() / backticks inside DOUBLE quotes execute in bash — the inner rm
+    // must surface. (Pre-fix: substitution finder treated quoted spans as
+    // literal → echo read → auto-run.)
+    ['echo "$(rm -rf x)"', "write"],
+    ['echo "`rm -rf x`"', "write"],
+    // Single-quoted substitution is literal data — stays read.
+    ["echo '$(date)'", "read"],
+    // Quoted redirect chars stay data (regression pins from the 2026-10-15 rework).
+    [`jq -r 'select(.x > "1")' f.json`, "read"],
+    [`grep -oE "[^<]" page.html`, "read"],
+  ];
+  for (const [cmd, expected] of cases) {
+    it(`${expected}: ${cmd.split("\n")[0]}`, () => assert.equal(classifyCommand(cmd), expected, cmd));
+  }
+
+  it("escaped-quote segments split on the previously-swallowed separators", () => {
+    assert.deepEqual(splitShellSegments("ls \\' ; rm -rf /tmp/sg-fixture"), ["ls \\'", "rm -rf /tmp/sg-fixture"]);
+  });
+});
+
+// 2026-10-17 home-wipe incident: exploit fixtures pointed rm at the home
+// directory. Fixture text is mined into plans, printed by failing test
+// output, and pasted into real shells during verification - every rm
+// target in this file stays on a sacrificial /tmp path; this meta-test
+// keeps it so. (The probe strings are built from char codes so this test
+// cannot flag its own source text.)
+describe("plan shell gate - fixture ammo discipline", () => {
+  it("no rm fixture points at the home directory", () => {
+    const src = readFileSync(fileURLToPath(import.meta.url), "utf8");
+    const tilde = String.fromCharCode(0x7e);
+    const rmDash = ["rm", "-"].join(" ");
+    const bad = src
+      .split(String.fromCharCode(10))
+      .map((line, i) => ({ line, n: i + 1 }))
+      .filter(({ line }) => line.includes(rmDash) && (line.includes(tilde) || line.includes("$HOME")));
+    assert.deepEqual(bad.map(({ n }) => n), [], "home-pointing rm fixtures found - retarget to /tmp/sg-fixture");
   });
 });

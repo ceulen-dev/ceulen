@@ -23,11 +23,11 @@ const SEARCH_JSON = JSON.stringify([
 
 describe("buildRunArgs", () => {
   it("search: pattern + json + default path", () => {
-    assert.deepEqual(buildRunArgs({ pattern: "return 1", json: true }), ["run", "-p", "return 1", "--json=compact", "."]);
+    assert.deepEqual(buildRunArgs({ pattern: "return 1", json: true }), ["run", "-p", "return 1", "--json=compact", "--", "."]);
   });
   it("language, globs, paths", () => {
     const args = buildRunArgs({ pattern: "P", language: "ts", globs: ["*.ts"], paths: ["src", "lib"], json: true });
-    assert.deepEqual(args, ["run", "-p", "P", "-l", "ts", "--globs", "*.ts", "--json=compact", "src", "lib"]);
+    assert.deepEqual(args, ["run", "-p", "P", "-l", "ts", "--globs", "*.ts", "--json=compact", "--", "src", "lib"]);
   });
   it("rewrite dry-run has NO -U; apply adds it", () => {
     const dry = buildRunArgs({ pattern: "P", rewrite: "R", json: true });
@@ -35,6 +35,20 @@ describe("buildRunArgs", () => {
     assert.ok(dry.includes("-r"));
     const apply = buildRunArgs({ pattern: "P", rewrite: "R", update: true });
     assert.equal(apply.includes("-U"), true);
+  });
+
+  // F9 (security review 2026-10-17): path text must never parse as a flag,
+  // and path scope cannot escape the workspace.
+  it("rejects flag-shaped paths and cwd escapes; cwd containment when cwd given", () => {
+    assert.throws(() => buildRunArgs({ pattern: "P", paths: ["-U"] }), /looks like a flag/, "paths:['-U'] must not turn a dry-run into a write");
+    assert.throws(() => buildRunArgs({ pattern: "P", paths: ["--globs=x"] }), /looks like a flag/);
+    assert.throws(() => buildRunArgs({ pattern: "P", paths: ["/etc"], cwd: "/proj" }), /inside the workspace/);
+    assert.throws(() => buildRunArgs({ pattern: "P", paths: ["../outside"], cwd: "/proj" }), /inside the workspace/);
+    // In-workspace absolute and relative paths still pass.
+    const ok = buildRunArgs({ pattern: "P", paths: ["/proj/src/a.ts", "lib"], cwd: "/proj" });
+    assert.ok(ok.includes("--") && ok.slice(ok.indexOf("--") + 1).join(",") === "/proj/src/a.ts,lib");
+    // No cwd → flag/escape rejection still applies, containment can't.
+    assert.throws(() => buildRunArgs({ pattern: "P", paths: ["-x"] }), /looks like a flag/);
   });
 });
 

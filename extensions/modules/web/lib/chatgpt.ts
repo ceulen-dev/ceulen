@@ -326,7 +326,8 @@ export function __resetChatGptAuthState(): void {
 const expired = (auth: ChatGptAuth) => auth.expiresAt !== undefined && auth.expiresAt <= Date.now() + 30_000;
 
 async function defaultRefreshFetch(url: string, init: { method: string; headers: Record<string, string>; body: string }): Promise<{ status: number; text: string }> {
-  const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body });
+  // F17: a hung auth endpoint must not park the caller forever.
+  const res = await fetch(url, { method: init.method, headers: init.headers, body: init.body, signal: AbortSignal.timeout(15_000) });
   return { status: res.status, text: await res.text() };
 }
 

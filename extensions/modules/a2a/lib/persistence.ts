@@ -44,8 +44,9 @@ export function persistMessage(opts: {
       peer: opts.peer,
     };
     const p = fileFor(opts.piDir, opts.contextId);
-    mkdirSync(dir(opts.piDir), { recursive: true });
-    appendFileSync(p, JSON.stringify(rec) + "\n", { encoding: "utf-8" });
+    // 0700/0600: transcripts are private peer conversations (F12).
+    mkdirSync(dir(opts.piDir), { recursive: true, mode: 0o700 });
+    appendFileSync(p, JSON.stringify(rec) + "\n", { encoding: "utf-8", mode: 0o600 });
   } catch {
     /* best-effort persistence */
   }

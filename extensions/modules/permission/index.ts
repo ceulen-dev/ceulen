@@ -139,11 +139,20 @@ export function readSettingsKey(cwd: string | undefined, key: string, { project 
  * separately).
  */
 function toolSubject(toolName: string, input: Record<string, unknown> | undefined): string {
-  if (toolName === "bash") return String(input?.command || "");
+  // F4: a shell start IS a bash command — its rules/promotions key on the
+  // command text exactly like bash (output/stdin/kill actions carry no new
+  // command and stay subject-less).
+  if (toolName === "bash" || (toolName === "shell" && input?.action === "start")) return String(input?.command || "");
   if (["grep", "find", "ls", "read", "write", "edit"].includes(toolName)) {
     return String(input?.path || "");
   }
   return "";
+}
+
+/** Rule/promotion lookup key. shell start resolves under `bash` (a shell
+ *  start is a bash command — permission.bash rules must see it, F4). */
+function ruleKey(toolName: string, input: Record<string, unknown> | undefined): string {
+  return toolName === "shell" && input?.action === "start" ? "bash" : toolName;
 }
 
 /**
@@ -235,7 +244,7 @@ function describe(toolName: string, input: Record<string, unknown> | undefined):
     const c = String(s).replace(/[\x00-\x1f\x7f]/g, " ").replace(/\s+/g, " ").trim();
     return c.length > 120 ? c.slice(0, 120) + "…" : c;
   };
-  if (toolName === "bash") return `\`bash\`: ${clip(input?.command || "")}`;
+  if (toolName === "bash" || (toolName === "shell" && input?.action === "start")) return `\`${toolName}\`: ${clip(input?.command || "")}`;
   if (input?.path) return `\`${toolName}\`: ${clip(input.path)}`;
   return `\`${toolName}\``;
 }
@@ -314,9 +323,10 @@ export function persistAllowlistRule(
     toolRules[String(subject)] = "allow";
     perm[toolName] = toolRules;
     parsed.permission = perm;
-    // Atomic write: temp file + rename so a crash can't truncate settings.json.
+    // Atomic 0600 write: settings.json may hold a2a gateway tokens, so the
+    // tmp file must not downgrade the file to 0644 (F5) — mode applies on create.
     const tmp = `${file}.tmp-${process.pid}`;
-    writeFileSync(tmp, JSON.stringify(parsed, null, 2) + "\n");
+    writeFileSync(tmp, JSON.stringify(parsed, null, 2) + "\n", { mode: 0o600 });
     renameSync(tmp, file);
     return { file };
   } catch (e) {
@@ -428,8 +438,9 @@ export default function permissionModule(pi: ExtensionAPI): void {
     let matchedRule = "(default)";
 
     // 1. tool-specific rules (expand ~ for path patterns so rules can reference $HOME)
-    if (rules[toolName] !== undefined) {
-      const toolRules = rules[toolName];
+    const ruleSection = ruleKey(toolName, inp);
+    if (rules[ruleSection] !== undefined) {
+      const toolRules = rules[ruleSection];
       if (typeof toolRules === "string") {
         action = toolRules;
         matchedRule = toolName + " (whole)";
@@ -468,7 +479,7 @@ export default function permissionModule(pi: ExtensionAPI): void {
     const sessionSubject = PATH_TOOLS.has(toolName)
       ? normalizedSubjects(String(inp?.path || ""), ctx.cwd, home, (ctx as PathCtx).ppath).rel
       : toolSubject(toolName, inp);
-    if (sessionAllowed(toolName, sessionSubject)) return undefined;
+    if (sessionAllowed(ruleSection, sessionSubject)) return undefined;
 
     // ── "ask" ───────────────────────────────────────────────────────
     if (yolo || auto) return undefined; // auto-approve (--yolo or --auto)
@@ -489,7 +500,7 @@ export default function permissionModule(pi: ExtensionAPI): void {
         options,
       );
       if (choice === "Allow for this session") {
-        promoteToSessionAllow(toolName, subject);
+        promoteToSessionAllow(ruleSection, subject);
         return undefined;
       }
       if (choice === "Add to permanent allowlist") {
@@ -507,7 +518,7 @@ export default function permissionModule(pi: ExtensionAPI): void {
         if (written.error) {
           return { block: true, reason: `could not persist allowlist rule: ${written.error}` };
         }
-        promoteToSessionAllow(toolName, subject); // cover the rest of this session too
+        promoteToSessionAllow(ruleSection, subject); // cover the rest of this session too
         try {
           ctx.ui.notify(`Permission rule added to ${written.file}: ${describe(toolName, inp)} → allow`, "info");
         } catch { /* best-effort */ }

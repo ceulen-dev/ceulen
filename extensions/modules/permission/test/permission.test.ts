@@ -3,7 +3,7 @@
 // delta tests: plan-mode deferral via the shared plan-bridge flag.
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readFileSync, existsSync, statSync } from "node:fs";
 import { join, win32 } from "node:path";
 import { tmpdir } from "node:os";
 
@@ -786,4 +786,36 @@ test("plan-bridge flag round-trips", () => {
   } finally {
     setPlanActive(prev);
   }
+});
+
+
+// F5 (security review 2026-10-17): settings.json may hold a2a tokens - the
+// atomic-write tmp file must not downgrade the mode to 0644.
+test("allowlist persist keeps settings.json at 0600", () => {
+  const cwd = mkdtempSync(join(tmpdir(), "perm-mode-"));
+  mkdirSync(join(cwd, ".pi"), { recursive: true });
+  const file = join(cwd, ".pi", "settings.json");
+  writeFileSync(file, JSON.stringify({ permission: { bash: { "*": "ask" } } }), { mode: 0o600 });
+  const written = persistAllowlistRule("bash", "npm run build", { cwd });
+  assert.equal(written.error, undefined);
+  assert.equal(statSync(file).mode & 0o777, 0o600, "mode must survive the rewrite");
+});
+
+// F4 (security review 2026-10-17): a shell START spawns shell:true with a
+// command - it must be visible to bash rules exactly like the bash tool.
+test("shell action:start keys on permission.bash rules; deny blocks, ask shows the command", async () => {
+  const pi = harness({ rules: { bash: { "*": "ask", "rm *": "deny" } } });
+  const denied = (await pi.handler({ toolName: "shell", input: { action: "start", command: "rm -rf /tmp/perm-shell" } }, ctx())) as { block?: boolean; reason?: string };
+  assert.equal(denied.block, true, "shell start must honor bash deny rules");
+  assert.match(denied.reason ?? "", /denied by permission rule/);
+  // ask via bash rules - the dialog shows the actual command text
+  const titles: string[] = [];
+  const c = ctx({ selectChoice: "Deny" });
+  c.ui.select = async (t: string) => { titles.push(t); return "Deny"; };
+  const asked = (await pi.handler({ toolName: "shell", input: { action: "start", command: "git status" } }, c)) as { block?: boolean };
+  assert.equal(asked.block, true, "user picked Deny");
+  assert.match(titles[0] ?? "", /git status/, "approval dialog must show the command");
+  // non-start actions stay invisible to bash rules (no command to key on)
+  const other = await pi.handler({ toolName: "shell", input: { action: "output", shellId: "s1" } }, ctx());
+  assert.equal(other, undefined, "shell output/kill carry no command -> no opinion");
 });
