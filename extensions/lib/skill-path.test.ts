@@ -24,7 +24,7 @@ describe("skillsRoot", () => {
   });
 
   it("joins to this package's own skill dirs", () => {
-    for (const name of ["web", "munin", "a2a", "ponytail", "ux-design"]) {
+    for (const name of ["web", "munin", "a2a", "ponytail", "ux-design", "cron", "review"]) {
       assert.ok(existsSync(join(skillsRoot(), name)), `skill dir exists: ${name}`);
     }
   });

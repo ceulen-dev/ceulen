@@ -87,6 +87,7 @@ import { startBackgroundTask,
   clearBackgroundTasks,
 } from "./lib/background.ts";
 import { parseStructuredResult } from "./lib/result.ts";
+import { skillsRoot } from "../../lib/skill-path.js";
 import { appendHistory, readHistory, markInterruptedOnRestart, trimHistory, getHistoryPath } from "./lib/history.ts";
 import { herdrCli } from './lib/herdr.ts';
 /** Keep-alive cadence for herdr delegations (test seam: shorten to assert). */
@@ -289,6 +290,14 @@ export default function (pi: ExtensionAPI) {
   // Resolve bundled agents directory relative to this module file
   // (upstream: extensions/index.ts → ../agents; ceulen module: ./agents)
   const bundledAgentsDir = path.resolve(__dirname, "agents");
+
+  // The review skill ships via its OWN resources_discover dir (munin/cron
+  // pattern) so the kill-switch gates it: disabled subagent module ⇒ factory
+  // never runs ⇒ no review skill registered. The skill dispatches THIS
+  // module's reviewer agent, so it lives and dies with the module.
+  pi.on("resources_discover", () => ({
+    skillPaths: [path.join(skillsRoot(), "review")],
+  }));
 
   // Invalidate agent cache + clear thread store on session replacement.
   pi.on("session_start", (event, ctx) => {

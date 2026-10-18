@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.22.0 — 2026-10-17
+
+Post-completion review gate — the research-backed practice (Codex Auto-review,
+Anthropic verification guidance) shipped as a convention skill, not a hook:
+after a plan finishes executing or a substantial task ends, capture the diff
+scope + acceptance criteria and dispatch the bundled `reviewer` subagent
+(fresh context, evidence-required findings) before claiming done.
+
+- **`review` skill** (new, `skills/review/SKILL.md`): one reviewer pass per
+gate (never parallel fans), review AGAINST plan acceptance criteria not
+open-ended style, fix critical/high/blocking only, ONE revision loop, human
+reviews last. Advisor owns per-turn review; this owns task-end — never
+stacked on the same turn.
+- **Registration**: subagent module contributes the skill via
+`resources_discover` (munin/cron pattern) — the module kill-switch gates it,
+since the skill dispatches that module's reviewer agent.
+- **Tests**: skill-path existence list covers `cron` + `review`; new
+subagent `extension.test.ts` asserts the registration (typo/dropped-handler
+mutation-verified). AGENTS.md layout + subagent sections updated.
+
 ## 0.21.0 — 2026-10-17
 
 Security-review pass — 18 findings (1 critical, 5 high, 7 medium, 5 low),

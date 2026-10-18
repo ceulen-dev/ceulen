@@ -18,8 +18,8 @@ extensions/
   modules/<name>/        one directory per module (self-contained: index.ts, lib/, commands/, test/)
 skills/                  skill directories shipped with the package (each module contributes its OWN
                          skill dirs via resources_discover — ponytail the six `ponytail*`, ux the four
-                         `ux-*`, munin `munin`, web `web` — never the skills/ root, so each kill-switch
-                         gates its own skills)
+                         `ux-*`, munin `munin`, web `web`, subagent `review` — never the skills/ root,
+                         so each kill-switch gates its own skills)
 themes/                 theme JSONs shipped with the package (declared via the package.json
                          `pi.themes` manifest — loaded by pi itself, no module, no kill-switch;
                          scripts/validate-themes.mjs runs in `npm test`. pi 1.2.0 validates these
@@ -258,7 +258,8 @@ cap-3 preview). Raw SDK event labels (`message_end`…) never render — only
 - herdr delegation (visible panes when pi runs inside herdr; `runner:"sdk"`
   forces in-process) and the git-worktree sandbox + `merge:"3way"` are
   vendored unchanged. Auto-review is NOT ported (advisor covers turn-end
-  review; a diff-reviewer belongs to a future model-tools port).
+  review; the task-end whole-diff pass is the `review` skill the module
+  contributes via resources_discover).
 
 **Multi-session hardening (2026-10, OMP/Claude-Code port at ponytail scale)**
 — `lib/runner.ts` gained a worktree-lifecycle layer (`withRepoLock`,
