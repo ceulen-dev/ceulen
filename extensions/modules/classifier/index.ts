@@ -32,6 +32,7 @@ import { join } from "node:path";
 import { Type } from "typebox";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { getClassifierSettings } from "./lib/settings.js";
+import { registerThinkGate } from "./lib/think-gate.js";
 import { setClassifierRegistry } from "./configPanel.js";
 
 // ── Risk gate (static, before Jev ever sees a command) ──────────────────────
@@ -167,6 +168,12 @@ export function getLastTask(): string {
 }
 
 export default function (pi: ExtensionAPI) {
+  // Main-session per-turn thinking gate (classifier.thinkGate, default off —
+  // planGate pattern). Register the handlers even while off: settings are read
+  // per turn, so a settings.json flip needs no /reload. Returns undefined —
+  // never touches systemPrompt (steering load-order contract).
+  registerThinkGate(pi);
+
   // The /config contribution reads discovered decision models at open time;
   // config factories get no ctx, so the module stashes the live registry
   // here (the panel always opens after a session exists). Cleared on shutdown

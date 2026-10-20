@@ -514,6 +514,33 @@ describe("client", () => {
     assert.equal(tlm("deepseek-v4.1-flash").off, "none");
   });
 
+  it("glm-5.3 family uses the zai53 map (native low; off omits the param)", async () => {
+    const { mapModel } = await import("../lib/client.js");
+    const tlm = (id: string) => mapModel({ id }, true).thinkingLevelMap ?? {};
+    // low is a REAL native tier on GLM-5.3 (probe 2026-10-19), unlike glm-5.2.
+    const m = tlm("zai/glm-5.3");
+    assert.equal(m.off, null);   // omit — literal "none"/"off" would think at max depth
+    assert.equal(m.minimal, "low");
+    assert.equal(m.low, "low");
+    assert.equal(m.medium, "low");
+    assert.equal(m.high, "high");
+    assert.equal(m.xhigh, "max"); // pi clamps xhigh UP to max
+    assert.equal(m.max, "max");
+    // Flash/FlashX route ids resolve to the same map.
+    const flash = tlm("combo/glm-5.3-flash");
+    assert.equal(flash.off, null);
+    assert.equal(flash.low, "low");
+    assert.equal(flash.high, "high");
+    // combo/ prefix override (NO_DISABLE off→null) must not break zai53 levels.
+    const cmd = tlm("cmd/zai/glm-5.3-max");
+    assert.equal(cmd.off, null);
+    assert.equal(cmd.low, "low");
+    // Family detection intact for GLM-5.2: zai map unchanged (off→"none" valid there).
+    const g52 = tlm("zai/glm-5.2");
+    assert.equal(g52.off, "none");
+    assert.equal(g52.low, "high");
+  });
+
   it("claude 3-5/3-7 use budget thinking; 4-6/4.6/5/sonnet-5 use adaptive", async () => {
     const { mapModel } = await import("../lib/client.js");
     const xhigh = (id: string) => (mapModel({ id }, true).thinkingLevelMap ?? {}).xhigh;
@@ -721,11 +748,14 @@ describe("client thinkingLevelMap no-disable prefix override", () => {
     assert.equal(m.thinkingLevelMap?.xhigh, "xhigh");
   });
 
-  it("glm-cn/ zai model: off stays \"none\" (not a command-code route — untouched)", async () => {
+  it("glm-cn/glm-5.3 uses the zai53 map: off omits the param (probe 2026-10-19)", async () => {
     const { mapModel } = await import("../lib/client.js");
     const m = mapModel({ id: "glm-cn/glm-5.3" }, true);
-    // zai format: off="none" by design (GLM upstream accepts none via its executor).
-    assert.equal(m.thinkingLevelMap?.off, "none");
+    // GLM-5.3 cannot disable thinking, and a literal "none" silently thinks
+    // at max depth (live probe 2026-10-19: effort "none" → ~2.9Kch reasoning
+    // vs "low" → ~90ch). off must OMIT the parameter, never send "none".
+    assert.equal(m.thinkingLevelMap?.off, null);
+    assert.equal(m.thinkingLevelMap?.low, "low");
   });
 
   it("cmd/ alias prefix also nulls off/minimal", async () => {

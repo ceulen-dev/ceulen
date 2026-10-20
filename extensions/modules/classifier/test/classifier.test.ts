@@ -54,6 +54,7 @@ describe("settings", () => {
       model: "",
       permission: { enabled: true, threshold: 0.9, mode: "enforce" },
       planGate: { enabled: false, observe: false, threshold: 0.9 },
+      thinkGate: { enabled: false, observe: false, threshold: 0.6 },
     });
     writeFileSync(join(TMP_HOME, "settings.json"), JSON.stringify({ classifier: { permission: { enabled: false } } }));
     assert.equal(getClassifierSettings().permission.enabled, false);
@@ -513,7 +514,7 @@ describe("permission hook", () => {
 describe("config contribution", () => {
   it("builds the Model-tab groups over a working copy and routes owned keys", async () => {
     const { buildClassifierGroups, classifierConfig, setClassifierRegistry } = await import("../configPanel.js");
-    const groups = buildClassifierGroups({ model: "", permission: { enabled: true, mode: "enforce", threshold: 0.9 }, planGate: { enabled: false, observe: false, threshold: 0.9 } });
+    const groups = buildClassifierGroups({ model: "", permission: { enabled: true, mode: "enforce", threshold: 0.9 }, planGate: { enabled: false, observe: false, threshold: 0.9 }, thinkGate: { enabled: false, observe: false, threshold: 0.6 } });
     assert.equal(groups[0].tab, "Model");
     assert.equal(groups[0].label, "Classifier (Jev)");
     assert.deepEqual(groups[0].rows.map((r) => r.key), [
@@ -566,5 +567,263 @@ describe("permission hook — shell start parity (F4)", () => {
     } finally {
       fx.cleanup();
     }
+  });
+});
+
+// ── think gate (main-session per-turn thinking level) ──────────────────────
+
+interface GateFixture {
+  turn: (prompt: string, overrides?: { messageType?: string }) => Promise<unknown>;
+  settle: () => Promise<unknown>;
+  levelSelect: (level: string, previousLevel: string) => Promise<unknown>;
+  calls: () => number;
+  sets: () => { level: string }[];
+  log: () => Record<string, unknown>[];
+  cleanup: () => void;
+}
+
+/** Gate fixture: settings file in a temp agent dir, registry stub answers the
+ *  effort question, fake pi records setThinkingLevel calls (emitting
+ *  thinking_level_select on change — pi's isChanging contract). */
+async function gateFixture(
+  registry: RegistryStub,
+  settings: Record<string, unknown>,
+  env: Record<string, string | undefined> = {},
+  initialLevel = "medium",
+  /** Simulate a level-capped model: the clamp DOWNWARD the advisor flagged
+   *  (xhigh→high). Default: no downward cap. */
+  capAt: string | undefined = undefined,
+): Promise<GateFixture> {
+  const dir = mkdtempSync(join(tmpdir(), "ceulen-cl-gate-"));
+  const prevHome = process.env.PI_CODING_AGENT_DIR;
+  process.env.PI_CODING_AGENT_DIR = dir;
+  writeFileSync(join(dir, "settings.json"), JSON.stringify({ classifier: { model: "combo/jev", ...settings } }));
+  const prevEnv: Record<string, string | undefined> = {};
+  for (const k of Object.keys(env)) { prevEnv[k] = process.env[k]; if (env[k] === undefined) delete process.env[k]; else process.env[k] = env[k]; }
+  const handlers: Record<string, (event: unknown, ctx: unknown) => Promise<unknown>> = {};
+  const sets: { level: string }[] = [];
+  // Supported levels per the zai53 map (off→null means pi clamps it forward).
+  const supported = ["minimal", "low", "medium", "high", "xhigh", "max"];
+  const clamp = (level: string): string => {
+    if (capAt && supported.indexOf(level) > supported.indexOf(capAt)) return capAt; // clamp DOWN (capped model)
+    if (supported.includes(level)) return level;
+    if (level === "off") return "minimal"; // pi rounds UP from off
+    return level;
+  };
+  let currentLevel = initialLevel;
+  const fakePi = {
+    on(event: string, handler: (event: unknown, ctx: unknown) => Promise<unknown>) { handlers[event] = handler; },
+    registerTool() {},
+    registerCommand() {},
+    getThinkingLevel: () => currentLevel,
+    setThinkingLevel: (level: string) => {
+      const prev = currentLevel;
+      currentLevel = clamp(level);
+      sets.push({ level: currentLevel });
+      if (currentLevel !== prev) void handlers.thinking_level_select({ level: currentLevel, previousLevel: prev }, {});
+    },
+  };
+  let classifyCalls = 0;
+  const countingRegistry: RegistryStub = {
+    ...registry,
+    classify: async (m, c, o) => { classifyCalls++; return registry.classify(m, c, o); },
+  };
+  const ctx = { cwd: "/tmp/proj", model: { id: "zai/glm-5.3" }, modelRegistry: countingRegistry };
+  const mod = await import("../index.js");
+  mod.default(fakePi as never);
+  return {
+    turn: (prompt, overrides = {}) =>
+      handlers.before_agent_start({ messageType: overrides.messageType ?? "user", prompt }, ctx),
+    settle: () => handlers.agent_settled({}, ctx),
+    levelSelect: (level, previousLevel) => handlers.thinking_level_select({ level, previousLevel }, {}),
+    calls: () => classifyCalls,
+    sets: () => sets,
+    log: () => {
+      try {
+        return readFileSync(join(dir, "classifier.log"), "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>);
+      } catch { return []; }
+    },
+    cleanup: () => {
+      if (prevHome === undefined) delete process.env.PI_CODING_AGENT_DIR;
+      else process.env.PI_CODING_AGENT_DIR = prevHome;
+      for (const k of Object.keys(prevEnv)) { if (prevEnv[k] === undefined) delete process.env[k]; else process.env[k] = prevEnv[k]!; }
+      rmSync(dir, { recursive: true, force: true });
+    },
+  };
+}
+
+const scoreAnswer = (score: number, confidence = 0.9): Partial<RegistryStub> => ({
+  classify: async () => ({ stopReason: "stop", answers: { effort: { type: "score", score, confidence } } }),
+});
+
+describe("think gate", () => {
+  it("defaults off → no classify calls, no sets", async () => {
+    const fx = await gateFixture(stubRegistry(scoreAnswer(4)), {});
+    try {
+      await fx.turn("redesign the routing architecture");
+      assert.equal(fx.calls(), 0);
+      assert.deepEqual(fx.sets(), []);
+    } finally { fx.cleanup(); }
+  });
+
+  it("observe mode: verdict produced + audited, no setThinkingLevel", async () => {
+    const fx = await gateFixture(stubRegistry(scoreAnswer(4)), { thinkGate: { observe: true } });
+    try {
+      await fx.turn("redesign the routing architecture");
+      assert.equal(fx.calls(), 1);
+      assert.deepEqual(fx.sets(), []);
+      const applied = fx.log().filter((l) => l.tag === "ceulen-think-gate" && l.verdict === "xhigh");
+      assert.ok(applied.length >= 1, "observe verdict audited");
+      assert.equal(applied[0]!.applied, false);
+    } finally { fx.cleanup(); }
+  });
+
+  it("enabled + confident: sets the mapped level, restores baseline at settle", async () => {
+    const fx = await gateFixture(stubRegistry(scoreAnswer(4)), { thinkGate: { enabled: true } });
+    try {
+      await fx.turn("redesign the routing architecture");
+      assert.deepEqual(fx.sets(), [{ level: "xhigh" }]);
+      assert.equal((fx.log().find((l) => l.applied === true) ?? {}).verdict, "xhigh");
+      await fx.settle();
+      assert.equal(fx.sets().length, 2);
+      const restore = fx.log().find((l) => l.restored !== undefined);
+      assert.equal(restore!.restored, "medium");
+    } finally { fx.cleanup(); }
+  });
+
+  it("score maps through the ladder (pi-effective levels): 0→minimal, 1→low, 2→medium, 3→high, 4→xhigh, clamped", async () => {
+    // "off" is not a real level on thinking models — pi clamps it forward to
+    // "minimal" (zai53 map) — so the assertions are pi-EFFECTIVE levels. The
+    // raw verdict is visible in the audit entry instead.
+    for (const [score, want, initial] of [[0, "minimal", "medium"], [1, "low", "medium"], [2, "medium", "low"], [3, "high", "medium"], [4, "xhigh", "medium"], [9, "xhigh", "medium"], [-3, "minimal", "medium"]] as const) {
+      const fx = await gateFixture(stubRegistry(scoreAnswer(score)), { thinkGate: { enabled: true } }, {}, initial);
+      try {
+        await fx.turn("task");
+        assert.equal(fx.sets()[0]?.level, want, `score ${score}`);
+        if (score === 0) assert.equal(fx.log().find((l) => l.applied === true)?.verdict, "off");
+      } finally { fx.cleanup(); }
+    }
+  });
+
+  it("verdict == current level → no set, audited same", async () => {
+    const fx = await gateFixture(stubRegistry(scoreAnswer(2)), { thinkGate: { enabled: true } }); // medium == current
+    try {
+      await fx.turn("normal multi-step task");
+      assert.deepEqual(fx.sets(), []);
+      const entry = fx.log().find((l) => l.reason === "same");
+      assert.ok(entry, "same audited");
+    } finally { fx.cleanup(); }
+  });
+
+  it("low confidence → fail open, no set", async () => {
+    const fx = await gateFixture(stubRegistry(scoreAnswer(4, 0.3)), { thinkGate: { enabled: true, threshold: 0.6 } });
+    try {
+      await fx.turn("hard task");
+      assert.deepEqual(fx.sets(), []);
+    } finally { fx.cleanup(); }
+  });
+
+  it("classifier throws → fail open, audited reason", async () => {
+    const fx = await gateFixture(stubRegistry({ classify: async () => { throw new Error("boom"); } }), { thinkGate: { enabled: true } });
+    try {
+      await fx.turn("hard task");
+      assert.deepEqual(fx.sets(), []);
+      assert.ok(fx.log().some((l) => l.applied === false && String(l.reason).includes("boom")));
+    } finally { fx.cleanup(); }
+  });
+
+  it("no classifier model → fail open, one audit line per session (not per turn)", async () => {
+    const fx = await gateFixture(stubRegistry({ getAvailableOfType: async () => [], classify: async () => { throw new Error("no classifier model — configure the router provider"); } }), { thinkGate: { enabled: true } });
+    try {
+      await fx.turn("task one");
+      await fx.turn("task two");
+      const misses = fx.log().filter((l) => String(l.reason ?? "").includes("no classifier model"));
+      assert.equal(misses.length, 1);
+    } finally { fx.cleanup(); }
+  });
+
+  it("user thinking_level_select → stands down; later turns skip classify", async () => {
+    const fx = await gateFixture(stubRegistry(scoreAnswer(4)), { thinkGate: { enabled: true } });
+    try {
+      await fx.levelSelect("low", "medium"); // user touched the dial
+      await fx.turn("hard task");
+      assert.equal(fx.calls(), 0);
+      assert.ok(fx.log().some((l) => l.stoodDown === true));
+    } finally { fx.cleanup(); }
+  });
+
+  it("our own set's level_select event does NOT stand down (ownership match)", async () => {
+    const fx = await gateFixture(stubRegistry(scoreAnswer(1)), { thinkGate: { enabled: true } });
+    try {
+      await fx.turn("trivial lookup"); // sets low; fake pi fired level_select(low, medium)
+      assert.deepEqual(fx.sets(), [{ level: "low" }]);
+      assert.equal(fx.log().some((l) => l.stoodDown === true), false);
+      await fx.settle(); // restore works
+      assert.equal(fx.sets().length, 2);
+    } finally { fx.cleanup(); }
+  });
+
+  it("CLAMPED set (off→minimal) still owns its event; restore does not stand down", async () => {
+    // Live lesson 2026-10-19: verdict "off" clamps to "minimal" on the zai53
+    // map — pi emits {level:"minimal", previousLevel:baseline}, which the raw
+    // verdict-based ownership test missed → false stand-down after one turn.
+    const fx = await gateFixture(stubRegistry(scoreAnswer(0)), { thinkGate: { enabled: true } });
+    try {
+      await fx.turn("trivial lookup"); // off → clamped to minimal
+      assert.deepEqual(fx.sets(), [{ level: "minimal" }]);
+      assert.equal(fx.log().some((l) => l.stoodDown === true), false);
+      await fx.settle(); // restore minimal→...→medium
+      assert.equal(fx.sets().length, 2);
+      assert.equal(fx.log().some((l) => l.stoodDown === true), false);
+      // Second turn classifies again — the gate survived its own restore.
+      await fx.turn("another trivial");
+      assert.equal(fx.calls(), 2);
+    } finally { fx.cleanup(); }
+  });
+
+  it("DOWNWARD-clamped set (xhigh→high on a capped model) restores the true baseline", async () => {
+    // Advisor regression case: a level-capped model clamps xhigh DOWN to
+    // high; ours.to must be the clamped effective level (re-read post-set),
+    // so settle restores the real baseline instead of falsely standing down.
+    const fx = await gateFixture(stubRegistry(scoreAnswer(4)), { thinkGate: { enabled: true } }, {}, "medium", "high");
+    try {
+      await fx.turn("architecture task"); // xhigh → clamped DOWN to high
+      assert.deepEqual(fx.sets(), [{ level: "high" }]);
+      assert.equal(fx.log().some((l) => l.stoodDown === true), false);
+      await fx.settle();
+      assert.equal(fx.sets().length, 2); // baseline medium restored (not a doomed set to xhigh)
+      assert.equal(fx.log().find((l) => l.restored !== undefined)?.restored, "medium");
+      assert.equal(fx.log().some((l) => l.stoodDown === true), false);
+      await fx.turn("next turn classifies");
+      assert.equal(fx.calls(), 2);
+    } finally { fx.cleanup(); }
+  });
+
+  it("custom-message turn and plan mode are skipped", async () => {
+    const { setPlanActive } = await import("../../../lib/plan-bridge.js");
+    const fx = await gateFixture(stubRegistry(scoreAnswer(4)), { thinkGate: { enabled: true } });
+    try {
+      await fx.turn("cron fired this", { messageType: "custom" });
+      assert.equal(fx.calls(), 0);
+      setPlanActive(true);
+      await fx.turn("still planning");
+      assert.equal(fx.calls(), 0);
+      setPlanActive(false);
+      await fx.turn("plan done");
+      assert.equal(fx.calls(), 1);
+    } finally { fx.cleanup(); }
+  });
+
+  it("CEULEN_THINK_GATE_OFF=1 → inert even when enabled", async () => {
+    const fx = await gateFixture(stubRegistry(scoreAnswer(4)), { thinkGate: { enabled: true } }, { CEULEN_THINK_GATE_OFF: "1" });
+    try {
+      await fx.turn("hard task");
+      assert.equal(fx.calls(), 0);
+      assert.deepEqual(fx.sets(), []);
+      // Fully inert: a level event at child INIT (model default re-apply) must
+      // not log a stoodDown (live herdr finding 2026-10-19).
+      await fx.levelSelect("max", "minimal");
+      assert.equal(fx.log().some((l) => l.stoodDown === true), false);
+    } finally { fx.cleanup(); }
   });
 });

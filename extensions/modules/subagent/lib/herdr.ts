@@ -501,6 +501,9 @@ export async function ensureTab(opts: {
     "--label", opts.agentType,
     // Children must not recurse into herdr dispatch.
     "--env", `${HERDR_OFF_ENV}=off`,
+    // ...and must not run the main-session think gate (dispatch-routed
+    // thinking already covers panes; a per-turn gate would fight it).
+    "--env", "CEULEN_THINK_GATE_OFF=1",
     ...(opts.env ?? []).flatMap((e) => ["--env", e]),
     "--no-focus",
   ]);
@@ -556,6 +559,7 @@ export async function ensurePane(opts: {
     "--direction", direction,
     "--cwd", opts.cwd,
     "--env", `${HERDR_OFF_ENV}=off`,
+    "--env", "CEULEN_THINK_GATE_OFF=1",
     ...(opts.env ?? []).flatMap((e) => ["--env", e]),
     "--no-focus",
   ]);

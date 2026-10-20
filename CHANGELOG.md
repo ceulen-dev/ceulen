@@ -1,5 +1,38 @@
 # Changelog
 
+## 0.23.0 — 2026-10-19
+
+Thinking-mode gaps closed — GLM-5.3 gets its real effort ladder on the router,
+and the main session's thinking level is classifier-routed per turn.
+
+Research basis: GLM-5.3/5.3-Flash accept only `reasoning_effort: low|high|max`
+(forced thinking — `none`/`off` are accepted but silently think at max depth;
+live probe 2026-10-19), `high` ≈ 93% of `max` quality at ~⅔ the tokens
+(Z.ai Code Bench), and overthinking hurts on easy tasks (arXiv 2601.21418,
+2604.10739).
+
+- **Router `zai53` map** (`router/lib/client.ts`): GLM-5.3 family split out of
+the GLM-5.2-shaped `zai` map — `off` now OMITS the parameter (never sends
+`"none"`, which would think at max depth), and the native `low` tier is
+reachable (`low/medium→low`, `xhigh→max` via pi's clamp). `combo/` routes keep
+the CC enum; glm-5.2 keeps the old map. Probe script shipped:
+`extensions/scripts/probe-thinking.mjs` (value × route status matrix).
+- **`classifier.thinkGate`** (new, `classifier/lib/think-gate.ts`): one Jev
+score question per user turn sets the session thinking level; baseline
+restored at settle. planGate pattern — default fully OFF, observe-first, 2.5s
+budget, fail-open everywhere, every verdict audited to `classifier.log`
+(`ceulen-think-gate` tag; missing-model fail-opens audit once per session).
+Stands down for the session when the user touches the thinking dial; skips
+plan mode, custom messages, and herdr children (`CEULEN_THINK_GATE_OFF=1`
+injected by the subagent module — covers `thinking_level_select` too, so
+child panes are fully inert). Live-verified in herdr: parent pane full
+cycle (trivial → `off`(→minimal), architecture → `xhigh`), child panes zero
+gate events.
+- Pitfalls encoded as tests: pi emits `thinking_level_select` synchronously
+off the set call site with CLAMPED values (ownership = pre-call timestamp
+arm + effective-level re-read); level-capped models clamp DOWN (xhigh→high
+regression case covered).
+
 ## 0.22.0 — 2026-10-17
 
 Post-completion review gate — the research-backed practice (Codex Auto-review,

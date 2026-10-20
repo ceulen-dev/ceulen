@@ -149,6 +149,20 @@ function detectThinkingFormat(modelId: string): string {
   }
   if (id.includes("kimi")) return "kimi";
   if (id.includes("qwen") || id.includes("qwq")) return "qwen";
+  // GLM-5.3 / 5.3-Flash / 5.3-FlashX: Z.ai's own forced-thinking family —
+  // reasoning_effort low | high | max are real, distinct tiers (live probe
+  // 2026-10-19: low 6.5s/~90ch vs high 13s/~2Kch thinking on a reasoning
+  // puzzle, both zai/ and combo/ routes). GLM-5.3 CANNOT disable thinking;
+  // "none"/"off" are ACCEPTED but silently behave like max (probe: effort
+  // "none" produced ~2.9Kch thinking vs low's ~90ch) — so off→null (omit the
+  // parameter entirely, upstream default applies) is load-bearing, not
+  // cosmetic. low/medium→low is the honest mapping (Z.ai's Coding Plan maps
+  // low/medium→high for 5.2 — but on 5.3 "low" IS a native tier and pi's
+  // clampThinkingLevel rounds xhigh UP to max, so pi never needs a 5.3
+  // medium); mirrors the zai-anthropic provider map. probe: extensions/
+  // scripts/probe-thinking.mjs. Checked BEFORE the plain-glm zai map so
+  // 5.3+ ids don't fall into the GLM-5.2-shaped map below.
+  if (/glm-5\.3/i.test(id)) return "zai53";
   if (id.includes("glm")) return "zai";
   if (id.includes("minimax")) return "minimax";
   if (id.includes("hunyuan")) return "hunyuan";
@@ -275,6 +289,16 @@ const FORMAT_TO_LEVEL_MAP: Record<string, Record<string, string | null>> = {
   // zai: mirrors native zai-coding-cn/glm-5.2 — low/medium/high all map to "high"
   // (GLM's single thinking-on tier), max→"max"; xhigh/minimal unsupported (hidden).
   "zai":      { off:"none", minimal:null, low:"high", medium:"high", high:"high", xhigh:null, max:"max" },
+  // zai53: GLM-5.3 family (forced thinking, no disable). low is a REAL native
+  // tier here (unlike glm-5.2) — probe 2026-10-19 (extensions/scripts/
+  // probe-thinking.mjs): zai/ and combo/ routes accept every effort value
+  // (no 4xx), but "none"/"off" silently think at max depth, so off maps to
+  // null (omit the param = upstream default) rather than a wire value.
+  // low/medium→low, high→high, xhigh→max (pi clamps xhigh UP), max→max.
+  // Same shape as the zai-anthropic provider's GLM-5.3 map (modules/zai/lib/
+  // anthropic.ts). GLM-4.7 is also forced-thinking per Z.ai docs but has no
+  // verified route here — not covered until probed.
+  "zai53":    { off:null, minimal:"low", low:"low", medium:"low", high:"high", xhigh:"max", max:"max" },
   "minimax":  { off:"none", minimal:null, low:"low", medium:"medium", high:"high", xhigh:"xhigh", max:"xhigh" },
   // Yardmaster CC-enum backends (combo/, live-probed): "none"/"minimal" 400,
   // and the literal "off" 422s too (reasoning_effort: unknown variant 'off',

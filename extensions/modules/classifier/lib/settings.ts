@@ -18,6 +18,14 @@
 //       "observe": false,      // log-only audit pass — verdicts land in classifier.log, nothing changes
 //       "threshold": 0.9       // p(reversible) must clear it for an auto-run
 //     }
+//
+// `thinkGate` (ceulen; main-session per-turn thinking level):
+//
+//     "thinkGate": {
+//       "enabled": false,      // let the gate SET the session thinking level per user turn
+//       "observe": false,      // log-only audit pass — verdicts land in classifier.log
+//       "threshold": 0.6       // the score answer's confidence must clear it
+//     }
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
@@ -32,6 +40,11 @@ export interface ClassifierSettings {
     threshold: number;
   };
   planGate: {
+    enabled: boolean;
+    observe: boolean;
+    threshold: number;
+  };
+  thinkGate: {
     enabled: boolean;
     observe: boolean;
     threshold: number;
@@ -62,6 +75,7 @@ export function getClassifierSettings(): ClassifierSettings {
   const c = raw.classifier && typeof raw.classifier === "object" ? (raw.classifier as Record<string, unknown>) : {};
   const perm = c.permission && typeof c.permission === "object" ? (c.permission as Record<string, unknown>) : {};
   const gate = c.planGate && typeof c.planGate === "object" ? (c.planGate as Record<string, unknown>) : {};
+  const think = c.thinkGate && typeof c.thinkGate === "object" ? (c.thinkGate as Record<string, unknown>) : {};
   return {
     model: typeof c.model === "string" ? c.model.trim() : "",
     permission: {
@@ -76,6 +90,13 @@ export function getClassifierSettings(): ClassifierSettings {
       enabled: gate.enabled === true,
       observe: gate.observe === true,
       threshold: typeof gate.threshold === "number" && gate.threshold > 0 && gate.threshold < 1 ? gate.threshold : 0.9,
+    },
+    // Default 0.6 = subagent-routing effort precedent (the dial is reversible
+    // mid-turn via /think; planGate's 0.9 is for destructive auto-run).
+    thinkGate: {
+      enabled: think.enabled === true,
+      observe: think.observe === true,
+      threshold: typeof think.threshold === "number" && think.threshold > 0 && think.threshold < 1 ? think.threshold : 0.6,
     },
   };
 }
