@@ -358,7 +358,8 @@ function gaugeFill(w: number, data: BandData | undefined, theme: ShapeTheme): st
   const scale = windowStart >= 0 ? windowStart : w;
   const usedCount = Math.min(scale, Math.max(1, Math.round(((pct ?? 0) / 100) * scale)));
   const percentStart = percentLabel ? Math.min(Math.max(1, scale - percentLabel.length - 1), Math.max(1, usedCount)) : -1;
-  // pi's compaction fires at contextWindow − reserveTokens (16384 default).
+  // pi's compaction STARTS at contextWindow − reserveTokens (16384 default);
+  // since pi 1.4.0 the summary itself uses the model's full output limit.
   const thresholdIdx =
     data?.autoCompact && w >= 8 && data.window ? Math.min(scale - 1, Math.max(0, Math.round(((data.window - 16384) / data.window) * scale))) : -1;
   let out = "";

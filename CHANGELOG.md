@@ -1,5 +1,34 @@
 # Changelog
 
+## 0.24.0 — 2026-10-23
+
+pi 1.4.0 compatibility pass (verified by diffing the 1.3.0 and 1.4.0
+managed releases surface by surface): **no breaking changes**. The 1.4.0
+delta is additive for the extension API — types.d.ts zero-diff,
+SettingsManager/settings-selector/theme-schema byte-identical, pi-tui
+editor internals unchanged.
+
+- **Peer deps widened** `>=0.99.1 <1.4.0` → `>=0.99.1 <1.5.0` for both
+  `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` (the old
+  range semver-excluded pi 1.4.0). AGENTS.md inline range updated; lockfile
+  refreshed to pi 1.4.0 + pi-tui 1.4.0.
+- **Deferred tier verified against the #11062 resume rework**: pi 1.4.0
+  activates never-mentioned extension tools on session resume, but only
+  ones declarable on registration (`direct`/`model-only`) — deferred tools
+  stay inactive, the session_start `tool_search` re-arm still composes.
+- **Composer comment** updated to pi 1.4.0 compaction semantics
+  (`reserveTokens` only controls when compaction STARTS; summaries use the
+  model's full output limit).
+- **Free wins from pi 1.4.0**: codemode worker queueing (parallel subagent
+  dispatches queue up to 60s instead of failing), truncated-tool-call
+  recovery (#11227), OpenAI Responses prompt-cache retention on deferred
+  tool loads (#10940), dialog stacking (#11166 — /config + a2a prompts no
+  longer orphan promises).
+
+Verification: tsc clean against 1.4.0; 2931 tests / 0 fail (3 env skips);
+rpc-mode live smoke on managed pi 1.4.0 — 29 modules, 59 commands (parity
+with 1.3.0), 51 deferred tools, zero stderr.
+
 ## 0.23.0 — 2026-10-19
 
 Thinking-mode gaps closed — GLM-5.3 gets its real effort ladder on the router,
