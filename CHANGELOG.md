@@ -1,5 +1,41 @@
 # Changelog
 
+## 0.25.0 — 2026-11-01
+
+Goal module (`extensions/modules/goal/`): OMP/Codex-style **autonomous
+self-continuation goal mode** — reverses the 2026-10-02 decision that
+dropped pi-plan's `/goal` (all three peer harnesses ship the feature:
+Codex v0.128+, Claude Code `/goal`, OMP core).
+
+- **`/goal <objective> [--budget N]`** (+ `status|pause|resume|clear|
+  budget <N|off>`): sets a session goal and fires the objective as the
+  first work turn. After every settled turn (`agent_settled` — pi's
+  "no retry/compaction/queued continuation will run" contract) a hidden
+  continuation re-prompts (`triggerTurn:true, deliverAs:"followUp"` —
+  cron's fire mechanism) with OMP's 6-point completion-audit prompt.
+- **`goal` tool (DIRECT, never deferred)**: `get` reports state;
+  `complete` ends the loop — accepted only from the agent, and only when
+  repo state proves every deliverable (budget exhaustion ≠ completion).
+  Plan mode blocks it via plan-tools.ts BLOCKED_TOOLS; goal mode never
+  bypasses plan gates or bash approvals.
+- **Token budget** = OMP `goalTokenDelta` (input+cacheWrite+output;
+  cacheRead excluded) over rolling `message_end` snapshots: a goal set
+  mid-run bills only post-goal deltas; a fresh-session goal bills from
+  zero (live-test fix — the first turn of a fresh-session goal is goal
+  work). Flip to `budget-limited` sends ONE wrap-up turn
+  (`followUp+triggerTurn`, deliberately not OMP's mid-turn steer: at a
+  pi turn boundary nothing can consume a steer). One wrap-up per budget
+  episode; `/goal budget` set-below-usage re-limits immediately, raise
+  above usage revives.
+- **Boundaries**: turn cap `goal.maxTurns` (default 50) stops the loop;
+  abort/plan-mode pauses; restart restores PAUSED — terminal tombstone
+  entries (`complete`/`stopped`) prevent cleared-goal resurrection.
+- **Settings**: GLOBAL `goal` section (`maxTurns`, `defaultBudget`,
+  0 = unbounded); /config → Tasks → Goal mode 🎯; status segment
+  `ceulen-goal`; registry position before rules/steering (append-only
+  `before_agent_start` composer). Live-verified in a herdr pane
+  (set/complete/continuation/budget/pause/resume + 16-entry jsonl trail).
+
 ## 0.24.0 — 2026-10-23
 
 pi 1.4.0 compatibility pass (verified by diffing the 1.3.0 and 1.4.0

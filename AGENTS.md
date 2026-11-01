@@ -725,6 +725,34 @@ section (`enabled`, `tickMs` clamped 5s–10min, `timeoutMs` clamped 1min–24h)
 trusted-project overlay honored at session_start; /config → Tasks → Cron ⏰.
 The `cron` skill ships via the module's own resources_discover.
 
+### Goal module (goal)
+
+OMP/Codex self-continuation goal mode (2026-11-01; see `extensions/modules/goal/`;
+ported from oh-my-pi `packages/coding-agent/src/goals` + pi-plan
+`commands/goal.ts` lineage, reversing the 2026-10-02 port-time drop of `/goal`).
+`/goal <objective> [--budget N]` (plus `status|pause|resume|clear|budget
+<N|off>`) sets a session goal and fires the objective as the first work turn;
+`/goal-model` and `/flow` interlocks from pi-plan are dropped (one model chain
+owner: advisor). After EVERY settled turn (`agent_settled` — pi's contract
+"no retry/compaction/queued continuation will run" makes OMP's 800ms editor
+guard unnecessary) the module sends a hidden continuation
+(`customType ceulen-goal-continue`, `triggerTurn:true, deliverAs:"followUp"` —
+cron's fire mechanism) carrying OMP's 6-point completion-audit prompt. The agent
+ends the loop itself via the `goal` tool (`get` | `complete` — DIRECT, never
+deferred: munin-loop lesson; plan mode blocks it via plan-tools.ts
+BLOCKED_TOOLS). Token budget uses OMP's `goalTokenDelta`
+(input+cacheWrite+output; cacheRead excluded) over rolling `message_end`
+assistant snapshots; the flip to `budget-limited` sends ONE wrap-up turn —
+deliberately `followUp+triggerTurn`, NOT OMP's `deliverAs:"steer"` (OMP folds
+usage mid-turn with the loop live; pi folds at turn boundaries where nothing
+can consume a steer — advisor-found stranding bug). Turn cap
+`goal.maxTurns` (default 50) stops the loop; abort/plan-mode pauses; restart
+restores PAUSED (terminal tombstone entries — `complete`/`stopped` — prevent
+cleared-goal resurrection). Settings: GLOBAL `goal` section (`maxTurns`,
+`defaultBudget`, 0 = unbounded); /config → Tasks → Goal mode 🎯. No OMP
+todo-coupling, no RPC/interactive continuation split, no `--goal` CLI flag
+(cron/`pi -p` prompts can set goals via command text).
+
 ### Permission module (permission)
 
 Ported from `@bacnh85/pi-permission` 0.2.10, rewritten plain JS → TS (see

@@ -50,6 +50,8 @@ import attachmentsModule from "../modules/attachments/index.ts";
 import { attachmentsConfig } from "../modules/attachments/configPanel.ts";
 import cronModule from "../modules/cron/index.ts";
 import { cronConfig } from "../modules/cron/configPanel.ts";
+import goalModule from "../modules/goal/index.ts";
+import { goalConfig } from "../modules/goal/configPanel.ts";
 import permissionModule from "../modules/permission/index.ts";
 import shellsModule from "../modules/shells/index.ts";
 import sgModule from "../modules/sg/index.ts";
@@ -163,6 +165,12 @@ export const MODULES: ModuleEntry[] = [
   // Cron after todo: scheduled prompts into the live session (the clock-driven
   // sibling of the task board). No before_agent_start → no ordering constraint.
   { name: "cron", category: "Tasks", describe: "Scheduled jobs firing prompts into the live session: add/remove/list/run/enable/disable/test/logs/export, headless pinned runs, crontab export.", load: cronModule, config: cronConfig, deferredTools: ["cron"] },
+  // Goal after cron: the autonomy sibling (cron is clock-driven, goal is
+  // condition-driven). It IS a before_agent_start composer (append-only
+  // goal_context) — must precede rules/steering like every prompt composer.
+  // `goal` tool stays DIRECT (munin-loop lesson: a protocol's terminal action
+  // never rides the deferred tier); plan mode blocks it via plan-tools.ts.
+  { name: "goal", category: "Tasks", describe: "Autonomous goal mode: /goal sets an objective; the loop re-injects continuation after every settled turn until the agent verifies completion via the goal tool, hits the token budget or turn cap, or you pause.", load: goalModule, config: goalConfig },
   // ── Tools ─────────────────────────────────────────────────────────────
   // Repair first in the section: it wraps the built-in tools; serena/fff ride
   // on top (no load-order dependency — hooks resolve at call time).
