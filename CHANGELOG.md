@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.26.0 — 2026-11-03
+
+Pi 1.5.0 support (peer range was `<1.5.0`, which semver-excluded the new
+release).
+
+- **Peer deps widened** to `>=0.99.1 <1.6.0` (both pi packages) — pi 1.5.0
+  + pi-tui 1.5.0 verified surface-by-surface: the pi-schema tool-argument
+  validation change is inert to ceulen (repair's `prepareArguments` hook
+  still runs before validation; repair reads only error paths, never
+  messages; hidden `__mt*` markers stay non-enumerable; no exotic TypeBox
+  features anywhere in the bundle).
+- **`changelogPath` added** to the `pi` manifest — pi 1.5.0's new
+  "Extension Updates" notice now shows ceulen's changes after
+  `pi update --extensions`.
+- Verified: tsc clean, 2951 tests pass / 0 fail, live rpc-mode smoke on
+  pi 1.5.0 (60 commands, `/ceulen` handled, zero stderr).
+
 ## 0.25.0 — 2026-11-01
 
 Goal module (`extensions/modules/goal/`): OMP/Codex-style **autonomous
