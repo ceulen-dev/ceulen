@@ -34,6 +34,7 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { getClassifierSettings } from "./lib/settings.js";
 import { registerThinkGate } from "./lib/think-gate.js";
 import { setClassifierRegistry } from "./configPanel.js";
+import { isChildSession } from "../../lib/child-session.js";
 
 // ── Risk gate (static, before Jev ever sees a command) ──────────────────────
 
@@ -179,9 +180,14 @@ export default function (pi: ExtensionAPI) {
   // here (the panel always opens after a session exists). Cleared on shutdown
   // so a stale registry never survives session replacement (router's pattern).
   pi.on("session_start", (_event, ctx) => {
+    // Module-scope registry stash — host-owned (a2a/subagent children share
+    // this process's module scope; their shutdown must not clear the host's
+    // registry or the host's classify/planGate/thinkGate stop resolving).
+    if (isChildSession(ctx.sessionManager)) return;
     setClassifierRegistry(ctx.modelRegistry);
   });
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (isChildSession(ctx.sessionManager)) return;
     setClassifierRegistry(undefined);
   });
 

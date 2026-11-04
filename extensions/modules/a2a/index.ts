@@ -31,6 +31,7 @@ import {
   metrics,
 } from "./lib/client";
 import { A2AServer, type SessionRunner } from "./lib/server";
+import { beginChildFactory, endChildFactory, markChildSession } from "../../lib/child-session.js";
 import { formatPeers, listPeers } from "./lib/discovery";
 import { childTranscriptDir } from "./lib/persistence";
 import { activityLine, activityStatusLine, activityToText, classifyLine, dispatchLabel, preview, type InboundActivity } from "./lib/activity";
@@ -107,12 +108,19 @@ function makeSessionRunner(ctx: ExtensionContext, cfg?: A2AConfig): SessionRunne
       cwd,
       agentDir: sdk.getAgentDir(),
     });
-    await resourceLoader.reload({
-      // Forward the host's trust decision so project-local (.pi/) extensions
-      // load in child sessions when the user already trusted the project —
-      // same behavior as pi-subagent's runner; never prompt (no UI).
-      resolveProjectTrust: async () => (ctx as any).isProjectTrusted?.() ?? false,
-    });
+    // Child-creation window: ceulen factories re-run inside reload() —
+    // cron/router factory-load gates read this depth.
+    beginChildFactory();
+    try {
+      await resourceLoader.reload({
+        // Forward the host's trust decision so project-local (.pi/) extensions
+        // load in child sessions when the user already trusted the project —
+        // same behavior as pi-subagent's runner; never prompt (no UI).
+        resolveProjectTrust: async () => (ctx as any).isProjectTrusted?.() ?? false,
+      });
+    } finally {
+      endChildFactory();
+    }
     // Persist the child's transcript (fleet task #252). Stock pi-a2a ran
     // children on SessionManager.inMemory, so a dispatched worker that
     // stalled or was killed mid-run left NO step history — the only evidence
@@ -189,6 +197,14 @@ function makeSessionRunner(ctx: ExtensionContext, cfg?: A2AConfig): SessionRunne
     // session_start) are silently missing from dispatched sessions. mode
     // "print" with no uiContext keeps ctx.hasUI === false, matching how the
     // host-only session_start guard below classifies child sessions.
+    //
+    // markChildSession + the factory window: ceulen's factories re-run when
+    // the child's resource loader reloads, and the child's session_start /
+    // session_shutdown fire right here — both in THIS process, sharing
+    // ceulen's ES-module scope with the host. The mark + depth let ceulen's
+    // host-owned handlers drop the child's lifecycle events instead of
+    // clobbering host state (the blank-status-band incident).
+    markChildSession(sessionManager);
     try {
       await session.bindExtensions({ mode: "print" });
     } catch {

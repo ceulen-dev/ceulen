@@ -20,6 +20,7 @@ import type { ModuleConfig } from "../../lib/registry.js";
 import { row, type PanelGroup, type PanelMenuOption } from "../../lib/panel.js";
 import { getGenRate } from "../../lib/rate.js";
 import { USAGE_STATUS_KEY, getUsageItem } from "../../lib/usage-store.js";
+import { isChildSession } from "../../lib/child-session.js";
 import { ComposerFooter, statsLine, sessionTotals } from "./lib/footer.ts";
 import { execFile } from "node:child_process";
 import { DEFAULT_SHAPE, IDENTITY_THEME, isShapeId, parseGitStats, previewShape, readGitBranch, ShapeEditor, shapeById, shapeTheme, SHAPES, type BandData, type GitStats, type ShapeTheme } from "./lib/shapes.ts";
@@ -27,6 +28,12 @@ import { readComposerShape, writeComposerSection } from "./lib/settings.ts";
 
 /** Live band/status data from the freshest session ctx; blank rather than stale. */
 let liveCtx: ExtensionContext | undefined;
+
+/** Test probe: the current module-scope liveCtx (child-contamination
+ *  regression tests). Undefined when no host session is installed. */
+export function __liveCtxForTests(): ExtensionContext | undefined {
+  return liveCtx;
+}
 
 /** Session-entry slice the footer totals read (structural; pi's entries fit). */
 interface FooterDataLike {
@@ -281,15 +288,23 @@ export function composerConfig(_pi?: ExtensionAPI): ModuleConfig {
 
 export default function composerModule(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
+    // liveCtx is MODULE-scope, shared with in-process child sessions (a2a
+    // inbound dispatches, extension-loading subagent children). A child's
+    // start/shutdown must never install or clear it — the child's shutdown
+    // blanked the host's whole status band (model · cwd · git · context)
+    // until restart, the reported bug.
+    if (isChildSession(ctx.sessionManager)) return;
     liveCtx = ctx;
     liveAutoCompact = readAutoCompact(pi);
     liveThinkingLevel = ctx.thinkingLevel;
     applyShape(readComposerShape(), ctx);
   });
-  pi.on("thinking_level_select", async (event) => {
+  pi.on("thinking_level_select", async (event, ctx) => {
+    if (isChildSession(ctx.sessionManager)) return; // module-scope label — host-owned
     liveThinkingLevel = event.level;
   });
-  pi.on("session_shutdown", async () => {
+  pi.on("session_shutdown", async (_event, ctx) => {
+    if (isChildSession(ctx.sessionManager)) return;
     liveCtx = undefined;
   });
 }

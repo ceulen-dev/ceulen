@@ -58,6 +58,7 @@ import { isSqliteFile, readSqlite } from "./lib/read-sqlite.js";
 import { checkDangerousCommand, isRecord, looksLikeCodePath } from "./lib/guards.js";
 import { repairToolArguments, type RepairKind } from "./lib/input-repair.js";
 import { applyPatchToFiles, parsePatch, PatchParseError } from "./lib/patch.js";
+import { isChildSession } from "../../lib/child-session.js";
 import { readRepairSettings } from "./lib/settings.js";
 import {
   extractConflictBlocks,
@@ -773,17 +774,25 @@ export default function repairModule(pi: ExtensionAPI) {
   });
 
   // ── Session lifecycle ──
-  pi.on("session_start", () => {
+  pi.on("session_start", (_event, ctx) => {
+    // Child sessions (a2a dispatch / subagent child) must not reset the
+    // host's per-session repair counters, re-enable bg delivery, or abort
+    // the host's live background jobs from their lifecycle.
+    if (isChildSession(ctx.sessionManager)) return;
     // Per-session — misses from a prior session must not escalate.
     editMismatchCounts.clear();
     repairCounts.clear();
   });
   if (autoBgOn) {
-    pi.on("session_start", () => setBgDeliveryEnabled(true));
+    pi.on("session_start", (_event, ctx) => {
+      if (isChildSession(ctx.sessionManager)) return;
+      setBgDeliveryEnabled(true);
+    });
     // Delivery is suppressed so the aborts don't fire triggerTurn follow-ups
     // into a session that is going away (/new and /resume also fire
     // session_shutdown, so cross-session leakage can't happen).
-    pi.on("session_shutdown", () => {
+    pi.on("session_shutdown", (_event, ctx) => {
+      if (isChildSession(ctx.sessionManager)) return;
       abortAllBgJobs(true);
     });
   }

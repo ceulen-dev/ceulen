@@ -26,6 +26,7 @@ import os from "node:os";
 import { spawn } from "node:child_process";
 import path from "node:path";
 import { skillsRoot } from "../../lib/skill-path.js";
+import { childFactoryDepth, isChildSession } from "../../lib/child-session.js";
 import { nextFires, validateSchedule } from "./lib/schedule.ts";
 import {
   addJob,
@@ -505,6 +506,12 @@ export function runCronAction(args: CronActionArgs): { content: { type: "text"; 
 let timer: NodeJS.Timeout | undefined;
 
 export default function cronExtension(pi: ExtensionAPI) {
+  // Child sessions (a2a inbound dispatch, subagent child) re-run this factory
+  // in-process: their invocation must not re-arm the process-wide timer bound
+  // to the child's sendMessage — after the child disposes, that send throws
+  // every tick and kills host cron. Headless cron children (PI_CRON_DISABLED)
+  // already arm nothing.
+  const isChildFactory = childFactoryDepth() > 0;
   const dir = jobsDir(getAgentDir());
   // Load-time read is global-only (no ctx yet — an untrusted cwd must not arm
   // the scheduler); session_start re-reads with the trust gate below.
@@ -552,12 +559,13 @@ export default function cronExtension(pi: ExtensionAPI) {
     timer = setInterval(tick, settings.tickMs);
     timer.unref?.();
   }
-  armTimer();
+  if (!isChildFactory) armTimer();
 
   // ctx (and project trust) only exists from session_start on — re-read the
   // repo scope there: a trusted repo may configure cron, an untrusted one is
   // ignored (must not re-enable the scheduler or shrink tickMs).
   pi.on("session_start", (_event, ctx) => {
+    if (isChildFactory || isChildSession(ctx.sessionManager)) return;
     Object.assign(
       settings,
       readCronSettings(ctx?.cwd, { project: ctx?.isProjectTrusted?.() === true }),

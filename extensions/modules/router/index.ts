@@ -4,8 +4,13 @@ import { migrateLegacyConfig } from "./lib/migrate.js";
 import { registerProvider, maybeRefreshCatalog } from "./lib/provider.js";
 import { refreshActiveModel } from "./lib/refresh.js";
 import { registerCommands } from "./commands/commands.js";
+import { childFactoryDepth, isChildSession } from "../../lib/child-session.js";
 
 export default function (pi: ExtensionAPI) {
+  // Child sessions (a2a dispatch / subagent child) re-run this factory
+  // in-process: skip their catalog refresh interval entirely (it would hold
+  // the child's ctx alive and re-register the provider per dispatch).
+  const isChildFactory = childFactoryDepth() > 0;
   // Base URL the currently-registered provider was built with — session_start
   // compares against it to detect a trust-gated repo override (see below).
   let registeredBaseUrl = "";
@@ -31,13 +36,19 @@ export default function (pi: ExtensionAPI) {
   // Uses the latest session ctx (ExtensionAPI carries no modelRegistry).
   // ponytail: 5-min tick + 15-min TTL constants, no env knob until asked.
   let lastCtx: ExtensionContext | undefined;
-  const periodicRefresh = setInterval(() => {
-    if (!lastCtx) return;
-    void maybeRefreshCatalog(lastCtx).catch(() => { /* transient — next tick retries */ });
-  }, 5 * 60_000);
-  periodicRefresh.unref?.();
+  if (!isChildFactory) {
+    const periodicRefresh = setInterval(() => {
+      if (!lastCtx) return;
+      void maybeRefreshCatalog(lastCtx).catch(() => { /* transient — next tick retries */ });
+    }, 5 * 60_000);
+    periodicRefresh.unref?.();
+  }
 
   pi.on("session_start", async (_event, ctx) => {
+    // In-process child sessions (a2a dispatch / subagent child) inherit the
+    // host's model + modelRegistry — their session_start must not re-register
+    // the provider or pull the catalog (a network fetch per dispatch).
+    if (isChildSession(ctx.sessionManager)) return;
     lastCtx = ctx;
     // Now ctx exists: trust-gate the repo scope. A trusted repo may add/override
     // the endpoint; an untrusted one is ignored (attacker-redirect guard).
@@ -70,6 +81,9 @@ export default function (pi: ExtensionAPI) {
 
   // Stop the interval from refreshing with a dead session's registry after
   // quit/reload/session replacement (review finding 4).
-  pi.on("session_shutdown", () => { lastCtx = undefined; });
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (isChildSession(ctx.sessionManager)) return;
+    lastCtx = undefined;
+  });
 }
 

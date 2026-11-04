@@ -88,6 +88,7 @@ import { startBackgroundTask,
 } from "./lib/background.ts";
 import { parseStructuredResult } from "./lib/result.ts";
 import { skillsRoot } from "../../lib/skill-path.js";
+import { isChildSession } from "../../lib/child-session.js";
 import { appendHistory, readHistory, markInterruptedOnRestart, trimHistory, getHistoryPath } from "./lib/history.ts";
 import { herdrCli } from './lib/herdr.ts';
 /** Keep-alive cadence for herdr delegations (test seam: shorten to assert). */
@@ -302,6 +303,12 @@ export default function (pi: ExtensionAPI) {
   // Invalidate agent cache + clear thread store on session replacement.
   pi.on("session_start", (event, ctx) => {
     currentCtx = ctx;
+    // A child session's start must not wipe the HOST's MODULE-scope state:
+    // threadStore (live widget rows) or the trusted-agent-dir cache — and its
+    // factory instance legitimately keeps its own currentCtx for sub-dispatch.
+    // Everything below is module-scope or process-wide (history file, git
+    // sweeps, the /config bridge) and stays host-owned.
+    if (isChildSession(ctx.sessionManager)) return;
     if (event.reason === "reload") invalidateAgentCache();
     threadStore.clear();
     trustedProjectAgentDirs.clear();
@@ -326,7 +333,8 @@ export default function (pi: ExtensionAPI) {
   });
 
   // Clear the widget + abort background tasks on shutdown.
-  pi.on("session_shutdown", () => {
+  pi.on("session_shutdown", (_event, ctx) => {
+    if (isChildSession(ctx.sessionManager)) return;
     widget.dispose();
     clearBackgroundTasks();
   });

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { loadCwdEnvFilesIfTrusted, parseEnvText } from "../../lib/env.js";
 import { resetGenRate, setGenRate } from "../../lib/rate.js";
+import { isChildSession } from "../../lib/child-session.js";
 import { resetUsageItem, setUsageItem } from "../../lib/usage-store.js";
 /** Single source of truth for User-Agent strings — matches package.json version. */
 const CEULEN_VERSION: string = (() => {
@@ -1932,6 +1933,11 @@ export default function (pi: ExtensionAPI) {
   const state: State = { lastRefreshAt: 0, refreshGeneration: 0, cumulativeOutput: 0, cumulativeDurationMs: 0, cumulativeCost: 0 };
 
   pi.on("session_start", async (_event, ctx) => {
+    // state.ctx is factory-scope, but the usage/rate stores it resets are
+    // MODULE-scope (shared with the composer band). An in-process child
+    // session (a2a dispatch, subagent child) must not reset the host's
+    // quota/rate band items or re-target the footer ctx.
+    if (isChildSession(ctx.sessionManager)) return;
     // Cwd .env files are untrusted repo content — ingest only for trusted
     // projects (idempotent; first trusted session wins).
     loadCwdEnvFilesIfTrusted(ctx);
@@ -1957,16 +1963,22 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("model_select", async (event, _ctx) => {
+    if (isChildSession(_ctx.sessionManager)) return;
     updateActiveAdapter(state, event.model);
     if (state.adapter) deferRefresh(state, true);
   });
 
   pi.on("before_provider_request", async (_event, _ctx) => {
+    if (isChildSession(_ctx.sessionManager)) return;
     state.responseStartPerf = performance.now();
   });
 
   pi.on("message_end", async (event, _ctx) => {
     if (event.message.role === "assistant") {
+      // Child sessions (a2a dispatch / subagent child in this process) share
+      // these factory-scope accumulators and the module-scope rate store —
+      // their turns must not feed the host's tok/s, cost totals, or footer.
+      if (isChildSession(_ctx.sessionManager)) return;
       // pi-budget parity: coerce + finite guard so a string/NaN cost.total can
       // never poison the accumulator (string concat garbles every subsequent
       // footer).
@@ -1996,6 +2008,7 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("after_provider_response", async (event, _ctx) => {
+    if (isChildSession(_ctx.sessionManager)) return;
     if (event.status >= 400) {
       state.responseStartPerf = undefined;
     }
@@ -2003,6 +2016,10 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
+    // Child sessions never installed state.ctx (guarded above) — but keep
+    // the identity check first so a child's shutdown can never clear the
+    // host's ctx / status / usage item.
+    if (isChildSession(ctx.sessionManager)) return;
     // Only tear down if this shutdown belongs to the installed session: a late
     // old-session shutdown (delivered after the next session_start) must not
     // stop the live refresh timer, drop the live in-flight fetch, or touch a

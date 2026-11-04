@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.26.1 — 2026-11-04
+
+**Fix: inbound A2A dispatches blanked the host TUI's status band (model ·
+cwd · git · context) until restart.**
+
+Root cause: each inbound dispatch runs a child pi session **in this
+process** (`makeSessionRunner` → `bindExtensions({mode:"print"})` fires the
+child's `session_start`; the dispose path emits `session_shutdown`). Pi
+re-invokes ceulen's module factories for the child while ES-module scope
+stays shared — so the child's lifecycle clobbered host module-scope state.
+Worst hit: composer's `liveCtx` (child shutdown cleared it → the status
+band renders blank; band shapes had replaced pi's native footer, so ALL
+identity info vanished — the reported screenshot). Same family: the
+child's shutdown cleared the classifier registry (host `classify`/
+planGate/thinkGate stopped resolving), killed the host's background
+subagent tasks and auto-bg bash jobs, stopped the shared serena worker,
+reset the usage/rate band items, fed child turns into the host's tok/s +
+cost totals, and re-armed cron's process timer + router's catalog interval
+onto the disposed child.
+
+Fix: `extensions/lib/child-session.ts` — a `markChildSession`
+WeakSet (a2a's runner + subagent's extension-loading runner mark their
+child session managers) + `beginChildFactory()/endChildFactory()` depth
+window around the loaders' `reload()`. Handlers that write module-scope or
+process-wide state gate on `isChildSession(ctx.sessionManager)`; factory-
+time arms (cron's interval, router's catalog refresh) gate on
+`childFactoryDepth()`. Gated modules: composer, classifier, usage,
+subagent, cron, serena, router, permission, repair. Children keep their
+tools and per-turn handlers (steering, fff, repair arg-fixing) — only
+host-owned bookkeeping is protected.
+
+Verified: unit + integration tests (`child-session.test.ts`, a2a
+`child-contamination.test.ts` — drives the real composer handlers), and a
+live SDK probe (`scripts/child-session-probe.ts`) that creates a real
+child session through the exact a2a runner path and asserts the host's
+`liveCtx` survives the full child lifecycle. Full suite 2956/0 fail.
+
 ## 0.26.0 — 2026-11-03
 
 Pi 1.5.0 support (peer range was `<1.5.0`, which semver-excluded the new

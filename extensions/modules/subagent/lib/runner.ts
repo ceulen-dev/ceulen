@@ -31,6 +31,7 @@ import {
   SessionManager,
   SettingsManager,
 } from "@earendil-works/pi-coding-agent";
+import { beginChildFactory, endChildFactory, markChildSession } from "../../../lib/child-session.js";
 import {
   classifyStopReason,
   createCombinedAbortSignal,
@@ -96,7 +97,12 @@ async function getExtensionLoader(cwd: string, projectTrusted: boolean): Promise
     noContextFiles: true,
     noThemes: true,
   });
-  await loader.reload({ resolveProjectTrust: async () => projectTrusted });
+  beginChildFactory();
+  try {
+    await loader.reload({ resolveProjectTrust: async () => projectTrusted });
+  } finally {
+    endChildFactory();
+  }
   // Log (don't throw on) extension load errors — a misbehaving extension must
   // not crash the child; the agent simply won't have that tool.
   const loadErrors = loader.getExtensions().errors;
@@ -213,6 +219,13 @@ export async function runSubAgent(options: {
         getAppendSystemPrompt: () => [], getAppendSystemPromptSources: () => [],
         extendResources: () => {}, reload: async () => {},
       };
+  // In-process child: ceulen's factories re-ran inside getExtensionLoader's
+  // reload() and this session's lifecycle events share the host's ES-module
+  // scope — mark it so host-owned handlers drop the child's events (a2a
+  // inbound-dispatch precedent). The lean stub path never runs factories, so
+  // it needs no marking.
+  const childSessionManager = SessionManager.inMemory(cwd);
+  if (loadExtensions) markChildSession(childSessionManager);
   const settingsManager = SettingsManager.inMemory({ compaction: { enabled: false }, retry: { enabled: true, maxRetries: 1 } });
   const startedAt = Date.now();
   let inactivityDeadline = startedAt + timeoutMs;
@@ -288,7 +301,7 @@ export async function runSubAgent(options: {
     let session: Awaited<ReturnType<typeof createAgentSession>>["session"];
     try {
       const created = await createAgentSession({
-        cwd: childCwd, model, thinkingLevel, resourceLoader, tools, sessionManager: SessionManager.inMemory(childCwd), settingsManager,
+        cwd: childCwd, model, thinkingLevel, resourceLoader, tools, sessionManager: childSessionManager, settingsManager,
         ...(modelRuntime ? { modelRuntime } : {}),
         // Pi 0.80.10 owns credentials in ModelRuntime; older SDKs still accept these.
         ...(authStorage ? { authStorage, modelRegistry } : {}),

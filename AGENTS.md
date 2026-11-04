@@ -906,6 +906,40 @@ half):
   compare against the session's own last write. `edit` needs no guard (its
   exact-match anchor already fails loudly on foreign edits).
 
+### In-process child sessions (a2a dispatch, subagent children) — the child-session guard
+
+Two runners create child pi sessions IN THE HOST PROCESS: the a2a module's
+`makeSessionRunner` (every inbound dispatch; `bindExtensions({mode:"print"})`
+fires the child's `session_start`, the dispose path emits `session_shutdown`)
+and the subagent SDK runner when the child's tool set needs extensions
+(`getExtensionLoader` → factories re-run). Pi re-invokes ceulen's module
+factories for each child, but **ES-module scope is shared by every factory
+invocation** — a child's lifecycle events used to clobber host module-scope
+state (live incident 2026-11: the first inbound dispatch blanked the host
+TUI's entire status band until restart; the child's shutdown cleared
+composer's `liveCtx` while the band shape had replaced pi's native footer).
+
+The contract (`extensions/lib/child-session.ts`):
+
+- Child runners `markChildSession(sessionManager)` (a WeakSet) and open a
+  `beginChildFactory()/endChildFactory()` depth window around the child
+  loader's `reload()` (factories run inside it).
+- Handlers that write **module-scope or process-wide state** MUST gate on
+  `isChildSession(ctx.sessionManager)` and return early for children
+  (gated today: composer, classifier, usage, subagent, cron, serena, router,
+  permission, repair).
+- Factory-time arms (intervals created at module load — cron's tick timer,
+  router's catalog refresh) gate on `childFactoryDepth() > 0`.
+- Children KEEP their tools and per-turn handlers (steering anchor, fff,
+  repair arg-fixing) — only host-owned bookkeeping is protected. Factory-
+  scope state (closures inside the factory function) is per-session and
+  needs no gate.
+
+When adding a module: module-scope `let`/`const` written from a session
+lifecycle handler ⇒ add the `isChildSession` gate. Tests:
+`extensions/lib/child-session.test.ts`, `extensions/modules/a2a/test/child-contamination.test.ts`
+(drives the real composer handlers); live probe `scripts/child-session-probe.ts`.
+
 ### Conflict rules (all modules share ONE extension object — duplicates silently overwrite without the guard)
 
 - The bundle entry wraps each module's `pi` in `guarded()` (extensions/index.ts, one shared ownership map for the whole load loop): a name claimed by a DIFFERENT module throws at load; same-module re-claims pass (router re-registers its provider at runtime — that's the supported update path). Contract tests: `extensions/modules/router/test/guard.test.ts`.

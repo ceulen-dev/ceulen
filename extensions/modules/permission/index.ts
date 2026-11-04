@@ -24,6 +24,7 @@ import * as nodePath from "node:path";
 import os from "node:os";
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@earendil-works/pi-coding-agent";
 import { isPlanActive } from "../../lib/plan-bridge.ts";
+import { isChildSession } from "../../lib/child-session.js";
 
 /** A rule object: pattern → action. Whole-tool string rules are kept too. */
 type RuleMap = Record<string, string>;
@@ -574,5 +575,10 @@ export default function permissionModule(pi: ExtensionAPI): void {
 
   // Reset doom-loop + session-allow memory on new session so a prior session's
   // calls don't poison the new one when pi reuses the extension process.
-  pi.on("session_start", () => { recent.length = 0; sessionAllows.clear(); resetInvalidRulesWarning(); });
+  pi.on("session_start", (_event, ctx) => {
+    // sessionAllows is MODULE-scope: an in-process child session's start must
+    // not wipe the host's accumulated allows (a2a child-session precedent).
+    if (isChildSession(ctx.sessionManager)) return;
+    recent.length = 0; sessionAllows.clear(); resetInvalidRulesWarning();
+  });
 }

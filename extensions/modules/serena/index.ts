@@ -15,6 +15,7 @@ const MAX_CHARS_PARAM = Type.Optional(Type.Number({ description: "Max response c
 const TIMEOUT_MS_PARAM = Type.Optional(Type.Number({ description: "Timeout in ms." }));
 
 import { truncateText } from "./lib/truncate";
+import { isChildSession } from "../../lib/child-session.js";
 
 const controlSchema = {
   project: PROJECT_PARAM,
@@ -602,8 +603,9 @@ export default function serenaToolsExtension(pi: ExtensionAPI) {
 
   // session_shutdown fires only on parent lifecycle events (reload/quit/new/fork/
   // resume) — child sessions (pi-subagent) use dispose() which does NOT emit it.
-  // So stopping here is safe: it never runs for children, and the module-level
-  // singleton means children reuse this worker without spawning their own.
+  // EXCEPTION: a2a inbound dispatches DO emit session_shutdown from their runner
+  // (leak fix for stdio MCP servers) — the isChildSession guard keeps them from
+  // stopping the HOST's worker (module-level singleton, shared process).
   //
   // ponytail: known race — if a child is mid-serena-request when the parent
   // reloads, worker.stop() rejects that request with "Serena worker stopped"
@@ -613,6 +615,7 @@ export default function serenaToolsExtension(pi: ExtensionAPI) {
   // the worker across parent+children was considered and rejected as
   // over-engineering for a cosmetic error-text difference during teardown.
   pi.on("session_shutdown", async (_event, ctx) => {
+    if (isChildSession(ctx.sessionManager)) return;
     try {
       await worker?.stop();
     } catch {
