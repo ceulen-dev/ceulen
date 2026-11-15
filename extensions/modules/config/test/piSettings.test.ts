@@ -21,6 +21,19 @@ describe("pi settings contribution", () => {
     }
   });
 
+  it("cache warming row tracks pi's idle default and round-trips all modes", () => {
+    const m = SettingsManager.inMemory();
+    const row = rowAt(m, "pi.cacheWarming");
+    // pi 1.5.1 flipped the default from "streaming" to "idle" — a stale
+    // defaultValue would render the row warning-styled on a pristine config.
+    assert.equal(row.defaultValue, "idle");
+    assert.equal(row.value, "idle");
+    for (const v of ["streaming", "off", "idle"] as const) {
+      row.set(v);
+      assert.equal(m.getCacheWarmingMode(), v);
+    }
+  });
+
   it("builds OMP-taxonomy tabs with unique keys and sections", () => {
     const groups = buildPiSettingsGroups(SettingsManager.inMemory());
     const keys = groups.flatMap((g) => g.rows.map((r) => r.key));

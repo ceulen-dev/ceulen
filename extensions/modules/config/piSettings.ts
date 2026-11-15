@@ -422,7 +422,7 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
     },
     {
       key: "pi.cacheWarming", tab: "Model", section: "Efficiency", label: "Cache warming",
-      kind: "string", value: m.getCacheWarmingMode(), values: CACHE_WARMING, defaultValue: "streaming",
+      kind: "string", value: m.getCacheWarmingMode(), values: CACHE_WARMING, defaultValue: "idle",
       description: "off: never; streaming: while the agent runs; idle: also between runs while continuation stays profitable.",
       set: (v) => m.setCacheWarmingMode(str(v) as never),
     },

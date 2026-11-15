@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.26.2 — 2026-11-15
+
+Pi 1.5.2 support (pi 1.5.0 → 1.5.2 diffed surface by surface; the peer
+range `>=0.99.1 <1.6.0` from 0.26.0 already covered it, so no range change).
+**No breaking changes for ceulen.** Everything below the fold is stock-parity
+plus one deferred feature finally landed.
+
+- **`/config` Cache warming row no longer warns on a pristine config.** Pi
+  1.5.1 flipped the setting's default from `streaming` to `idle`; ceulen's
+  row still carried the old default and rendered warning-styled (the
+  pi.tuiMode-1.0.0 failure mode). `CACHE_WARMING`'s option list and the
+  setter are unchanged.
+- **Subagent expand hints follow the user's keybinding.** The six
+  `(Ctrl+O to expand)` hints were hardcoded; they now read
+  `keyText("app.tools.expand")` from the render context (pi's
+  `KeybindingHints`, added in 1.5.0), so a rebind shows up. `expandKeyLabel()`
+  in `subagent/lib/render.ts` falls back to the literal `Ctrl+O` when the
+  context has no hints (the above-editor widget and `/agent` thread viewer
+  receive none) or a hint lookup throws — older pi keeps today's text.
+
+Audited and left alone: tool argument validation (`prepareArguments` still
+runs before `validateToolArguments` — repair's hook position is unchanged),
+the new `MarkdownTransformerOptions` (ceulen registers no markdown
+transformer), and `createReadStream` / the deprecated
+`GrepOperations.readFile` (repair wraps read/grep by name through the host
+factory with no custom `operations`, so 1.5.2's streaming read and
+ripgrep-sourced context lines flow into the wrapped tools for free).
+`settings-manager`, `settings-selector`, `theme-schema`, `jiti-loader`,
+`trust-manager`, `custom-editor` and the root export map are byte-identical
+across 1.5.0 → 1.5.2.
+
+Verified: `tsc --noEmit` clean against 1.5.2 types; 2962 tests / 2959 pass /
+0 fail / 3 known env-gated skips (a2a mDNS, web a11y Chrome); live rpc smoke
+on 1.5.2 registers all 60 commands, runs `/ceulen`, zero stderr.
+
 ## 0.26.1 — 2026-11-04
 
 **Fix: inbound A2A dispatches blanked the host TUI's status band (model ·

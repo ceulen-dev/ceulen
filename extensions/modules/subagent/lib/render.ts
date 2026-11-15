@@ -31,6 +31,21 @@ export function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
+/**
+ * The configured key(s) that toggle tool output, for `(… to expand)` hints.
+ * pi 1.5.x hands every tool render context a `keyText`/`keyHint` pair that
+ * resolves the HOST's keybindings (`app.tools.expand`, ctrl+o by default), so
+ * a user rebind is reflected instead of a hardcoded "Ctrl+O". Contexts without
+ * it (pi <1.5, widget/thread renderers) keep the literal.
+ */
+export function expandKeyLabel(context?: { keyText?: (k: "app.tools.expand") => string }): string {
+  try {
+    return context?.keyText?.("app.tools.expand") || "Ctrl+O";
+  } catch {
+    return "Ctrl+O";
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Display helpers
 // ---------------------------------------------------------------------------
@@ -214,6 +229,8 @@ export function renderSingleResult(
   expanded: boolean,
   theme: { fg: (c: any, t: string) => string; bold: (t: string) => string },
   agentColor?: string,
+  /** Configured expand key label — see expandKeyLabel(). */
+  expandKey = "Ctrl+O",
 ): Container | Text {
   const isError = isFailedResult(result);
   const icon = isError ? theme.fg("error", "✗") : theme.fg("success", "✓");
@@ -299,7 +316,7 @@ export function renderSingleResult(
       text += `\n${theme.fg("muted", "(no output)")}`;
     } else if (rawOutput.trim() !== "") {
       // All-structural output (headings/bullets/fences only) — still say so.
-      text += `\n${theme.fg("dim", "⎿ (markdown answer — Ctrl+O to view)")}`;
+      text += `\n${theme.fg("dim", `⎿ (markdown answer — ${expandKey} to view)`)}`;
     }
   } else if (!result.errorMessage && rawOutput.trim() === "" && !result.stderr) {
     // Error with no message, no stderr, no assistant output — say so.
@@ -312,7 +329,7 @@ export function renderSingleResult(
   // Hint: getResultOutput always returns at least "(no output)", so finalOutput
   // is always truthy — show the hint whenever there's any trace to expand.
   if (displayItems.length > 0 || (finalOutput && finalOutput !== "(no output)") || result.messages.length > 0) {
-    text += `\n${theme.fg("muted", "(Ctrl+O to expand · /agent for full thread)")}`;
+    text += `\n${theme.fg("muted", `(${expandKey} to expand · /agent for full thread)`)}`;
   }
   return new Text(text, 0, 0);
 }

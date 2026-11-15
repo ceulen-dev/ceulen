@@ -67,6 +67,7 @@ import {
 } from "./lib/security.ts";
 import {
   aggregateUsage,
+  expandKeyLabel,
   formatUsageStats,
   renderSingleResult,
 } from "./lib/render.ts";
@@ -1777,6 +1778,7 @@ ${lines.join("\n")}`;
       const scope: AgentScope = args.agentScope ?? "user";
       const fg = theme.fg.bind(theme);
       const now = Date.now();
+      const expandKey = expandKeyLabel(context);
 
       // Live-render driver: while the tool executes, re-render every second
       // (bash.js pattern) so elapsed + tool-call count stay fresh in the TUI.
@@ -1840,7 +1842,7 @@ ${lines.join("\n")}`;
             live;
         }
         if (args.chain.length > cap)
-          text += `\n  ${fg("muted", `... +${args.chain.length - cap} more${context.expanded ? "" : " (Ctrl+O to expand)"}`)}`;
+          text += `\n  ${fg("muted", `... +${args.chain.length - cap} more${context.expanded ? "" : ` (${expandKey} to expand)`}`)}`;
         return new Text(text, 0, 0);
       }
 
@@ -1859,7 +1861,7 @@ ${lines.join("\n")}`;
           text += `\n  ${fg(resolveAgentColor(t.agent), t.agent)}${fg("dim", ` ${preview}`)}${live}`;
         }
         if (args.tasks.length > cap)
-          text += `\n  ${fg("muted", `... +${args.tasks.length - cap} more${context.expanded ? "" : " (Ctrl+O to expand)"}`)}`;
+          text += `\n  ${fg("muted", `... +${args.tasks.length - cap} more${context.expanded ? "" : ` (${expandKey} to expand)`}`)}`;
         return new Text(text, 0, 0);
       }
 
@@ -1898,11 +1900,13 @@ ${lines.join("\n")}`;
 
       const fg = theme.fg.bind(theme);
       const mdTheme = getMarkdownTheme();
+      // Host-configured expand key (pi 1.5.x KeybindingHints); literal on older pi.
+      const expandKey = expandKeyLabel(_context);
 
       // --- Single ---
       if (details.mode === "single" && details.results.length === 1) {
         const r = details.results[0];
-        return renderSingleResult(r, expanded, theme, resolveAgentColor(r.agent));
+        return renderSingleResult(r, expanded, theme, resolveAgentColor(r.agent), expandKey);
       }
 
       // --- Chain ---
@@ -1971,7 +1975,7 @@ ${lines.join("\n")}`;
         }
         const totalUsage = formatUsageStats(aggregateUsage(details.results));
         if (totalUsage) text += `\n${fg("dim", totalUsage)}`;
-        text += `\n${fg("muted", "(Ctrl+O to expand)")}`;
+        text += `\n${fg("muted", `(${expandKey} to expand)`)}`;
         return new Text(text, 0, 0);
       }
 
@@ -2056,7 +2060,7 @@ ${lines.join("\n")}`;
           const totalUsage = formatUsageStats(aggregateUsage(details.results));
           if (totalUsage) text += `\n${fg("dim", totalUsage)}`;
         }
-        if (!expanded) text += `\n${fg("muted", "(Ctrl+O to expand)")}`;
+        if (!expanded) text += `\n${fg("muted", `(${expandKey} to expand)`)}`;
         return new Text(text, 0, 0);
       }
 

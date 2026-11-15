@@ -181,9 +181,13 @@ cleared on idle/session change (the widget controller owns set + clear, and
 the composer footer passes the item through — it filters only `ceulen-usage`);
 `operation: status|wait` tool rows render the job tree (`⏳ waiting on N of M
 jobs`, waited task first, then ✓ settled rows with a `⎿` output snippet);
-chain/parallel call rows honor Ctrl+O expansion (full task list instead of the
-cap-3 preview). Raw SDK event labels (`message_end`…) never render — only
-`herdr:`-prefixed lifecycle labels do.
+chain/parallel call rows honor the `app.tools.expand` keybinding's expansion
+(full task list instead of the cap-3 preview). Expand hints are rendered from
+the render context's `keyText("app.tools.expand")` (pi 1.5.x `KeybindingHints`,
+so a user rebind shows up) via `expandKeyLabel()` in `lib/render.ts`; renderers
+with no context (the above-editor widget, the `/agent` thread viewer) and pi
+<1.5 keep the literal `Ctrl+O`. Raw SDK event labels (`message_end`…) never
+render — only `herdr:`-prefixed lifecycle labels do.
 
 - **Five bundled agents** (`agents/*.md`: scout, tester, worker, planner,
   reviewer); user `~/.pi/agent/agents/*.md` and trusted project
