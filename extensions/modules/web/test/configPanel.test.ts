@@ -8,12 +8,29 @@ import os from "node:os";
 import path from "node:path";
 
 import { buildWebGroups, diffWebPatch, readWebRowValues, webConfig } from "../configPanel";
-import { writeWebSection } from "../lib/settings";
+import { writeWebSection, ENV_TO_SETTINGS_KEY } from "../lib/settings";
 
 function tmpAgentDir(): string {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "web-panel-"));
   process.env.PI_CODING_AGENT_DIR = dir;
   return dir;
+}
+
+/** Scrub every mapped web var for one test: the real agent dir's .env.local is
+ *  ingested at import, so "settings supply this value" assertions are only
+ *  meaningful when no env override shadows them (env wins by design). */
+const SCRUBBED_ENV = Object.keys(ENV_TO_SETTINGS_KEY);
+function withoutMappedEnv<T>(fn: () => T): T {
+  const saved = SCRUBBED_ENV.map((k) => [k, process.env[k]] as const);
+  for (const k of SCRUBBED_ENV) delete process.env[k];
+  try {
+    return fn();
+  } finally {
+    for (const [k, v] of saved) {
+      if (v === undefined) delete process.env[k];
+      else process.env[k] = v;
+    }
+  }
 }
 
 function withEnv(key: string, value: string | undefined, fn: () => void): void {
@@ -46,13 +63,13 @@ describe("web configPanel", () => {
   it("readWebRowValues: env wins, settings fallback, empty default", () => {
     const dir = tmpAgentDir();
     try {
-      withEnv("BRAVE_API_KEY", "env-key", () => {
+      withoutMappedEnv(() => withEnv("BRAVE_API_KEY", "env-key", () => {
         writeWebSection({ "brave.apiKey": "settings-key", "chat.apiKey": "chat-key" }, path.join(dir, "settings.json"));
         const values = readWebRowValues("/nonexistent-project", false);
         assert.deepEqual(values["brave.apiKey"], { value: "env-key", source: "env" });
         assert.deepEqual(values["chat.apiKey"], { value: "chat-key", source: "global settings" });
         assert.deepEqual(values["gemini.proxy"], { value: "", source: "default" });
-      });
+      }));
     } finally {
       fs.rmSync(dir, { recursive: true, force: true });
       delete process.env.PI_CODING_AGENT_DIR;

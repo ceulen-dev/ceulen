@@ -265,6 +265,34 @@ render — only `herdr:`-prefixed lifecycle labels do.
   review; the task-end whole-diff pass is the `review` skill the module
   contributes via resources_discover).
 
+**herdr-app backend (`lib/herdr-app.ts`, 2026-11)** — the desktop app
+(`herdr-app` for layout + herdr-core `hc` for terminals) is a SECOND
+visible-pane backend next to the herdr TUI. Detection is `HC_TERMINAL_ID`
+(app-created terminals have `name: null`, so the hc ADDRESS `t7` is the
+identity); `subagent.herdr:"off"` and the `PI_SUBAGENT_HERDR=off` child guard
+disable both backends. `resolveRunner` (index.ts) keeps the TUI path exactly
+as-is and falls back to the app ONLY in auto mode — an explicit
+`runner:"herdr"` outside the TUI keeps its "not inside herdr" error. Topology
+mirrors the TUI (`herdr-app do tab.new`/`pane.split`, one tab per agent type,
+one pane per instance, adopted label-matched tabs never close-eligible);
+prompting is `hc send --wait` (real OSC 7501 turns, so the TUI's
+stalled-turn evidence machinery is unnecessary), collection reuses the same
+report-file → pane-tail contract, cancel is `hc interrupt` (+`hc kill` while
+still working). TWO app-only guards, each from a live incident: a
+**readiness gate** (`hc get` until a live idle/done pi — `hc send` pastes
+into whatever is on screen, so sending to a booting child left the task
+unsubmitted and `--wait` still reported a settled turn) plus a
+**turn-advance proof**, and a **reply filter** that cuts the pane capture to
+the text after the delivery contract so an echo-only pane is never collected
+as a success. Pane-capture provenance travels as the `SubAgentResult.bestEffort`
+DATA flag — never a text prefix, which travelled into `{previous}` chain
+substitution and derailed the next child (live 2026-11-17).
+`formatChainReport` (lib/render.ts) now surfaces EVERY chain step after the
+final output. The `herdr` control tool routes per backend (list/status/read/
+prompt/cancel/focus/close-tab/forget). Deliberate ceiling: app children get no
+`ADVISOR_MARKER_ENV` (herdr-core takes env only through its JSON API), so
+collection happens at first settle.
+
 **Multi-session hardening (2026-10, OMP/Claude-Code port at ponytail scale)**
 — `lib/runner.ts` gained a worktree-lifecycle layer (`withRepoLock`,
 `sweepStaleWorktrees`, owner markers, baseline carry, CoW backend):

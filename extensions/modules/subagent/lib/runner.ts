@@ -148,6 +148,11 @@ export interface SubAgentResult {
   status?: SubagentStatus;
   /** Wall-clock duration of the run, set by runSubAgent (Date.now() - startedAt). */
   durationMs?: number;
+  /** True when the output was scraped from a pane's scrollback rather than a
+   *  report file or structured messages — the parent should treat it with
+   *  appropriate distrust. Provenance DATA, not a prefix: pasting a marker
+   *  into the text poisons `{previous}` chain substitution (live 2026-11-17). */
+  bestEffort?: boolean;
 }
 
 // ---------------------------------------------------------------------------

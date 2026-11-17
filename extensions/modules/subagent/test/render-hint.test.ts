@@ -48,3 +48,34 @@ test("renderSingleResult: collapsed hint uses the configured expand key", () => 
   const fallback = renderText(renderSingleResult(r, false, plainTheme));
   assert.match(fallback, /Ctrl\+O to expand/);
 });
+
+// ── Chain report: per-step results ─────────────────────────────────────────
+// `{previous}` only forwards one step, so intermediate findings must be carried
+// by the result text itself; the final answer stays first for callers.
+
+test("formatChainReport: final output first, then every step with its own report", async () => {
+  const { formatChainReport } = await import("../lib/render.ts");
+  const results: SubAgentResult[] = [
+    { ...result({ agent: "scout" }), messages: [{ role: "assistant", content: [{ type: "text", text: "FINDINGS-1" }], stopReason: "stop" }] as never },
+    { ...result({ agent: "planner" }), messages: [{ role: "assistant", content: [{ type: "text", text: "FINDINGS-2" }], stopReason: "stop" }] as never },
+  ];
+  const text = formatChainReport("FINDINGS-2", results);
+  // Final answer leads.
+  assert.ok(text.startsWith("FINDINGS-2"));
+  // Both steps present, labeled with index/agent/status.
+  assert.match(text, /## Chain steps \(2\)/);
+  assert.match(text, /### Step 1\/2 — scout: completed\n\nFINDINGS-1/);
+  assert.match(text, /### Step 2\/2 — planner: completed\n\nFINDINGS-2/);
+});
+
+test("formatChainReport: failure and pane-capture provenance are both surfaced", async () => {
+  const { formatChainReport } = await import("../lib/render.ts");
+  const results: SubAgentResult[] = [
+    { ...result({ agent: "scout" }), status: "success", bestEffort: true, messages: [{ role: "assistant", content: [{ type: "text", text: "SCRAPED" }], stopReason: "stop" }] as never },
+    { ...result({ agent: "worker" }), exitCode: 1, status: "error", stopReason: "timeout", errorMessage: "timed out", messages: [] },
+  ];
+  const text = formatChainReport("(no output)", results);
+  assert.match(text, /Step 1\/2 — scout: completed ⚠ best-effort pane capture/);
+  assert.match(text, /Step 2\/2 — worker: failed \(timeout\)/);
+  assert.match(text, /timed out/);
+});

@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.27.0 — 2026-11-17
+
+**herdr-app is now a first-class subagent delegation backend.** ceulen's
+visible-pane delegation only knew the herdr TUI (`herdr` CLI, `HERDR_ENV`), so
+inside the Herdr desktop app (`HC_TERMINAL_ID`, `herdr-app` + herdr-core `hc`)
+every dispatch silently fell back to the in-process SDK runner and the `herdr`
+control tool refused to run at all. New `subagent/lib/herdr-app.ts` plus a
+runner/control-tool rewire fixes that: one tab per agent type
+(`herdr-app do tab.new`), one pane per instance, tasks via `hc send --wait`,
+reports via the same file/inline contract, and the full
+list/status/read/prompt/cancel/focus/close-tab/forget surface driven by `hc`.
+
+- **Auto-detection, no new settings.** `HC_TERMINAL_ID` selects the app
+  backend; `subagent.herdr:"off"` and the `PI_SUBAGENT_HERDR=off` child guard
+  still disable delegation everywhere, and an explicit `runner:"herdr"`
+  outside the TUI keeps its existing error.
+- **Readiness gate + turn-advance proof (live incident).** `hc send` pastes
+  into whatever is on screen; against a booting child the task sat unsent in
+  its composer while `hc send --wait` still reported a settled turn, so the
+  parent collected its own echoed task as success. The backend now waits for a
+  live input-ready pi and refuses a "settled" reply whose turn never advanced.
+- **No more echo collected as a report.** A pane capture is cut to the text
+  after the delivery contract; an echo-only pane yields no output, so the
+  dispatch fails loudly instead of returning a false success.
+- **`done` counts as ready.** pi reports `done` for a turn that finished
+  unwatched; accepting only `idle` made every follow-up `herdr prompt` to a
+  settled agent wait 120 s and fail.
+- **Pane-capture provenance is DATA, not a text prefix.** The
+  `[best-effort pane capture]` prefix travelled into `{previous}` chain
+  substitution, and the next child read the marker as a prompt-injection
+  signal and derailed. It is now `SubAgentResult.bestEffort`, rendered where a
+  human reads it (`⚠ best-effort pane capture`).
+- **Chain results carry every step.** `formatChainReport` (lib/render.ts)
+  appends a per-step section (status, report, worktree patch, provenance)
+  after the final output — `{previous}` only ever forwards one step, so
+  intermediate findings used to vanish from the result.
+
+Also fixed (test hygiene, found while gating this release): the web settings
+suites scrubbed a HAND-LISTED subset of the mapped env vars before asserting
+"settings supply this value". Any machine whose `.env.local` carries a var
+missing from that list (here `WEB_CHAT_API_BASE_URL`) saw red locally while CI
+stayed green, because env legitimately wins over settings. Both suites now
+scrub `ENV_TO_SETTINGS_KEY` in full, so the assertions hold on a developer
+machine and in CI alike.
+
+Verified: `tsc --noEmit` clean; full `npm test` **2987 pass / 0 fail / 3
+env-gated skips** (a2a mDNS, web a11y Chrome); `npm pack --dry-run` clean.
+Live-verified end-to-end inside a running Herdr app: all five bundled agents
+(scout/tester/worker/planner/reviewer) delegated to real app panes across
+single, parallel and chain modes, through both the read-only inline channel
+and the report-file channel.
+
 ## 0.26.2 — 2026-11-15
 
 Pi 1.5.2 support (pi 1.5.0 → 1.5.2 diffed surface by surface; the peer

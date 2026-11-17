@@ -27,7 +27,12 @@ function setup(): void {
   // test process env and "unset everywhere" is a lie. Scrub the mapped
   // vars for the suite's lifetime (the web module re-reads settings layers,
   // not env, for these assertions).
-  for (const v of ["BRAVE_API_KEY", "FIRECRAWL_API_KEY", "CRAWL4AI_API_TOKEN", "GEMINI_WEB_SECURE_1PSID", "ZAI_API_KEY", "WEB_IMAGE_API_KEY", "WEB_CHAT_API_KEY", "SEARXNG_BASE_URL"]) delete process.env[v];
+  // Scrub EVERY mapped var (not a hand-listed subset): the map grows, and a
+  // missed one makes "unset everywhere" a lie on any machine whose .env.local
+  // carries it — the exact failure that made these suites red locally while
+  // CI stayed green (WEB_CHAT_API_BASE_URL was missing here).
+  for (const v of Object.keys(ENV_TO_SETTINGS_KEY)) delete process.env[v];
+  for (const v of ["SEARXNG_BASE_URL", "WEB_IMAGE_API_LABEL", "WEB_IMAGE_MIN_INTERVAL_MS"]) delete process.env[v];
   // Trust: the real trust.json walk won't see our temp project → untrusted by
   // default. isProjectTrusted(cwd, dirs) is injected nowhere here, so trust
   // tests go through writeWebSection/readWebSettings with explicit trusted

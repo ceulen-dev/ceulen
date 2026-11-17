@@ -11,7 +11,8 @@ import * as os from "node:os";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { Container, Markdown, Spacer, Text } from "@earendil-works/pi-tui";
 import type { Message } from "./types.ts";
-import { type SubAgentResult, isFailedResult, getResultOutput, getFinalOutput } from "./runner.ts";
+import { type SubAgentResult, isFailedResult, getResultOutput, getFinalOutput, formatPatchBlock } from "./runner.ts";
+import { truncateParallelOutput } from "./security.ts";
 
 // ---------------------------------------------------------------------------
 // Safe type guards
@@ -65,6 +66,29 @@ function formatMs(ms: number): string {
   if (ms >= 60_000) return `${Math.floor(ms / 60_000)}m ${Math.floor((ms % 60_000) / 1_000)}s`;
   if (ms >= 1_000) return `${(ms / 1_000).toFixed(1)}s`;
   return `${ms}ms`;
+}
+
+/**
+ * The chain result's text: the FINAL step's output first (what callers act on),
+ * then every step's report. `{previous}` only carries one step forward, so
+ * without the per-step section an intermediate step's findings vanish from the
+ * result entirely. Patches stay labeled per step for ordered merging.
+ */
+export function formatChainReport(finalText: string, results: SubAgentResult[]): string {
+  const perStep = results
+    .map((r, i) => {
+      const status = isFailedResult(r)
+        ? `failed${r.stopReason ? ` (${r.stopReason})` : ""}`
+        : r.stopReason === "blocked"
+          ? "blocked — awaiting input in its pane"
+          : "completed";
+      const body = truncateParallelOutput(getResultOutput(r));
+      const patch = formatPatchBlock(r);
+      const caveat = r.bestEffort ? " ⚠ best-effort pane capture" : "";
+      return `### Step ${i + 1}/${results.length} — ${r.agent}: ${status}${caveat}\n\n${body}${patch ? `\n\n${patch}` : ""}`;
+    })
+    .join("\n\n---\n\n");
+  return [finalText || "(no output)", `---\n\n## Chain steps (${results.length})\n\n${perStep}`].join("\n\n");
 }
 
 export function formatUsageStats(
@@ -255,7 +279,11 @@ export function renderSingleResult(
     container.addChild(new Text(theme.fg("muted", "─── Task ───"), 0, 0));
     container.addChild(new Text(theme.fg("dim", result.task), 0, 0));
     container.addChild(new Spacer(1));
-    container.addChild(new Text(theme.fg("muted", "─── Output ───"), 0, 0));
+    container.addChild(new Text(
+      theme.fg("muted", "─── Output ───") +
+      (result.bestEffort ? ` ${theme.fg("warning", "(best-effort pane capture)")}` : ""),
+      0, 0,
+    ));
     if (displayItems.length === 0 && !finalOutput) {
       container.addChild(new Text(theme.fg("muted", "(no output)"), 0, 0));
     } else {
@@ -323,6 +351,9 @@ export function renderSingleResult(
     // (When errorMessage IS set, the Error: line above already conveys it.)
     text += `\n${theme.fg("muted", "(no output)")}`;
   }
+  // Provenance of a scraped answer travels as DATA (result.bestEffort), never
+  // as a text prefix — a prefix would flow into `{previous}` chain payloads.
+  if (result.bestEffort) text += `\n${theme.fg("warning", "⚠ best-effort pane capture")}`;
   const usageStr = formatUsageStats(result.usage, result.model, { toolCount, durationMs: result.durationMs, thinking: result.thinking, advisorRounds: result.advisorRounds });
   if (usageStr) text += `\n${theme.fg("dim", usageStr)}`;
   if (result.patch) text += `\n${theme.fg("success", "🌿 worktree")} (${result.patch.split("\n").length} diff lines)`;

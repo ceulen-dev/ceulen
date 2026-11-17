@@ -298,9 +298,13 @@ export function clearHerdrRegistry(): void {
 // ---------------------------------------------------------------------------
 
 /** herdr injects HERDR_ENV=1 + workspace/pane IDs into every managed pane. */
-export function herdrEnvDetected(): boolean {
+export function herdrTuiEnvDetected(): boolean {
   return process.env.HERDR_ENV === "1" && Boolean(process.env.HERDR_WORKSPACE_ID);
 }
+
+/** Alias kept for the herdr-TUI call sites; herdr-APP detection lives in
+ *  lib/herdr-app.ts (HC_TERMINAL_ID, set by herdr-core in every terminal). */
+export const herdrEnvDetected = herdrTuiEnvDetected;
 
 /** settings.subagent.herdr === "off" (or the child recursion guard) disables herdr dispatch. */
 export function herdrDisabled(subagentSettings: { herdr?: unknown } | undefined): boolean {
@@ -749,15 +753,16 @@ export async function promptAndWait(opts: {
 /** Best-effort output collection: report file first, pane scrollback fallback. */
 /** Cap for report-file content fed back into the parent context. */
 export const MAX_REPORT_BYTES = 256 * 1024;
+/** Cap for the pane-scrollback fallback (also bounds {previous} in chains). */
+export const MAX_PANE_CAPTURE_BYTES = 8 * 1024;
 
-export async function collectResult(opts: {
-  handle: HerdrHandle;
-  exec: HerdrExec;
-}): Promise<{ output: string; source: "file" | "pane" | "none" }> {
+/** The delivery-contract report file, or undefined when absent/empty.
+ *  Shared by both backends (herdr TUI + herdr-app): open + stat FIRST, read at
+ *  most MAX_REPORT_BYTES (+1 sentinel) — a runaway report (GBs) must not
+ *  buffer whole into memory before the cap. */
+export async function readReportFile(resultFile: string): Promise<string | undefined> {
   try {
-    // F16: open + stat FIRST, read at most MAX_REPORT_BYTES (+1 sentinel) —
-    // a runaway report (GBs) must not buffer whole into memory before the cap.
-    const fh = await fs.open(opts.handle.resultFile, "r");
+    const fh = await fs.open(resultFile, "r");
     const want = Math.min((await fh.stat()).size, MAX_REPORT_BYTES + 1);
     const raw = Buffer.alloc(want);
     await fh.read(raw, 0, want, 0);
@@ -765,22 +770,32 @@ export async function collectResult(opts: {
     const text = raw.length > MAX_REPORT_BYTES
       ? raw.subarray(0, MAX_REPORT_BYTES).toString("utf8") + "\n\n…(truncated)"
       : raw.toString("utf8");
-    if (text.trim()) return { output: text.trim(), source: "file" };
-  } catch { /* no report file — fall back to pane read */ }
+    return text.trim() ? text.trim() : undefined;
+  } catch {
+    return undefined; // no report file — caller falls back to a pane read
+  }
+}
+
+/** Tail-cap pane capture text for parent context. */
+export function capPaneCapture(paneText: string): string {
+  return paneText.length > MAX_PANE_CAPTURE_BYTES
+    ? "…(earlier pane output truncated)\n" + paneText.slice(-MAX_PANE_CAPTURE_BYTES)
+    : paneText;
+}
+
+export async function collectResult(opts: {
+  handle: HerdrHandle;
+  exec: HerdrExec;
+}): Promise<{ output: string; source: "file" | "pane" | "none" }> {
+  const fromFile = await readReportFile(opts.handle.resultFile);
+  if (fromFile) return { output: fromFile, source: "file" };
   const read = await opts.exec(
     "herdr",
     ["agent", "read", opts.handle.name, "--source", "recent-unwrapped", "--lines", "200"],
     { timeout: 10_000 },
   );
   const paneText = read.code === 0 ? read.stdout.trim() : "";
-  // Pane scrollback can contain pre-prompt noise (resumed sessions, earlier
-  // turns). The final reply sits at the END, so cap to the tail — this also
-  // bounds {previous} substitution in chains.
-  const MAX_PANE_CAPTURE_BYTES = 8 * 1024;
-  const capped = paneText.length > MAX_PANE_CAPTURE_BYTES
-    ? "…(earlier pane output truncated)\n" + paneText.slice(-MAX_PANE_CAPTURE_BYTES)
-    : paneText;
-  return { output: capped, source: paneText ? "pane" : "none" };
+  return { output: capPaneCapture(paneText), source: paneText ? "pane" : "none" };
 }
 
 /** Interrupt a delegated agent: esc first (pi interrupt), ctrl+c if still working. */
@@ -847,12 +862,12 @@ export function buildHerdrResult(
     status = "success";
   }
   // Synthetic assistant message carrying the report — keeps getResultOutput /
-  // renderSingleResult working unchanged (they read result.messages).
-  // Pane-source output is a best-effort capture (echoed task, TUI noise) —
-  // label it so the parent treats it with appropriate distrust.
-  const output = outcome.outputSource === "pane" && outcome.output
-    ? `[best-effort pane capture]\n\n${outcome.output}`
-    : outcome.output;
+  // renderSingleResult working unchanged (they read result.messages). Pane
+  // output is best-effort (echoed task, TUI noise); that is flagged as the
+  // `bestEffort` DATA field below, NOT as a text prefix: a prefix travelled
+  // into `{previous}` chain substitution and derailed the next step (live
+  // 2026-11-17: the child read the marker as a prompt-injection signal).
+  const output = outcome.output;
   const messages = (output
     ? [{ role: "assistant", content: [{ type: "text", text: output }], stopReason: "stop" }]
     : []) as unknown as Message[];
@@ -870,6 +885,7 @@ export function buildHerdrResult(
     errorMessage,
     status,
     durationMs: outcome.durationMs,
+    bestEffort: outcome.outputSource === "pane" && Boolean(output),
   };
 }
 
@@ -902,7 +918,7 @@ function advisorMarkerPath(cwd: string, stamp: string): string {
 }
 
 /** Session + report files share one stamp so they correlate per dispatch. */
-function dispatchStamp(): string {
+export function dispatchStamp(): string {
   return Date.now().toString(36);
 }
 
@@ -1054,15 +1070,20 @@ function readAdvisorMarkerFile(file: string): AdvisorMarker | undefined {
  *
  * Returns the number of steered revisions folded in.
  */
-async function awaitAdvisorCycle(opts: {
+export async function awaitAdvisorCycle(opts: {
   name: string;
   markerFile: string;
   advisorWaitMs: number;
   signal?: AbortSignal;
   onPhase?: (phase: string) => void;
-  exec: HerdrExec;
+  /** pane-state probe; defaults to the herdr-TUI `agent get` reader. The
+   *  herdr-app backend passes its own `hc get` probe. */
+  exec?: HerdrExec;
+  getState?: () => Promise<HerdrAgentState>;
 }): Promise<number> {
   if (opts.advisorWaitMs <= 0) return 0;
+  const probeState = opts.getState
+    ?? (() => getAgentState(opts.name, opts.exec ?? defaultExec));
   const deadline = Date.now() + opts.advisorWaitMs;
   const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
   const stopped = () => Boolean(opts.signal?.aborted) || Date.now() >= deadline;
@@ -1093,7 +1114,7 @@ async function awaitAdvisorCycle(opts: {
     opts.onPhase?.("advisor-revise");
     let sawWorking = false;
     while (!stopped()) {
-      const state = await getAgentState(opts.name, opts.exec);
+      const state = await probeState();
       if (state === "working" || state === "blocked") sawWorking = true;
       else if (sawWorking && (state === "idle" || state === "done")) break;
       await sleep(1000);
