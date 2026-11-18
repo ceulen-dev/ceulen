@@ -293,6 +293,39 @@ prompt/cancel/focus/close-tab/forget). Deliberate ceiling: app children get no
 `ADVISOR_MARKER_ENV` (herdr-core takes env only through its JSON API), so
 collection happens at first settle.
 
+**rex backend (`lib/rex.ts`, 2026-11)** — Rex (the `rex` CLI + server) is a
+THIRD visible-pane backend. Detection is `REX_SESSION` plus a `rex` binary that
+answers (`rex version` — Rex has no `--version`). Auto-resolution order is
+herdr TUI → rex → herdr-app → sdk; an explicit `runner:"herdr"` still never
+re-routes. Topology mirrors the others: one WINDOW per agent type (label =
+agent name, adopted when present), one PANE per instance (`rex split` beside
+the window's last tiled block), child = full `pi` with the `buildPiArgs`
+contract. Divergences, all live-probed against rex 0.1.0-preview.20 / API
+revision 16:
+
+- `rex block call` takes SHORT method names (`format`, `program_status`,
+  `process`, `blob_read`) — the fully-qualified name is rejected.
+- No primitive follows a program's TURN (`rex wait` waits for a block to
+  EXIT), so `promptRexAndWait` is built from `program_status` (OSC 7501, which
+  pi publishes): readiness gate → `block send` + `block send-key enter` → poll.
+  No turn counter exists, so the turn proof is a FRESH root-record
+  `updated_at`: a paste that never submitted leaves state AND timestamp
+  untouched (live-probed) and is reported "pasted but never submitted"
+  (`rexTiming.unsentGraceMs`) instead of collected as success.
+- `format` returns a HEAD slice (plus `id`/`total`) — a tail is fetched with
+  `blob_read` at `total - N`; asking for the whole scrollback would park
+  megabytes in the parent's context (`readRexBlock`).
+- Env vars ARE reachable by wrapping the child in `/usr/bin/env VAR=…`, so rex
+  children get BOTH the advisor marker (`ADVISOR_MARKER_ENV`, so
+  `awaitAdvisorCycle` works — unlike herdr-app) and the `PI_SUBAGENT_HERDR=off`
+  recursion guard.
+
+The `herdr` control tool gained a `runRexControl` branch (same 8 actions;
+`close-tab` closes the rex WINDOW and refuses while a sibling is busy or
+unverifiable). `RunnerKind`/`SubagentDetails.runner` carry `"rex"`;
+`herdrProgress(…, "rex")` labels the widget, whose pane-label gate accepts
+`rex:` alongside `herdr:`. Tests: `extensions/modules/subagent/test/rex.test.ts`.
+
 **Multi-session hardening (2026-10, OMP/Claude-Code port at ponytail scale)**
 — `lib/runner.ts` gained a worktree-lifecycle layer (`withRepoLock`,
 `sweepStaleWorktrees`, owner markers, baseline carry, CoW backend):

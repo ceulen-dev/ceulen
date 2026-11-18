@@ -152,7 +152,7 @@ export const MODULES: ModuleEntry[] = [
   // Subagent after ponytail: ponytail's tool_call hook injects into the
   // `subagent` tool's instructions param — hooks resolve at call time, so
   // order is not load-bearing; this is grouping readability.
-  { name: "subagent", category: "Tasks", describe: "In-process subagents: scout/tester/worker/planner/reviewer agents, role-based model pools, classifier tier+thinking routing, background tasks with liveness, herdr delegation.", load: subagentModule, config: subagentConfig },
+  { name: "subagent", category: "Tasks", describe: "In-process subagents: scout/tester/worker/planner/reviewer agents, role-based model pools, classifier tier+thinking routing, background tasks with liveness, herdr/rex pane delegation.", load: subagentModule, config: subagentConfig },
   // Plan after subagent: its tool gating reads subagent agent frontmatter
   // (sandbox: read-only) and its before_agent_start must compose BEFORE
   // steering (the last prompt rewriter — see its entry below).

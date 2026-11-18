@@ -189,12 +189,14 @@ export function renderLiveThreadLine(
       statusMark(theme, call.status, spinner) + " " +
       call.detail;
   }
-  // Herdr panes carry no SDK messages — their lifecycle state ("herdr: working"
-  // etc.) is the only activity signal; show it where tool calls would go.
-  // SDK event-type labels ("message_end", …) are noise: the tool-call lines
-  // above already carry the child's real activity.
-  if (recent.length === 0 && thread.lastActivityLabel?.startsWith("herdr:")) {
-    line += "\n  " + color(theme, "dim", TREE_LAST) + " " + color(theme, "muted", thread.lastActivityLabel);
+  // Visible-pane children (herdr TUI, herdr-app, rex) carry no SDK messages —
+  // their lifecycle state ("herdr: working", "rex: idle", …) is the only
+  // activity signal; show it where tool calls would go. SDK event-type labels
+  // ("message_end", …) are noise: the tool-call lines above already carry the
+  // child's real activity.
+  const paneLabel = thread.lastActivityLabel ?? "";
+  if (recent.length === 0 && (paneLabel.startsWith("herdr:") || paneLabel.startsWith("rex:"))) {
+    line += "\n  " + color(theme, "dim", TREE_LAST) + " " + color(theme, "muted", paneLabel);
   }
   return line;
 }

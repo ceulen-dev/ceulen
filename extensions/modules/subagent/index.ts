@@ -115,6 +115,29 @@ import {
   forgetHerdrAppTab,
   type HerdrAppHandle,
 } from "./lib/herdr-app.ts";
+import {
+  cancelRexAgent,
+  closeRexWindow,
+  collectRexResult,
+  executeRexTask,
+  findRexAgent,
+  focusRexWindow,
+  forgetRexAgent,
+  forgetRexWindow,
+  getRexRegistry,
+  getRexTerminal as getRexTerminalState,
+  prepareRexTask,
+  probeRexBinary,
+  promptRexAndWait,
+  readRexBlock,
+  rexCli,
+  rexDisabled,
+  rexEnvDetected,
+  rexWindowCloseBlockers,
+  sendRexPrompt,
+  wrapRexTaskPrompt,
+  type RexHandle,
+} from "./lib/rex.ts";
 /** Keep-alive cadence for herdr delegations (test seam: shorten to assert). */
 export const herdrHeartbeat = { intervalMs: 30_000 };
 import {
@@ -150,7 +173,7 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Visible-pane delegation backend for one dispatch. */
-type RunnerKind = "sdk" | "herdr" | "herdr-app";
+type RunnerKind = "sdk" | "herdr" | "herdr-app" | "rex";
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -240,7 +263,7 @@ const SubagentParams = Type.Object({
   instructions: Type.Optional(Type.String({ description: "Bounded repository/task instructions passed to each child (max 16 KB)" })),
   solutionSpace: Type.Optional(Type.String({ description: "Single/parallel mode: how open-ended the child's problem is (design given vs choices open). Feeds model-tier/thinking routing; never mention siblings. e.g. 'one fix: rename, names given' vs 'several retry API shapes; error classes to choose'." })),
   runner: Type.Optional(StringEnum(["sdk", "herdr"] as const, {
-    description: 'Execution backend: "sdk" (in-process, lean) or "herdr" (visible interactive pi panes; one tab per agent type, one pane per instance). Default: automatic — herdr TUI inside a herdr pane (HERDR_ENV), herdr-app inside a Herdr app/core terminal (HC_TERMINAL_ID), otherwise sdk.',
+    description: 'Execution backend: "sdk" (in-process, lean) or "herdr" (visible interactive pi panes; one tab per agent type, one pane per instance). Default: automatic — herdr TUI inside a herdr pane (HERDR_ENV), rex inside a Rex terminal (REX_SESSION), herdr-app inside a Herdr app/core terminal (HC_TERMINAL_ID), otherwise sdk.',
   })),
   abortOnFailure: Type.Optional(Type.Boolean({ description: "In parallel mode, cancel remaining tasks when one fails. Default: false.", default: false })),
 });
@@ -256,8 +279,8 @@ interface SubagentDetails {
   results: SubAgentResult[];
   /** Set when a background task was started (single mode + background:true). */
   backgroundTaskId?: string;
-  /** Set when the run was delegated to herdr panes. */
-  runner?: "herdr";
+  /** Set when the run was delegated to a visible-pane backend. */
+  runner?: "herdr" | "herdr-app" | "rex";
 }
 
 // ---------------------------------------------------------------------------
@@ -672,14 +695,17 @@ ${lines.join("\n")}`;
   };
 
   /**
-   * Effective runner across BOTH visible-pane backends.
+   * Effective runner across ALL THREE visible-pane backends.
    *
    * herdr TUI (`HERDR_ENV=1`, `herdr` CLI) keeps its exact existing semantics
    * (lib/herdr.ts resolveEffectiveRunner: explicit params, errors, probe).
-   * herdr-app (`HC_TERMINAL_ID`, `herdr-app` + `hc`) is the AUTO fallback:
-   * when no explicit runner was named and the TUI path did not claim the call,
-   * delegate to app panes. An explicit `runner:"herdr"` never silently
-   * re-routes to the app — its "not running inside herdr" error stays.
+   * rex (`REX_SESSION`, `rex` CLI) and herdr-app (`HC_TERMINAL_ID`,
+   * `herdr-app` + `hc`) are AUTO fallbacks: when no explicit runner was named
+   * and the TUI path did not claim the call, delegate to that backend's panes.
+   * Both markers are independent (Rex sets REX_SESSION, herdr-core sets
+   * HC_TERMINAL_ID) and either can be present alone, so each probe stands on
+   * its own. An explicit `runner:"herdr"` never silently re-routes — its
+   * "not running inside herdr" error stays.
    */
   async function resolveRunner(
     requested: "sdk" | "herdr" | undefined,
@@ -687,6 +713,9 @@ ${lines.join("\n")}`;
   ): Promise<{ runner: RunnerKind; error?: string }> {
     const tui = await resolveEffectiveRunner(requested, subagentSettings, herdrCli.exec);
     if (tui.runner === "herdr" || tui.error || requested !== undefined) return tui;
+    if (rexEnvDetected() && !rexDisabled(subagentSettings) && await probeRexBinary(rexCli.exec)) {
+      return { runner: "rex" };
+    }
     if (!herdrAppEnvDetected() || herdrAppDisabled(subagentSettings)) return tui;
     if (!await probeHerdrAppBinary(herdrAppCli.exec)) return tui;
     return { runner: "herdr-app" };
@@ -712,9 +741,9 @@ ${lines.join("\n")}`;
       "For background single tasks use background:true — you will be notified on completion; DO NOT poll or sleep.",
       'Task control by taskId: operation "status" (snapshot + liveness age), "wait" (block until settled or waitTimeoutMs, then snapshot), "cancel" (abort). A task producing output is NEVER hard-killed; only total silence (idle timeout) aborts it. "STALLED" in a snapshot means no child activity — cancel it or keep waiting.',
       "Set solutionSpace when a task's openness isn't obvious from its text — it feeds tier/thinking routing.",
-      "Inside herdr (TUI or app), a single dispatch that names neither runner nor background may be sent to background by the task classifier (long/self-contained work) — pass runner or background explicitly to force one.",
+      "Inside herdr (TUI or app) or Rex, a single dispatch that names neither runner nor background may be sent to background by the task classifier (long/self-contained work) — pass runner or background explicitly to force one.",
       "Worktree-sandboxed agents return their diff as a patch block in the result; pass merge: \"3way\" to auto-apply it to the parent checkout (git apply --3way; conflicts reported, never silently resolved).",
-      `Runner: "sdk" runs agents in-process (lean, default outside herdr); "herdr" delegates to visible interactive pi panes (one tab per agent type, one pane per instance) — the default inside the herdr TUI (HERDR_ENV) and inside a Herdr app/core terminal (HC_TERMINAL_ID, via herdr-app + hc). Pane children share the working tree and skip worktree isolation; background:true always uses the sdk runner.`,
+      `Runner: "sdk" runs agents in-process (lean, default outside a multiplexer); "herdr" delegates to visible interactive pi panes (one tab per agent type, one pane per instance) — the default inside the herdr TUI (HERDR_ENV), inside a Herdr app/core terminal (HC_TERMINAL_ID, via herdr-app + hc), and inside a Rex terminal (REX_SESSION, via the rex CLI). Pane children share the working tree and skip worktree isolation; background:true always uses the sdk runner.`,
       "Use /subagent list to list all available agents, /subagent <name> for agent details, /subagent @role for role detail.",
     ],
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -771,7 +800,7 @@ ${lines.join("\n")}`;
         .some((n) => agents.find((a) => a.name === n)?.sandbox === "worktree");
       if (herdrActive && (requestedMerge || worktreeAgentRequested)) {
         return {
-          content: [{ type: "text", text: `Worktree isolation${requestedMerge ? " / merge:\"3way\"" : ""} requires runner:"sdk" — herdr/herdr-app children share the parent's working tree. Re-run with runner:"sdk"${requestedMerge ? " or drop merge" : ""}.` }],
+          content: [{ type: "text", text: `Worktree isolation${requestedMerge ? " / merge:\"3way\"" : ""} requires runner:"sdk" — herdr/herdr-app/rex children share the parent's working tree. Re-run with runner:"sdk"${requestedMerge ? " or drop merge" : ""}.` }],
           details: { mode: "single" as const, agentScope, projectAgentsDir: discovery.projectAgentsDir, results: [] },
           isError: true,
         };
@@ -784,7 +813,7 @@ ${lines.join("\n")}`;
           agentScope,
           projectAgentsDir: discovery.projectAgentsDir,
           results,
-          runner: herdrActive ? "herdr" : undefined,
+          runner: herdrActive ? runnerKind : undefined,
         });
 
       // Task-control results (operation status/cancel) describe an existing
@@ -1074,7 +1103,7 @@ ${lines.join("\n")}`;
       }
 
       // Helper: widget progress snapshot from a pane lifecycle state.
-      function herdrProgress(agentName: string, task: string, state: string, startedAt: number, timeoutMs: number, kind: "herdr" | "herdr-app" = "herdr"): SubAgentProgress {
+      function herdrProgress(agentName: string, task: string, state: string, startedAt: number, timeoutMs: number, kind: "herdr" | "herdr-app" | "rex" = "herdr"): SubAgentProgress {
         const now = Date.now();
         return {
           label: `${kind}: ${state}`,
@@ -1249,11 +1278,41 @@ ${lines.join("\n")}`;
         }
       }
 
-      // Helper (herdr + herdr-app runners): full delegation (prepare + prompt +
-      // collect). Both backends differ only in prepare/execute/cancel/label, so
-      // one flow keeps their abort + keep-alive semantics identical.
+      // Helper (rex runner): the same prelude, delegated to rex panes.
+      async function prepareRexOne(
+        agentName: string,
+        task: string,
+        cwd: string | undefined,
+        timeoutMs: number | undefined,
+        solutionSpace?: string,
+        verdict?: RoutingVerdict,
+      ): Promise<{ handle: RexHandle; timeoutMs: number; startedAt: number } | { error: string }> {
+        const plan = await resolvePaneDispatch(agentName, task, cwd, timeoutMs, solutionSpace, verdict);
+        if ("error" in plan) return { error: plan.error };
+        const startedAt = Date.now();
+        try {
+          const handle = await prepareRexTask({
+            agentType: plan.agentType,
+            systemPrompt: plan.systemPrompt,
+            task,
+            cwd: plan.cwd,
+            model: plan.model,
+            thinking: plan.thinking,
+            tools: plan.tools,
+            readOnly: plan.readOnly,
+            timeoutMs: plan.timeoutMs,
+          });
+          return { handle, timeoutMs: plan.timeoutMs, startedAt };
+        } catch (err) {
+          return { error: err instanceof Error ? err.message : String(err) };
+        }
+      }
+
+      // Helper (herdr + herdr-app + rex runners): full delegation (prepare +
+      // prompt + collect). The backends differ only in prepare/execute/cancel,
+      // so one flow keeps their abort + keep-alive semantics identical.
       async function startPaneOne(
-        kind: "herdr" | "herdr-app",
+        kind: "herdr" | "herdr-app" | "rex",
         agentName: string,
         task: string,
         cwd: string | undefined,
@@ -1267,13 +1326,16 @@ ${lines.join("\n")}`;
         verdict?: RoutingVerdict,
       ): Promise<SubAgentResult> {
         const app = kind === "herdr-app";
-        const prepared = app
-          ? await prepareHerdrAppOne(agentName, task, cwd, timeoutMs, solutionSpace, verdict)
-          : await prepareHerdrOne(agentName, task, cwd, timeoutMs, solutionSpace, verdict);
+        const rex = kind === "rex";
+        const prepared = rex
+          ? await prepareRexOne(agentName, task, cwd, timeoutMs, solutionSpace, verdict)
+          : app
+            ? await prepareHerdrAppOne(agentName, task, cwd, timeoutMs, solutionSpace, verdict)
+            : await prepareHerdrOne(agentName, task, cwd, timeoutMs, solutionSpace, verdict);
         if ("error" in prepared) return makeErrorResult(agentName, task, prepared.error);
         const { startedAt } = prepared;
         // Narrowing the union by `app` keeps every later access type-safe.
-        const handle = prepared.handle as HerdrAppHandle & HerdrHandle;
+        const handle = prepared.handle as HerdrAppHandle & HerdrHandle & RexHandle;
         // Keep-alive parity with the SDK path: a long pane run must emit
         // onUpdate traffic or the host may idle-abort the tool call.
         const stopHeartbeat = onUpdate ? startHeartbeat(() => {
@@ -1281,22 +1343,32 @@ ${lines.join("\n")}`;
           onUpdate({ content: [{ type: "text", text: "" }], details: heartbeatDetails?.() ?? makeDetails("single")([]) });
           widget.requestRender();
         }, herdrHeartbeat.intervalMs) : undefined;
-        const paneRef = kind === "herdr-app" ? handle.address : handle.name;
+        const paneRef = kind === "herdr-app" || rex ? handle.address : handle.name;
         const progress = (state: string) => onActivity?.(
           herdrProgress(handle.agentType, task, state, startedAt, prepared.timeoutMs, kind),
         );
         let onCancel: (() => void) | undefined;
         if (parentSignal) {
           onCancel = () => {
-            void (kind === "herdr-app"
-              ? cancelAppAgent(paneRef, herdrAppCli.exec)
-              : cancelAgent(paneRef, herdrCli.exec));
+            void (rex
+              ? cancelRexAgent(paneRef, rexCli.exec)
+              : kind === "herdr-app"
+                ? cancelAppAgent(paneRef, herdrAppCli.exec)
+                : cancelAgent(paneRef, herdrCli.exec));
           };
           // An already-aborted signal never fires its listeners — cancel now.
           if (parentSignal.aborted) onCancel();
           else parentSignal.addEventListener("abort", onCancel, { once: true });
         }
         try {
+          if (rex) {
+            return await executeRexTask(handle as RexHandle, {
+              onState: onActivity ? progress : undefined,
+              advisorWaitMs: subSettings.advisorWaitSecs * 1000,
+              onAdvisorPhase: onActivity ? progress : undefined,
+              signal: parentSignal,
+            });
+          }
           if (app) {
             return await executeHerdrAppTask(handle, {
               onState: onActivity ? progress : undefined,
@@ -1473,7 +1545,7 @@ ${lines.join("\n")}`;
           recordForegroundStart(historyId, step.agent, dispatchTask, thread.createdAt);
           const result = herdrActive
             ? await startPaneOne(
-                runnerKind as "herdr" | "herdr-app",
+                runnerKind as "herdr" | "herdr-app" | "rex",
                 step.agent, dispatchTask, step.cwd,
                 signal, step.timeout ?? params.timeout,
                 (progress) => threadStore.updateProgress(thread.id, progress),
@@ -1620,19 +1692,23 @@ ${lines.join("\n")}`;
           // visible in herdr before any work starts, then submit prompts under
           // the concurrency limit below.
           const appPanes = runnerKind === "herdr-app";
-          // Both backends: a handle identifies its pane by `address` (app) or
-          // `name` (TUI) — one resolver keeps the cancel wiring honest.
-          const paneRef = (h: HerdrHandle | HerdrAppHandle) => ("address" in h ? h.address : h.name);
-          const cancelPane = (h: HerdrHandle | HerdrAppHandle) => {
-            if (appPanes) void cancelAppAgent(paneRef(h), herdrAppCli.exec);
+          const rexPanes = runnerKind === "rex";
+          // Every backend: a handle identifies its pane by `address` (app/rex)
+          // or `name` (TUI) — one resolver keeps the cancel wiring honest.
+          const paneRef = (h: HerdrHandle | HerdrAppHandle | RexHandle) => ("address" in h ? h.address : h.name);
+          const cancelPane = (h: HerdrHandle | HerdrAppHandle | RexHandle) => {
+            if (rexPanes) void cancelRexAgent(paneRef(h), rexCli.exec);
+            else if (appPanes) void cancelAppAgent(paneRef(h), herdrAppCli.exec);
             else void cancelAgent(paneRef(h), herdrCli.exec);
           };
           const herdrPrepared = herdrActive
             ? await Promise.all(params.tasks.map(async (t) => {
                 const startedAt = Date.now();
-                const prepared = appPanes
-                  ? await prepareHerdrAppOne(t.agent, t.task, t.cwd, t.timeout ?? params.timeout, t.solutionSpace)
-                  : await prepareHerdrOne(t.agent, t.task, t.cwd, t.timeout ?? params.timeout, t.solutionSpace);
+                const prepared = rexPanes
+                  ? await prepareRexOne(t.agent, t.task, t.cwd, t.timeout ?? params.timeout, t.solutionSpace)
+                  : appPanes
+                    ? await prepareHerdrAppOne(t.agent, t.task, t.cwd, t.timeout ?? params.timeout, t.solutionSpace)
+                    : await prepareHerdrOne(t.agent, t.task, t.cwd, t.timeout ?? params.timeout, t.solutionSpace);
                 if ("error" in prepared) return { ok: false as const, error: prepared.error, startedAt };
                 return { ok: true as const, handle: prepared.handle, timeoutMs: prepared.timeoutMs, startedAt: prepared.startedAt };
               }))
@@ -1708,24 +1784,33 @@ ${lines.join("\n")}`;
                 const prepared = herdrPrepared?.[index];
                 const result = prepared
                   ? prepared.ok
-                    ? await (appPanes
-                      ? executeHerdrAppTask(prepared.handle as HerdrAppHandle, {
+                    ? await (rexPanes
+                      ? executeRexTask(prepared.handle as RexHandle, {
                         onState: (state) => threadStore.updateProgress(
                           parallelThreads[index].id,
-                          herdrProgress(t.agent, t.task, state, prepared.startedAt, prepared.timeoutMs, "herdr-app"),
+                          herdrProgress(t.agent, t.task, state, prepared.startedAt, prepared.timeoutMs, "rex"),
                         ),
                         advisorWaitMs: subSettings.advisorWaitSecs * 1000,
                         signal: parallelController.signal,
                       })
-                      : executeHerdrTask(prepared.handle as HerdrHandle, {
-                        onState: (state) => threadStore.updateProgress(
-                          parallelThreads[index].id,
-                          herdrProgress(t.agent, t.task, state, prepared.startedAt, prepared.timeoutMs),
-                        ),
-                        // Covers abortOnFailure AND parent abort (parent abort
-                        // feeds parallelController via onParentAbort).
-                        signal: parallelController.signal,
-                      }))
+                      : appPanes
+                        ? executeHerdrAppTask(prepared.handle as HerdrAppHandle, {
+                          onState: (state) => threadStore.updateProgress(
+                            parallelThreads[index].id,
+                            herdrProgress(t.agent, t.task, state, prepared.startedAt, prepared.timeoutMs, "herdr-app"),
+                          ),
+                          advisorWaitMs: subSettings.advisorWaitSecs * 1000,
+                          signal: parallelController.signal,
+                        })
+                        : executeHerdrTask(prepared.handle as HerdrHandle, {
+                          onState: (state) => threadStore.updateProgress(
+                            parallelThreads[index].id,
+                            herdrProgress(t.agent, t.task, state, prepared.startedAt, prepared.timeoutMs),
+                          ),
+                          // Covers abortOnFailure AND parent abort (parent abort
+                          // feeds parallelController via onParentAbort).
+                          signal: parallelController.signal,
+                        }))
                     : makeErrorResult(t.agent, t.task, prepared.error)
                   : await runOne(
                       t.agent, t.task, t.cwd,
@@ -1821,7 +1906,9 @@ ${lines.join("\n")}`;
           const hint = backgroundHerdrHint(
             await wouldHerdrDelegate(params.runner, (ctx as any).settings?.subagent, herdrCli.exec) ||
             (params.runner === undefined && herdrAppEnvDetected() && !herdrAppDisabled((ctx as any).settings?.subagent)
-              && await probeHerdrAppBinary(herdrAppCli.exec)),
+              && await probeHerdrAppBinary(herdrAppCli.exec)) ||
+            (params.runner === undefined && rexEnvDetected() && !rexDisabled((ctx as any).settings?.subagent)
+              && await probeRexBinary(rexCli.exec)),
           );
           const autoNote = autoBackground
             ? "Dispatch: the task classifier chose background (long/self-contained) — pass runner or background explicitly to override."
@@ -1844,7 +1931,7 @@ ${lines.join("\n")}`;
         recordForegroundStart(historyId, params.agent, params.task, thread.createdAt);
         const result = herdrActive
           ? await startPaneOne(
-              runnerKind as "herdr" | "herdr-app",
+              runnerKind as "herdr" | "herdr-app" | "rex",
               params.agent, params.task, params.cwd,
               signal, params.timeout,
               (progress) => threadStore.updateProgress(thread.id, progress),
@@ -2330,6 +2417,110 @@ ${lines.join("\n")}`;
     return toolResult(`Unknown action "${action}".`, true);
   }
 
+  /** Control-tool handler for Rex-delegated agents (runAppControl's sibling). */
+  async function runRexControl(
+    action: string,
+    name: string,
+    params: { text?: string; lines?: number; wait?: boolean; timeout?: number },
+    toolResult: (text: string, isError?: boolean) => { content: { type: "text"; text: string }[]; isError: boolean; details: Record<string, unknown> },
+  ) {
+    const entry = findRexAgent(name);
+    const address = entry?.address ?? name;
+    const delegated = Boolean(entry);
+    const refuseUndelegated = (verb: string) =>
+      toolResult(`"${name}" was not delegated by this session — refusing to ${verb} an agent this session did not start. If this pane predates a /reload-runtime, interrupt or close it manually (rex block close <blockId>; \`rex block ls --json\` lists blocks).`, true);
+    switch (action) {
+      case "list": {
+        const entries = getRexRegistry();
+        if (entries.length === 0) {
+          return toolResult("No rex-delegated agents this session. Delegation goes to rex panes automatically while pi runs in a Rex terminal (or with subagent runner).");
+        }
+        const lines: string[] = [];
+        for (const e of entries) {
+          const info = await getRexTerminalState(e.address, rexCli.exec);
+          lines.push(`- ${e.name} · ${e.agentType} · ${info?.status ?? "unknown"} · window ${e.tabId} / ${e.address} — ${e.task.slice(0, 60)}${e.task.length > 60 ? "…" : ""}`);
+        }
+        return toolResult(`Delegated rex agents (${entries.length}):\n${lines.join("\n")}`);
+      }
+      case "status": {
+        const info = await getRexTerminalState(address, rexCli.exec);
+        if (!info) return toolResult(`No rex terminal "${name}".`, true);
+        return toolResult(`${name}: ${info.status} (${info.state}; window ${entry?.tabId ?? "?"}${entry ? ` / ${info.address}` : ""}${info.cwd ? `, cwd ${info.cwd}` : ""})`);
+      }
+      case "read": {
+        const lines = Math.min(Math.max(Math.trunc(params.lines ?? 120), 1), 1000);
+        const res = await readRexBlock(address, rexCli.exec);
+        if (!res.ok) return toolResult(`rex block call format failed: ${res.text}`, true);
+        const tail = res.text.split("\n").slice(-lines).join("\n").trim();
+        return toolResult(
+          tail || (entry?.readOnly
+            ? "(no readable output — the agent may be rendering on the alternate screen; prompt it and it will reply inline — it has read-only tools and cannot write files)"
+            : "(no readable output — the agent may be rendering on the alternate screen; prompt it to write its report to a file)"),
+        );
+      }
+      case "prompt": {
+        if (!params.text) return toolResult('Missing text for action "prompt".', true);
+        if (Buffer.byteLength(params.text, "utf8") > HERDR_TASK_BUDGET) {
+          return toolResult(`Prompt exceeds the ${HERDR_TASK_BUDGET}-byte budget (delivery wrapper included) — shorten it.`, true);
+        }
+        if (!delegated) return refuseUndelegated("prompt");
+        const text = wrapRexTaskPrompt(params.text, entry!.resultFile, entry!.readOnly);
+        if (!params.wait) {
+          const sent = await sendRexPrompt(address, text, rexCli.exec);
+          return toolResult(sent.ok ? `Prompt submitted to ${name}.` : `rex block send failed: ${sent.error}`, !sent.ok);
+        }
+        const timeoutMs = Math.min(params.timeout ?? 120_000, MAX_TIMEOUT_MS);
+        const stampBefore = await fs.stat(entry!.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "");
+        const outcome = await promptRexAndWait({ address, text, timeoutMs, exec: rexCli.exec });
+        if (outcome.error) return toolResult(`${name}: ${outcome.error} (state: ${outcome.state})`, true);
+        const collected = await collectRexResult({ handle: entry!, exec: rexCli.exec });
+        if (collected.source === "file") {
+          const stampAfter = await fs.stat(entry!.resultFile).then((s) => `${s.size}:${s.mtimeMs}`).catch(() => "");
+          if (stampAfter === stampBefore) {
+            // Follow-ups reuse the same report file: unchanged content is the
+            // PREVIOUS run's report, not this prompt's answer.
+            return toolResult(`${name}: ${outcome.state} (no new report file content for this follow-up)`);
+          }
+        }
+        return toolResult(`${name}: ${outcome.state}${collected.output ? `\n\n${collected.output}` : ""}`);
+      }
+      case "cancel": {
+        if (!delegated) return refuseUndelegated("cancel");
+        await cancelRexAgent(address, rexCli.exec);
+        return toolResult(`Interrupted ${name} (esc, plus ctrl+c if it was still working).`);
+      }
+      case "focus": {
+        const windowId = entry?.tabId;
+        if (!windowId) return toolResult(`No delegated rex agent named "${name}" (focus needs a window this session knows).`, true);
+        const res = await focusRexWindow(windowId, rexCli.exec);
+        return toolResult(res.ok ? `Focused window ${windowId}.` : `rex focus failed: ${res.error}`, !res.ok);
+      }
+      case "close-tab": {
+        if (!delegated) return toolResult(`"${name}" was not delegated by this session — refusing to close windows this session did not create.`, true);
+        if (!entry!.tabCreatedHere) {
+          return toolResult(`"${name}" runs in a window that existed before this session dispatched to it (label match) — reusing it for dispatch, but refusing to close it.`, true);
+        }
+        const { siblings: busy, self: selfBusy } = await rexWindowCloseBlockers(entry!, rexCli.exec);
+        if (busy.length > 0) {
+          return toolResult(`Refusing to close window ${entry!.tabId}: sibling agent(s) still busy or unverifiable: ${busy.join(", ")}. Cancel them first (action "cancel") or wait until they settle.`, true);
+        }
+        if (selfBusy) {
+          return toolResult(`"${name}" is still ${selfBusy} — cancel it first (action "cancel") or wait for it to settle before closing its window.`, true);
+        }
+        const res = await closeRexWindow(entry!.tabId, rexCli.exec);
+        if (!res.ok) return toolResult(`rex window close failed: ${res.error}`, true);
+        forgetRexWindow(entry!.tabId);
+        return toolResult(`Closed window ${entry!.tabId} (all its panes).`);
+      }
+      case "forget": {
+        if (!delegated) return toolResult(`"${name}" was not delegated by this session — nothing to forget.`, true);
+        forgetRexAgent(entry!.name);
+        return toolResult(`Forgot ${name} (registry entry only — rex windows/blocks untouched).`);
+      }
+    }
+    return toolResult(`Unknown action "${action}".`, true);
+  }
+
   const HerdrControlParams = Type.Object({
     action: StringEnum(["list", "status", "read", "prompt", "cancel", "focus", "close-tab", "forget"] as const, {
       description:
@@ -2350,15 +2541,15 @@ ${lines.join("\n")}`;
     name: "herdr",
     label: "Herdr",
     description: [
-      "Control agents this session delegated to visible herdr panes — herdr TUI (HERDR_ENV) or herdr-app (HC_TERMINAL_ID; subagent delegation is automatic in both).",
+      "Control agents this session delegated to visible panes — herdr TUI (HERDR_ENV), herdr-app (HC_TERMINAL_ID), or rex (REX_SESSION; subagent delegation is automatic in all three).",
       "Actions: list, status, read, prompt, cancel, focus, close-tab, forget.",
     ].join(" "),
     parameters: HerdrControlParams,
-    promptSnippet: "Control delegated herdr pane agents (list/status/read/prompt/cancel/focus/close-tab/forget)",
+    promptSnippet: "Control delegated pane agents — herdr/rex (list/status/read/prompt/cancel/focus/close-tab/forget)",
     promptGuidelines: [
-      "Use for oversight of herdr-delegated subagents: status/read to inspect, prompt to continue an agent's session, cancel to interrupt, focus to raise its tab, forget to drop a stale registry entry.",
+      "Use for oversight of delegated subagents (herdr or rex): status/read to inspect, prompt to continue an agent's session, cancel to interrupt, focus to raise its tab/window, forget to drop a stale registry entry.",
       "A blocked agent waits for human input — answer it in the pane directly, or cancel and re-delegate.",
-      "prompt/cancel/forget only accept agents this session delegated and close-tab only tabs it created; status/read/focus can inspect any live herdr agent.",
+      "prompt/cancel/forget only accept agents this session delegated and close-tab only tabs/windows it created; status/read/focus can inspect any live agent.",
       "read is best-effort: pi renders on the terminal's alternate screen, so finished reports may not be scrollback-visible (delegated tasks deliver via report files instead).",
     ],
     async execute(_toolCallId, params, _signal, _onUpdate, _ctx) {
@@ -2369,18 +2560,20 @@ ${lines.join("\n")}`;
       });
       const tuiMode = herdrTuiEnvDetected();
       const appMode = !tuiMode && herdrAppEnvDetected();
-      if (!tuiMode && !appMode) {
-        return toolResult("Not running inside herdr: no HERDR_ENV (herdr TUI) and no HC_TERMINAL_ID (herdr-app). Start pi inside a herdr pane or a Herdr app terminal to delegate agents to visible panes.", true);
+      const rexMode = !tuiMode && !appMode && rexEnvDetected() && await probeRexBinary(rexCli.exec);
+      if (!tuiMode && !appMode && !rexMode) {
+        return toolResult("Not running inside a multiplexer: no HERDR_ENV (herdr TUI), no HC_TERMINAL_ID (herdr-app), and no REX_SESSION (rex). Start pi inside a herdr pane, a Herdr app terminal, or a Rex terminal to delegate agents to visible panes.", true);
       }
       if (herdrDisabled(undefined)) {
-        // Delegated child session (PI_SUBAGENT_HERDR=off): no herdr control.
-        return toolResult("herdr control is disabled in this session (PI_SUBAGENT_HERDR=off child guard).", true);
+        // Delegated child session (PI_SUBAGENT_HERDR=off): no pane control.
+        return toolResult("Pane-delegation control is disabled in this session (PI_SUBAGENT_HERDR=off child guard).", true);
       }
       if (params.action !== "list" && !params.name) {
-        return toolResult(`Missing name for action "${params.action}". Use a herdr agent name from action "list" (e.g. scout-1).`, true);
+        return toolResult(`Missing name for action "${params.action}". Use an agent name from action "list" (e.g. scout-1).`, true);
       }
       const name = params.name!;
       if (appMode) return runAppControl(params.action, name, params, toolResult);
+      if (rexMode) return runRexControl(params.action, name, params, toolResult);
       // Mutating actions are scoped to agents this session delegated —
       // the model must not drive (or kill) panes it never spawned.
       if ((params.action === "prompt" || params.action === "cancel") && !isDelegatedHerdrAgent(name)) {

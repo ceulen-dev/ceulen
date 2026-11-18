@@ -1,5 +1,65 @@
 # Changelog
 
+## 0.28.0 — 2026-11-18
+
+**Rex is now a first-class subagent delegation backend.** ceulen's visible-pane
+delegation knew the herdr TUI (`HERDR_ENV`) and the Herdr desktop app
+(`HC_TERMINAL_ID`, herdr-app + `hc`) — inside **Rex** (the `rex` CLI + server,
+`REX_SESSION`) every dispatch silently fell back to the in-process SDK runner
+and the `herdr` control tool refused to run at all. New
+`subagent/lib/rex.ts` plus a runner/control-tool rewire fixes that: one WINDOW
+per agent type (`rex window new`, adopted when already labelled), one PANE per
+instance (`rex split` beside the window's last tiled block), the child pi
+started by the block's command with the same persona/model/thinking/tools
+contract, and reports through the same file/inline delivery contract.
+
+- **Auto-detection, no new settings.** `REX_SESSION` plus a `rex` binary that
+  answers `rex version` (Rex has no `--version`) selects the backend.
+  Resolution order is herdr TUI → rex → herdr-app → sdk, and an explicit
+  `runner:"herdr"` still keeps its "not running inside herdr" error instead of
+  silently re-routing. `subagent.herdr:"off"` and the `PI_SUBAGENT_HERDR=off`
+  child guard disable delegation on all three backends.
+- **No turn-following primitive, so the turn proof is a timestamp.** `rex wait`
+  waits for a block to EXIT, which is useless for a long-lived pi, so
+  `promptRexAndWait` is built from `program_status` polling (OSC 7501, which pi
+  publishes): readiness gate → `block send` + `block send-key enter` → poll.
+  With no turn counter, a settle is accepted only when the ROOT status record's
+  `updated_at` moved past the pre-paste baseline (or the child was seen
+  working), so a paste that never submitted reports "pasted but never
+  submitted" instead of being collected as a success.
+- **`format` answers a head slice.** Any reply carrying a blob `id` is re-read
+  from `total - N` via `blob_read`; asking for the whole scrollback would park
+  megabytes in the parent's context, and trusting the head silently returned
+  boot chrome instead of the child's reply (found live while gating this
+  release).
+- **Rex children DO get environment variables** by way of a `/usr/bin/env`
+  command wrapper — unlike herdr-app — so they carry the advisor review marker
+  (the parent waits for the child's own advisor before collecting) *and* the
+  `PI_SUBAGENT_HERDR=off` recursion guard plus `CEULEN_THINK_GATE_OFF=1`.
+- **Echo is never a report.** A pane capture is cut to the text after the
+  delivery contract (falling back to the task echo), and an echo-only pane
+  yields no output, so the dispatch fails loudly.
+- **Full control surface, scoped.** The `herdr` tool gained a rex branch for
+  list/status/read/prompt/cancel/focus/close-tab/forget. Mutating actions only
+  touch agents this session delegated, `close-tab` closes the rex WINDOW and
+  refuses while a sibling is busy or its state is unverifiable, and adopted
+  windows (label match) are never close-eligible. `RunnerKind`,
+  `SubagentDetails.runner` and the widget's pane-label gate all carry `rex`.
+- **CLI quirks encoded, each with a regression test:** `rex block call` takes
+  SHORT method names (the fully-qualified name is rejected), and
+  `rex session inspect` takes the session POSITIONALLY and rejects the global
+  `-s` prefix (the prefixed form made every window adoption fail with "window
+  has no block to split beside").
+
+Verified: `tsc --noEmit` clean; full `npm test` **3019 pass / 0 fail / 3
+env-gated skips** (32 of them in the new `test/rex.test.ts`); `npm pack
+--dry-run` ships `lib/rex.ts` + its suite. Live-verified against a running Rex
+server: single dispatch, window adoption, write-capable report-file agents,
+parallel (multi-agent-type) and chain (`{previous}`) modes, read-only inline
+collection, the full `herdr` control surface (including the busy-sibling
+refusal and stale-entry `forget`), `runner:"sdk"` pinning, and
+`background:true` correctly staying in-process with an honest receipt.
+
 ## 0.27.0 — 2026-11-17
 
 **herdr-app is now a first-class subagent delegation backend.** ceulen's
