@@ -176,13 +176,20 @@ export const MODULES: ModuleEntry[] = [
   // on top (no load-order dependency — hooks resolve at call time).
   { name: "repair", category: "Tools", describe: "Tool-call hardening: schema argument repair, edit mismatch retry, destructive-command guard. Wraps the built-in tools once; adds apply_patch + str_replace_editor.", load: repairModule, config: repairConfig },
   { name: "serena", category: "Tools", describe: "Serena semantic code tools via a persistent Python worker.", load: serenaModule, deferredTools: [
-    "serena_status", "serena_list_tools", "serena_get_symbols_overview", "serena_find_symbol",
-    "serena_find_referencing_symbols", "serena_find_declaration", "serena_find_implementations",
+    // The 2026-11-18 usage re-eval promoted the SEVEN navigation tools direct
+    // (same rationale as ux_audit/github/munin_search on 2026-10-08): a
+    // deferred tier is only reachable by asking tool_search about a tool you
+    // have not seen, and across 56 sessions that gate was crossed 8 times —
+    // serena_* was invoked ONCE (a failing status probe). Serena-first
+    // navigation must happen BEFORE read/grep, so the tools it replaces can
+    // never be the discovery trigger. Cost: ~1.1k tokens/request for the 7.
+    // The editing tail + ops stay cold; they are reached AFTER a symbol is
+    // already known, where tool_search is a natural step.
+    "serena_status", "serena_list_tools",
     "serena_replace_symbol_body", "serena_insert_before_symbol", "serena_insert_after_symbol",
-    "serena_rename_symbol", "serena_safe_delete_symbol", "serena_search_for_pattern",
+    "serena_rename_symbol", "serena_safe_delete_symbol",
     "serena_replace_content", "serena_restart_language_server", "serena_restart_worker",
     "serena_get_current_config", "serena_check_onboarding_performed", "serena_onboarding",
-    "serena_get_diagnostics_for_file",
   ] },
   { name: "fff", category: "Tools", describe: "FFF fuzzy file/content search (ffgrep, fffind) + @-mention completions.", load: fffModule, deferredTools: [
     "fff_multi_grep", "resolve_file", "related_files",

@@ -61,6 +61,25 @@ describe("deferredTools tiers", () => {
       assert.equal(allDeferred.has(hot), false, `${hot} must stay direct`);
     }
   });
+
+  // 2026-11-18 usage re-eval: the seven serena navigation tools were promoted
+  // direct — 56 sessions crossed the tool_search gate 8 times and invoked
+  // serena_* ONCE. Serena-first navigation runs BEFORE read/grep, so the tools
+  // it replaces can never surface it. A registry edit reverting this must fail.
+  it("keeps serena's navigation tools direct, its editing tail deferred", async () => {
+    const { MODULES } = await import("./registry.js");
+    const allDeferred = new Set(MODULES.flatMap((m) => m.deferredTools ?? []));
+    for (const nav of [
+      "serena_get_symbols_overview", "serena_find_symbol", "serena_find_referencing_symbols",
+      "serena_find_declaration", "serena_find_implementations",
+      "serena_search_for_pattern", "serena_get_diagnostics_for_file",
+    ]) {
+      assert.equal(allDeferred.has(nav), false, `${nav} must stay direct`);
+    }
+    for (const cold of ["serena_rename_symbol", "serena_replace_symbol_body", "serena_onboarding"]) {
+      assert.equal(allDeferred.has(cold), true, `${cold} stays deferred`);
+    }
+  });
 });
 
 describe("MODULES load order", () => {

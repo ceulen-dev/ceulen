@@ -66,10 +66,28 @@ os.environ.setdefault("SERENA_USAGE_REPORTING", "false")
 try:
     from serena.agent import SerenaAgent
     from serena.config.context_mode import SerenaAgentContext
-    from serena.config.serena_config import SerenaConfig, LanguageBackend
+    from serena.config.serena_config import AgentInterface, SerenaConfig, LanguageBackend
 except Exception as exc:
     print(json.dumps({"id": None, "ok": False, "error": f"Failed to import Serena: {type(exc).__name__}: {exc}"}), flush=True)
     raise
+
+try:
+    from serena.language_backend import LanguageBackendRegistry
+except Exception:
+    LanguageBackendRegistry = None  # type: ignore
+
+
+def resolve_language_backend(name: str) -> Any:
+    """Resolve a SERENA_LANGUAGE_BACKEND value to a backend instance.
+
+    serena-agent 2.x resolves through LanguageBackendRegistry; 1.2.x exposed
+    LanguageBackend.from_str. Accept both so a pinned older venv keeps working,
+    and let the failure surface (never silently fall back to LSP) — an
+    intentionally configured backend must not degrade without a word.
+    """
+    if LanguageBackendRegistry is not None:
+        return LanguageBackendRegistry.get_instance().resolve(name)
+    return LanguageBackend.from_str(name)
 
 try:
     from serena import serena_version
@@ -108,11 +126,20 @@ def load_bridge_config() -> SerenaConfig:
     config.web_dashboard = env_flag("SERENA_BRIDGE_WEB_DASHBOARD", True)
     config.web_dashboard_open_on_launch = env_flag("SERENA_BRIDGE_OPEN_DASHBOARD", False)
     # SERENA_LANGUAGE_BACKEND selects the code-intelligence backend at worker startup.
-    # Unset = Serena's default (LSP). Invalid values raise LanguageBackend.from_str's
-    # ValueError, surfaced on worker start rather than silently falling back.
+    # Unset = Serena's default (LSP). Invalid values raise the registry's ValueError,
+    # surfaced on worker start rather than silently falling back.
+    # serena-agent 2.x moved backend resolution onto the registry; the 1.2.x
+    # LanguageBackend.from_str static is GONE (live 2026-11-18 against 2.1.0).
     backend = os.environ.get("SERENA_LANGUAGE_BACKEND")
     if backend:
-        config.language_backend = LanguageBackend.from_str(backend)
+        config.language_backend = resolve_language_backend(backend)
+    # serena-agent 2.x defaults NEW configs to the REPL agent interface, which
+    # exposes one serena_repl tool instead of the classic per-tool surface this
+    # bridge drives (get_tool_by_name + apply_ex). Force TOOLS: the pi-facing
+    # tool contract is per-operation, and a REPL-only agent fails every call
+    # with "Tool '<name>' is not active". Live-probed 2026-11-18 on 2.1.0.
+    # A project.yml agent_interface still wins (determine_agent_interface).
+    config.agent_interface = AgentInterface.TOOLS
     return config
 
 
@@ -209,7 +236,10 @@ def handle(req: dict[str, Any]) -> dict[str, Any]:
             data["activeTools"] = agent.get_active_tool_names()
             active_project = agent.get_active_project()
             data["activeProject"] = str(active_project.project_root) if active_project else None
-            data["languageBackend"] = agent.get_language_backend().value
+            # serena-agent 2.x returns a LanguageBackend instance whose key is
+            # str(backend)/get_key(); the 1.2.x enum's .value is gone.
+            backend_obj = agent.get_language_backend()
+            data["languageBackend"] = getattr(backend_obj, "value", None) or str(backend_obj)
             data["dashboardUrl"] = agent.get_dashboard_url()
         return data
 
@@ -268,6 +298,27 @@ def handle(req: dict[str, Any]) -> dict[str, Any]:
     if action in ("find_declaration", "find_implementations"):
         return _handle_find_symbol_action(req_id, action, req)
 
+    if action == "check_onboarding_performed":
+        # serena-agent 2.x DELETED the check_onboarding_performed tool (listed in
+        # ToolRegistry._deleted_tools). Derive the same answer from the project's
+        # memory list: onboarding counts as done once the memory_maintenance
+        # memory exists — that is the file serena init / onboarding seeds.
+        project = str(req.get("project") or os.getcwd())
+        context = str(req.get("context") or "ide")
+        try:
+            project_obj = get_agent(project, context).get_active_project_or_raise()
+            names = project_obj.memory_manager.list_project_memories().get_full_list()
+        except Exception as exc:
+            return {"id": req_id, "ok": False, "tool": "check_onboarding_performed", "errorType": "project_error", "error": f"{type(exc).__name__}: {exc}"}
+        performed = any(str(n).split("/")[-1] == "memory_maintenance" for n in names)
+        return {
+            "id": req_id,
+            "ok": True,
+            "tool": "check_onboarding_performed",
+            "performed": performed,
+            "result": json.dumps({"onboarding_performed": performed, "memories": names}),
+        }
+
     if action == "get_diagnostics_for_file":
         return _handle_diagnostics(req_id, req)
 
@@ -275,9 +326,20 @@ def handle(req: dict[str, Any]) -> dict[str, Any]:
 
 
 def _get_symbol_retriever(agent: SerenaAgent):
+    """Return (project, retriever) for the active project.
+
+    The retriever's constructor reaches for the language server manager, which
+    Serena only exposes inside its own task context (execute_task). Calling
+    it directly raises "The language server manager is not initialized" — live
+    against serena-agent 2.1.0, 2026-11-18.
+    """
     from serena.symbol import LanguageServerSymbolRetriever
-    project = agent.get_active_project_or_raise()
-    return project, LanguageServerSymbolRetriever(project)
+
+    def build():
+        project = agent.get_active_project_or_raise()
+        return project, LanguageServerSymbolRetriever(project)
+
+    return agent.execute_task(build, name="get_symbol_retriever")
 
 
 def _jb_declaration_regexes(name_path: str) -> list[str]:

@@ -1,4 +1,44 @@
 # Changelog
+## 0.28.1 — 2026-11-18
+
+**Serena actually works, and models actually reach for it.** Two independent
+faults sat behind "serena tools are never used": the module was never able to
+run on serena-agent 2.x, and its tools were unreachable in practice.
+
+- **serena-agent 2.x compatibility** (probed live against 2.1.0; the bridge was
+  written for 1.2.x, so every path below failed). `LanguageBackend.from_str` is
+  gone — resolution moved to `LanguageBackendRegistry.get_instance().resolve`;
+  `resolve_language_backend` accepts both, and an invalid
+  `SERENA_LANGUAGE_BACKEND` now reports the offending value plus the valid keys
+  instead of an opaque `AttributeError`. New configs default to the **REPL**
+  agent interface (one `serena_repl` tool), which broke every
+  `get_tool_by_name(...).apply_ex(...)` call with "Tool 'x' is not active" —
+  `load_bridge_config` now forces `AgentInterface.TOOLS`. The
+  `LanguageServerSymbolRetriever` must be built inside `agent.execute_task` or
+  it raises "language server manager is not initialized". And
+  `check_onboarding_performed` was DELETED upstream, so that worker action
+  derives the answer from the `memory_maintenance` memory instead.
+  `serena_status`/`serena_list_tools` no longer crash on the missing enum
+  `.value`.
+- **Navigation tier promoted to direct.** The seven navigation tools
+  (`get_symbols_overview`, `find_symbol`, `find_referencing_symbols`,
+  `find_declaration`, `find_implementations`, `search_for_pattern`,
+  `get_diagnostics_for_file`) are declared from request #1; the editing tail
+  and ops helpers stay deferred. Across 56 recorded sessions the `tool_search`
+  gate was crossed 8 times and `serena_*` invoked **once** — and Serena-first
+  runs BEFORE read/grep, so the tools it replaces can never be the discovery
+  trigger. `SERENA_FIRST_GUIDANCE` no longer tells the model to go load them
+  (it claimed the tier was deferred long after that stopped being the
+  workaround); a test pins the wording and `registry.test.ts` guards the tier
+  split.
+
+Verified in fresh sessions: 37 declared tools including exactly the 7, deferred
+tail still loadable via `tool_search`, guidance injected without the
+tool_search instruction, and unprompted behavior calling `serena_find_symbol`
+then `serena_find_referencing_symbols`. Bridge actions 10/10 pass end-to-end
+through the real `SerenaWorkerClient`; `tsc --noEmit` clean; `npm test`
+**3020 pass / 0 fail / 3 env-gated skips**.
+
 
 ## 0.28.0 — 2026-11-18
 

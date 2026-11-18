@@ -47,6 +47,9 @@ describe("Serena tool-selection guidance", () => {
     assert.ok((guidance).includes("serena_get_symbols_overview"));
     assert.ok((guidance).includes("serena_find_symbol"));
     assert.ok((guidance).includes("Use read/grep/find for docs, configs, non-code files"));
+    // 2026-11-18: the navigation tier is direct, so the guidance must not tell
+    // the model to go load it (that wording survived a deferred→direct move).
+    assert.ok(!guidance.includes("tool_search"), "navigation tier is declared, not search-gated");
   });
 
   it("detects strict-mode semantic misses for code reads and code searches", () => {

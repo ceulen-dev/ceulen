@@ -38,6 +38,7 @@ themes/                 theme JSONs shipped with the package (declared via the p
   section for what is vendored instead. pi's managed install installs real
   `dependencies` for npm packages.
 - Tool registrations that should be cold list their canonical names on the module's `deferredTools` registry entry; the bundle entry injects `exposure: "deferred"` (not declared to the model, loadable via `tool_search`, still callable from `ctx.executeTool`/codemode). Everything NOT listed stays `direct` (declared every request). 2026-10-08 usage re-eval moved `munin_search`, `munin_get`, `github`, and `ux_audit` from deferred to direct; the rest of the tier list is unchanged.
+ Tool registrations that should be cold list their canonical names on the module's `deferredTools` registry entry; the bundle entry injects `exposure: "deferred"` (not declared to the model, loadable via `tool_search`, still callable from `ctx.executeTool`/codemode). Everything NOT listed stays `direct` (declared every request). 2026-10-08 usage re-eval moved `munin_search`, `munin_get`, `github`, and `ux_audit` from deferred to direct. 2026-11-18 re-eval promoted serena's SEVEN navigation tools (`get_symbols_overview`, `find_symbol`, `find_referencing_symbols`, `find_declaration`, `find_implementations`, `search_for_pattern`, `get_diagnostics_for_file`) — 56 sessions crossed the `tool_search` gate 8 times and invoked `serena_*` ONCE, and Serena-first must run BEFORE read/grep, so the tools it replaces can never be the discovery trigger. Its editing tail stays deferred. `registry.test.ts` guards both tiers.
 - Tests: `node:test` + tsx, in `extensions/modules/<name>/test/`. The bundle root `package.json` `test` script globs them. Test dirs are excluded from `tsc --noEmit` when they use loose harness stubs (usage, ponytail); they run under tsx.
 - To add a module: create `extensions/modules/<name>/`, append one entry to `MODULES` in `extensions/lib/registry.ts` under its category banner (each entry's `category` field is the OMP tab — the single source for /config tab placement, synthesized Enable-only sections, and /ceulen status grouping; pretty section names live in the config module's `PRETTY_OF` map). Order matters — usage reads the `router` provider, so router loads first; config loads last, it reads the contribution map. Add its test files to the `test` glob if not covered. The conflict guard covers you: a name another module already claimed throws at load.
 
@@ -712,6 +713,55 @@ and a resumed session with open work re-shows the HUD (an all-done snapshot
 stays hidden). NOT ported: compact-terminal mode, OMP's
 subagent-completion→todo auto-reconcile, dismiss/reveal persistence
 (`todo_hud_state`), `/todo hide|show`.
+
+### Serena module (serena)
+
+Semantic code navigation over a persistent Python worker
+(`extensions/modules/serena/`): `serena_*` tools speaking a line-delimited
+JSON protocol to ONE long-lived `serena-agent` process
+(`worker.ts`, `PYTHON_BRIDGE`), so language servers stay warm across calls.
+Real venv behaviour is loaded from `serena-agent`'s own Python — resolved
+from `SERENA_PYTHON`, then `uv tool dir`, then the AppData/`~/.local` uv tool
+dirs; absent → a clear "Could not find Serena Python" error, never a silent
+no-op.
+
+**Tier (2026-11-18 re-eval):** the seven NAVIGATION tools are DIRECT —
+`get_symbols_overview`, `find_symbol`, `find_referencing_symbols`,
+`find_declaration`, `find_implementations`, `search_for_pattern`,
+`get_diagnostics_for_file`. The editing tail (`replace_symbol_body`,
+`insert_*`, `rename_symbol`, `safe_delete_symbol`, `replace_content`) plus
+ops/react/session helpers (`status`, `list_tools`, `restart_*`,
+`get_current_config`, `check_onboarding_performed`, `onboarding`) stay
+DEFERRED. Rationale: 56 sessions crossed the `tool_search` gate 8 times and
+invoked `serena_*` ONCE — and Serena-first must run BEFORE read/grep, so the
+tools it replaces can never surface it. `SERENA_FIRST_GUIDANCE` is appended
+by a `before_agent_start` composer only when the surface is live
+(`isSerenaActive`: a navigation tool OR `tool_search` active), and the
+guidance names the declared tools — it must never tell the model to go load
+them (`test/index.test.ts` pins this).
+
+**serena-agent 2.x compatibility** (live 2026-11-18 against 2.1.0; the bridge
+was written for 1.2.x). Each delta is a hard failure otherwise:
+
+- backend resolution moved from `LanguageBackend.from_str` to
+  `LanguageBackendRegistry.get_instance().resolve` — `resolve_language_backend`
+  accepts both; an invalid `SERENA_LANGUAGE_BACKEND` raises the registry's
+  ValueError listing valid keys.
+- NEW configs default to the **REPL** agent interface, exposing one
+  `serena_repl` tool; the bridge drives `get_tool_by_name(...).apply_ex(...)`,
+  so `load_bridge_config` forces `AgentInterface.TOOLS` (a `project.yml`
+  choice still wins).
+- `LanguageServerSymbolRetriever` must be constructed INSIDE
+  `agent.execute_task` — building it directly raises "language server manager
+  is not initialized".
+- `check_onboarding_performed` is DELETED (in `ToolRegistry._deleted_tools`);
+  the worker action derives it from the presence of the `memory_maintenance`
+  memory instead.
+- `get_language_backend()` returns a backend instance, not an enum — `.value`
+  is gone; read `getattr(..., "value") or str(...)`.
+
+`PYTHON_BRIDGE` is a `String.raw` template literal — a backtick in an inner
+comment terminates it (found the hard way; keep inner comments backtick-free).
 
 ### Rules module (rules)
 
