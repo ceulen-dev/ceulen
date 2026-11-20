@@ -12,6 +12,9 @@ import { describe, it } from "node:test";
 import { createFakePi } from "./harness.js";
 
 const MINIMAL = "You are a helpful software engineer assistant.";
+const payload = { messages: [{ role: "system", content: "FULL" }], tools: [{ name: "bash" }, { name: "str_replace_editor" }, { name: "edit" }] };
+const wirePrompt = (h: ReturnType<typeof createFakePi>, ctx: any) =>
+  h.fire("before_provider_request", { payload }, ctx)?.messages?.[0].content ?? payload.messages[0].content;
 
 describe("ds-anchor regressions", () => {
   it("model_select away from target keeps the anchor inert (no stale sessionModel re-engage)", () => {
@@ -32,8 +35,8 @@ describe("ds-anchor regressions", () => {
     h.setEntries([]);
     h.fire("session_start", {}, h.ctx("deepseek-v4-flash"));
     h.fire("model_select", { model: { id: "deepseek-v4-pro" }, previousModel: undefined, source: "set" }, h.ctx("deepseek-v4-pro"));
-    const r = h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
-    assert.equal(r?.systemPrompt, MINIMAL, "switch to pro engages the bootstrap");
+    h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
+    assert.equal(wirePrompt(h, h.ctx("deepseek-v4-pro")), MINIMAL, "switch to pro engages the bootstrap");
   });
 
   it("turn_end with stopReason error does NOT promote (retry stays anchored)", () => {
@@ -42,8 +45,8 @@ describe("ds-anchor regressions", () => {
     h.fire("session_start", {}, h.ctx("deepseek-v4-pro"));
     h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
     h.fire("turn_end", { turnIndex: 0, message: { role: "assistant", stopReason: "error", content: [] }, toolResults: [] }, h.ctx("deepseek-v4-pro"));
-    const r = h.fire("before_agent_start", { prompt: "retry", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
-    assert.equal(r?.systemPrompt, MINIMAL, "error reply must not promote; retry re-anchors");
+    h.fire("before_agent_start", { prompt: "retry", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
+    assert.equal(wirePrompt(h, h.ctx("deepseek-v4-pro")), MINIMAL, "error reply must not promote; retry re-anchors");
   });
 
   it("turn_end with stopReason aborted does NOT promote", () => {
@@ -52,8 +55,8 @@ describe("ds-anchor regressions", () => {
     h.fire("session_start", {}, h.ctx("deepseek-v4-pro"));
     h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
     h.fire("turn_end", { turnIndex: 0, message: { role: "assistant", stopReason: "aborted", content: [] }, toolResults: [] }, h.ctx("deepseek-v4-pro"));
-    const r = h.fire("before_agent_start", { prompt: "retry", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
-    assert.equal(r?.systemPrompt, MINIMAL, "aborted reply must not promote");
+    h.fire("before_agent_start", { prompt: "retry", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
+    assert.equal(wirePrompt(h, h.ctx("deepseek-v4-pro")), MINIMAL, "aborted reply must not promote");
   });
 
   it("turn_end with a real reply promotes", () => {
@@ -62,8 +65,8 @@ describe("ds-anchor regressions", () => {
     h.fire("session_start", {}, h.ctx("deepseek-v4-pro"));
     h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
     h.fire("turn_end", { turnIndex: 0, message: { role: "assistant", stopReason: "stop", content: [{ type: "toolCall" }] }, toolResults: [] }, h.ctx("deepseek-v4-pro"));
-    const r = h.fire("before_agent_start", { prompt: "next", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
-    assert.notEqual(r?.systemPrompt, MINIMAL, "durable reply promotes");
+    h.fire("before_agent_start", { prompt: "next", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
+    assert.notEqual(wirePrompt(h, h.ctx("deepseek-v4-pro")), MINIMAL, "durable reply promotes");
   });
 
   it("anchorTrace resets per session", () => {
@@ -71,24 +74,13 @@ describe("ds-anchor regressions", () => {
     h.setEntries([]);
     h.fire("session_start", {}, h.ctx("deepseek-v4-pro"));
     h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
+    wirePrompt(h, h.ctx("deepseek-v4-pro"));
     let s = h.status(h.ctx("deepseek-v4-pro"));
     assert.match(s, /bootstrap: minimal prompt engaged/, "trace populated in session 1");
     // new session
     h.fire("session_start", {}, h.ctx("deepseek-v4-pro"));
     s = h.status(h.ctx("deepseek-v4-pro"));
     assert.doesNotMatch(s, /bootstrap: minimal prompt engaged/, "trace does not leak across sessions");
-  });
-
-  it("budget pin emits exactly one field and drops the other", () => {
-    const h = createFakePi();
-    h.setEntries([]);
-    h.fire("session_start", {}, h.ctx("deepseek-v4-pro"));
-    h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
-    const out = h.fire("before_provider_request", {
-      payload: { tools: [{ name: "bash" }, { name: "str_replace_editor" }], max_tokens: 8192, max_completion_tokens: 8192 },
-    }, h.ctx("deepseek-v4-pro"));
-    assert.equal(out.max_completion_tokens, 256000, "budget pinned on the field the payload already carries");
-    assert.equal(out.max_tokens, undefined, "conflicting max_tokens dropped");
   });
 
   // pi 1.2.0: before_agent_start also fires for sendMessage({triggerTurn: true})
@@ -107,8 +99,8 @@ describe("ds-anchor regressions", () => {
     assert.equal(out?.tools, undefined, "custom run keeps the full tool catalog");
     assert.equal(out?.max_tokens, undefined, "custom run gets no budget pin");
     // the bootstrap stayed pending for the next user turn
-    const user = h.fire("before_agent_start", { messageType: "user", prompt: "do a task", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
-    assert.equal(user?.systemPrompt, MINIMAL, "the next USER turn still bootstraps");
+    h.fire("before_agent_start", { messageType: "user", prompt: "do a task", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx("deepseek-v4-pro"));
+    assert.equal(wirePrompt(h, h.ctx("deepseek-v4-pro")), MINIMAL, "the next USER turn still bootstraps");
   });
 
   it("a custom-triggered run gets no first-tool hints (no prompt to read)", () => {

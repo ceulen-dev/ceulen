@@ -32,20 +32,25 @@ const setSettings = (steering: Record<string, unknown>) => writeFileSync(join(AG
 
 describe("deepSeekSelectionGuidance", () => {
   it("includes the compact routing table with serena entries when serena is active", () => {
-    const g = deepSeekSelectionGuidance(["read", "bash", "serena_find_symbol", "serena_find_referencing_symbols"]);
+    const g = deepSeekSelectionGuidance(["read", "bash", "fffind", "find", "ffgrep", "grep", "serena_find_symbol", "serena_find_referencing_symbols", "codemode", "tool_search"]);
     assert.match(g, /pick the right tool on the first try/);
     assert.match(g, /"run tests".*bash/);
-    assert.match(g, /path uncertain.*find before read/);
+    assert.match(g, /path uncertain → fffind before read/);
+    assert.match(g, /Search literal text.*→ ffgrep/);
+    assert.match(g, /Promise\.allSettled/);
+    assert.match(g, /targeted tool_search/);
     assert.match(g, /serena_find_symbol/);
     assert.match(g, /serena_find_referencing_symbols/);
-    assert.match(g, /serena_get_symbols_overview/);
+    assert.doesNotMatch(g, /serena_get_symbols_overview/);
   });
 
   it("omits serena entries when serena is not active", () => {
     const g = deepSeekSelectionGuidance(["ls", "grep", "bash", "write"]);
     assert.doesNotMatch(g, /serena/);
     assert.match(g, /"list files in <dir>" → ls/);
-    assert.match(g, /create a file → write/);
+    assert.match(g, /Create a new file → write/);
+    assert.doesNotMatch(g, /codemode|tool_search|→ find/);
+    assert.equal(deepSeekSelectionGuidance([]), "");
   });
 
   it("produces consistent memoized output for same tool set", () => {

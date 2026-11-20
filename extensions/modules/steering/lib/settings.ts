@@ -13,7 +13,7 @@
 //     "superpowerPrompt": "",      // custom text; empty = built-in
 //     "strictSerena": false,       // escalate dedicated-tool misses to a block
 //     "stripReasoning": true,      // drop accumulated reasoning_content
-//     "dsAnchor": true,            // deepseek-v4-pro minimal-mode bootstrap
+//     "dsAnchor": true,            // V4 Pro / V4.1 Flash minimal-mode bootstrap
 //     "weNeed": false,             // A/B: "We need…" bootstrap directive
 //     "thinkTool": false           // register the OMP-parity think scratchpad
 //   }

@@ -140,7 +140,7 @@ describe("/config contribution", () => {
     const anchor = groups[0].rows.find((r) => r.key === "steering.dsAnchor")!;
     assert.equal(anchor.kind, "toggle");
     assert.equal(anchor.defaultValue, true);
-    assert.match(anchor.warning!, /Repair module must be enabled/);
+    assert.match(anchor.warning!, /V4 Pro and V4\.1 Flash:.*bash and str_replace_editor when both are declared/);
     // No Enable row here — the config module prepends it.
     assert.equal(keys.some((k) => k.startsWith("ceulen.disabled")), false);
   });

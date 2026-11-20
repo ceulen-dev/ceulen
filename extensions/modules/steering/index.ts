@@ -10,7 +10,7 @@
  *     fast-mode body) — the "zai" module.
  *
  * What stays here is everything that depends on knowing WHICH model family is
- * serving the request, plus the DeepSeek v4 Pro minimal-mode anchor:
+ * serving the request, plus the DeepSeek V4 Pro / V4.1 Flash minimal-mode anchor:
  *
  *   1. family detection (deepseek-v4 | glm), latched from the requested model
  *      and the session-captured one (proxies rewrite ctx.model between hooks).
@@ -23,17 +23,14 @@
  *   4. tool-error categorization → the next turn's recovery hint, plus the
  *      reasoning-accumulation 400 detector.
  *   5. DeepSeek-only semantic-miss / dedicated-tool steering on tool_call.
- *   6. the ds-anchor two-phase bootstrap for deepseek-v4-pro.
+ *   6. the request-scoped ds-anchor two-phase bootstrap.
  *
  * ORDERING CONTRACT (why this module is its own unit): in ceulen's registry
  * `steering` loads AFTER ponytail and subagent, so this `before_agent_start`
  * handler runs LAST in the chain (each handler's returned systemPrompt becomes
- * the next handler's event.systemPrompt). Therefore:
- *   • the bootstrap branch deliberately REPLACES the whole prompt — everything
- *     earlier handlers composed is sacrificed for request #1, which is the
- *     entire point of the anchor;
- *   • every other branch COMPOSES: the incoming systemPrompt is preserved
- *     verbatim and only prepended/appended to. Never clobber outside bootstrap.
+ * the next handler's event.systemPrompt). Always compose the full prompt here.
+ * Replace it only at the wire boundary, atomically with the bootstrap tool pair,
+ * so a fail-open or the next tool round gets the original composed prompt.
  *
  * Config: the `steering` section of the agent-dir settings.json, overlaid by a
  * trusted project `.pi/settings.json` (lib/settings.ts), read per turn — so
@@ -71,6 +68,7 @@ import {
   dshBootstrapTools,
   hasPromotionSignal,
   isAnchorTarget,
+  withMinimalPrompt,
 } from "./lib/anchor.js";
 import {
   categorizeToolError,
@@ -130,11 +128,12 @@ export default function steeringModule(pi: ExtensionAPI): void {
   // reinforcement) stashed here and appended to the CURRENT user message by
   // before_provider_request — never the system prompt (the cache head).
   let pendingGuidance: string | undefined;
+  let bootstrapGuidance: string | undefined;
   // Effective settings — refreshed per turn (before_agent_start) and at
   // session_start (the anchor bootstrap keys off dsAnchor/weNeed).
   let settings: SteeringSettings = readSteeringSettings();
 
-  // DeepSeek v4 Pro minimal-mode anchor (two-phase bootstrap) state.
+  // DeepSeek V4 Pro / V4.1 Flash minimal-mode anchor state.
   // Invariant: anchorBootstrapping = dsAnchor && target && !anchorPromoted.
   let anchorReady = false;
   let anchorPromoted = false;
@@ -234,7 +233,7 @@ export default function steeringModule(pi: ExtensionAPI): void {
         `  Strict Serena (DeepSeek V4): ${settings.strictSerena ? `on (block after ${BLOCK_AFTER_REMINDERS} reminders)` : "off"}`,
         `  Reasoning strip: ${settings.stripReasoning ? "on" : "off"}`,
         `  Leaked content cleaning: always on for detected families`,
-        `  ds-anchor (deepseek-v4-pro): ${anchorState}`,
+        `  ds-anchor (V4 Pro / V4.1 Flash): ${anchorState}`,
         `  We-need directive (bootstrap): ${settings.weNeed ? "on" : "off"}`,
         `  Thinking level: ${currentThinking ?? "unknown"}${currentThinking !== "max" && anchorActive ? " (recipe wants max)" : ""}`,
         `  Super Power turns: ${turnCounter}`,
@@ -297,6 +296,7 @@ export default function steeringModule(pi: ExtensionAPI): void {
     cacheStats.hitTurns = 0;
     cacheStats.missTurns = 0;
     pendingGuidance = undefined;
+    bootstrapGuidance = undefined;
   });
 
   // ── thinking_level_select: track the level (max is required by the DSH recipe) ──
@@ -349,37 +349,26 @@ export default function steeringModule(pi: ExtensionAPI): void {
     const messageType = (event as { messageType?: string }).messageType;
     const isCustomRun = messageType === "custom";
 
-    // ds-anchor bootstrap: request #1 gets the byte-identical Minimal prompt
-    // and NO guidance (Super Power, selection guidance, hints all suppressed).
-    // This handler is LAST in ceulen's chain, so the returned systemPrompt
-    // REPLACES everything ponytail/subagent/advisor composed — deliberate, and
-    // the only place this module clobbers rather than composes.
-    //
-    // A machine-initiated run must NOT consume the bootstrap: the minimal prompt
-    // plus bash/str_replace_editor-only tools would run a cron/background task
-    // under DSH minimal mode. The bootstrap stays pending for the next user turn.
-    if (isCustomRun && anchorTarget(ctx.model)) {
-      // Machine-initiated: never engage the bootstrap (trace once, then the
-      // normal composition path below).
-      anchorTracePush(`bootstrap skipped: custom-triggered run (promoted=${anchorPromoted})`);
-    } else if (anchorBootstrapping(ctx.model)) {
+    const selected = event.systemPromptOptions?.selectedTools;
+    const activeForHint = selected ?? pi.getActiveTools();
+    const hidden = event.systemPromptOptions?.hiddenTools;
+    const directTools = hidden?.length ? activeForHint.filter((name) => !hidden.includes(name)) : activeForHint;
+
+    // Read-only child loadouts, codemode-only, plan mode and custom runs keep
+    // their prompt and tools. Wire-level validation below is still authoritative.
+    anchorRunActive = false;
+    if (!isCustomRun && anchorBootstrapping(ctx.model)) {
       scanAnchorEntries(ctx);
-      if (!anchorPromoted) {
+      if (!anchorPromoted && BOOTSTRAP_TOOLS.every((name) => directTools.includes(name))) {
         anchorRunActive = true;
-        pendingGuidance = undefined;
-        anchorTracePush(`bootstrap: minimal prompt engaged (model=${ctx.model?.id ?? "?"}${settings.weNeed ? ", +we-need directive" : ""})`);
-        return { systemPrompt: settings.weNeed ? WE_NEED_DIRECTIVE + MINIMAL_SYSTEM_PROMPT : MINIMAL_SYSTEM_PROMPT };
+      } else if (!anchorPromoted) {
+        anchorTracePush("bootstrap skipped: bash/str_replace_editor not declared");
       }
-      // Scan found a durable signal (resume edge) — fall through to the
-      // normal path: full prompt + full catalog.
-      anchorTracePush("bootstrap skipped: durable signal found (resume)");
-    } else if (anchorTarget(ctx.model)) {
-      anchorTracePush(isPlanActive() && !anchorPromoted
-        ? "bootstrap deferred: plan mode active (mutator tools blocked)"
-        : `bootstrap skipped: already promoted=${anchorPromoted}`);
     }
 
     remindedThisTurn = false;
+    pendingGuidance = undefined;
+    bootstrapGuidance = undefined;
     if (!activeFamily) return;
 
     const dynamicParts: string[] = [];
@@ -397,25 +386,23 @@ export default function steeringModule(pi: ExtensionAPI): void {
     hasErrorThisTurn = false;
     lastErrorInfo = null;
 
-    // Prompt-aware first-tool hints — ALL families (correctness, not steering).
-    // Per-turn dynamic (they depend on the current prompt) → user-message tail.
-    //
-    // activeForHint is the SAME source on every turn (host selectedTools when
-    // populated, pi.getActiveTools() otherwise) so the system prompt stays
-    // byte-identical — a per-turn source switch would invalidate the cache head.
-    const selected = event.systemPromptOptions?.selectedTools;
-    const activeForHint: readonly string[] = Array.isArray(selected) && selected.length > 0 ? selected : pi.getActiveTools();
+    // Prompt-aware first-tool hints — ALL families. Per-turn dynamic → user-message tail.
     // Hints heuristically read the USER's task text: a custom-triggered run has
     // no prompt, and hinting off a machine message would be noise.
     const runPrompt = !isCustomRun && "prompt" in event ? event.prompt : "";
-    if (settings.firstToolHints && !isCustomRun && activeForHint.includes("bash")) {
+    if (settings.firstToolHints && anchorRunActive && readUncertainPathHint(runPrompt)) {
+      bootstrapGuidance = "Resolve the bare filename inside the current workspace with bash (`find . -name ...`), not by searching from `/`.";
+    }
+    if (settings.firstToolHints && !isCustomRun && directTools.includes("bash")) {
       const runHint = runTaskFirstToolHint(runPrompt);
       if (runHint) dynamicParts.push(runHint);
       const ghHint = githubCloneFirstToolHint(runPrompt);
       if (ghHint) dynamicParts.push(ghHint);
     }
-    if (settings.firstToolHints && !isCustomRun && activeForHint.includes("find")) {
-      const readHint = readUncertainPathHint(runPrompt);
+    const pathFinder = directTools.includes("fffind") && activeFamily === "deepseek-v4" ? "fffind"
+      : directTools.includes("find") ? "find" : undefined;
+    if (settings.firstToolHints && !isCustomRun && pathFinder && directTools.includes("read")) {
+      const readHint = readUncertainPathHint(runPrompt, pathFinder);
       if (readHint) dynamicParts.push(readHint);
     }
 
@@ -434,8 +421,7 @@ export default function steeringModule(pi: ExtensionAPI): void {
       if (patchHint) systemPrompt = `${systemPrompt}\n\n${patchHint}`;
     }
 
-    // DeepSeek-only: Super Power Mode + verbose selection guidance (DeepSeek V4
-    // needs the full steering block; GLM reaches 100% with prompt-aware hints alone).
+    // DeepSeek-only: Super Power Mode + compact selection guidance.
     if (activeFamily === "deepseek-v4") {
       const prefixParts: string[] = [];
 
@@ -448,9 +434,8 @@ export default function steeringModule(pi: ExtensionAPI): void {
       }
 
       if (settings.selectionGuidance) {
-        if (["serena_get_symbols_overview", "serena_find_symbol", "serena_find_referencing_symbols", "serena_find_declaration", "serena_find_implementations", "obsidian", "ls", "grep", "find", "read", "edit", "bash"].some((n) => activeForHint.includes(n))) {
-          prefixParts.push(deepSeekSelectionGuidance(activeForHint));
-        }
+        const guidance = deepSeekSelectionGuidance(activeForHint, directTools);
+        if (guidance) prefixParts.push(guidance);
       }
 
       if (prefixParts.length > 0) {
@@ -475,21 +460,25 @@ export default function steeringModule(pi: ExtensionAPI): void {
     if (anchorBootstrapping(ctx.model) && anchorRunActive) {
       const p = payload as Record<string, unknown> | undefined;
       const filtered = dshBootstrapTools(p?.tools);
-      if (!filtered.ok) {
+      const minimal = filtered.ok && withMinimalPrompt(p, settings.weNeed ? WE_NEED_DIRECTIVE + MINIMAL_SYSTEM_PROMPT : MINIMAL_SYSTEM_PROMPT);
+      if (!minimal) {
+        const reason = filtered.reason ?? "system prompt unavailable in payload";
         anchorPromoted = true; // fail-open
-        anchorTracePush(`FAIL-OPEN: ${filtered.reason}`);
-        warnAnchorOnce(ctx, `steering: ds-anchor ${filtered.reason}; bootstrap disabled, full catalog exposed`);
+        anchorRunActive = false;
+        anchorTracePush(`FAIL-OPEN: ${reason}`);
+        warnAnchorOnce(ctx, `steering: ds-anchor ${reason}; bootstrap disabled, full prompt and catalog preserved`);
       } else {
         // max_tokens: the DSH captured minimal-mode payload sent 256000, and
         // dsh-anchored-standard issue #11 isolated the output budget as a
         // trajectory lever. Match it on the bootstrap request only. Exactly one
         // budget field is emitted — the other is dropped from the spread so a
         // payload carrying both can't send conflicting fields.
-        const other = p?.max_completion_tokens !== undefined ? "max_completion_tokens" : "max_tokens";
+        const other = minimal.max_completion_tokens !== undefined ? "max_completion_tokens" : "max_tokens";
         const dropped = other === "max_tokens" ? "max_completion_tokens" : "max_tokens";
-        const { [dropped]: _omit, ...rest } = p ?? {};
-        payload = { ...rest, tools: filtered.tools, [other]: BOOTSTRAP_MAX_TOKENS };
-        anchorTracePush(`payload: tools=[bash,str_replace_editor] + ${other}=${BOOTSTRAP_MAX_TOKENS} sent to ${ctx.model?.id ?? "?"}`);
+        const { [dropped]: _omit, ...rest } = minimal;
+        const maxTokens = Math.min(BOOTSTRAP_MAX_TOKENS, ctx.model?.maxTokens ?? BOOTSTRAP_MAX_TOKENS);
+        payload = { ...rest, tools: filtered.tools, [other]: maxTokens };
+        anchorTracePush(`bootstrap: minimal prompt engaged; tools=[bash,str_replace_editor] + ${other}=${maxTokens} sent to ${ctx.model?.id ?? "?"}`);
       }
     }
     // Append per-turn dynamic guidance to the current user message (request
@@ -499,8 +488,9 @@ export default function steeringModule(pi: ExtensionAPI): void {
     // prompt): mid-turn rounds end with tool results, where re-appending the
     // hint reads as a fresh repeated demand and loops strict models into
     // re-running bash ("I've been complying") instead of settling.
-    if (pendingGuidance && tailIsPlainUserPrompt(payload)) {
-      const withGuidance = appendGuidanceToLastUserMessage(payload, pendingGuidance);
+    const guidance = anchorRunActive ? bootstrapGuidance : pendingGuidance;
+    if (guidance && tailIsPlainUserPrompt(payload)) {
+      const withGuidance = appendGuidanceToLastUserMessage(payload, guidance);
       if (withGuidance !== payload) payload = withGuidance;
     }
     payload = cleanLeakedContentFromMessages(payload, pi.getAllTools().map((t) => t.name));

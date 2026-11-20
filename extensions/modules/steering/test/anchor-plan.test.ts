@@ -11,7 +11,7 @@ import { createFakePi, isolateAgentDir } from "./harness.js";
 import { setPlanActive } from "../../../lib/plan-bridge.ts";
 
 const MINIMAL = "You are a helpful software engineer assistant.";
-const PRO = "deepseek-v4-pro";
+const TARGET = "combo/deepseek-v4.1-flash";
 // Plan-mode-shaped catalog: reads + plan tools, NO mutator pair.
 const PLAN_TOOLS = ["read", "bash", "grep", "find", "ls", "write_plan", "ask_user_question"];
 
@@ -24,14 +24,14 @@ describe("ds-anchor × plan mode", () => {
     setPlanActive(true);
     const h = createFakePi(PLAN_TOOLS);
     h.setEntries([]);
-    h.fire("session_start", {}, h.ctx(PRO));
+    h.fire("session_start", {}, h.ctx(TARGET));
 
-    const r = h.fire("before_agent_start", { prompt: "plan it", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(PRO));
+    const r = h.fire("before_agent_start", { prompt: "plan it", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(TARGET));
     assert.notEqual(r?.systemPrompt, MINIMAL, "no minimal prompt while planning");
     assert.ok(r?.systemPrompt === undefined || r.systemPrompt.includes("FULL PI PROMPT"), "composed prompt preserved (plan contract survives)");
 
     // The payload that triggered the live bug: plan-filtered catalog without str_replace_editor.
-    const out = h.fire("before_provider_request", { payload: { tools: PLAN_TOOLS.map((name) => ({ name })) } }, h.ctx(PRO));
+    const out = h.fire("before_provider_request", { payload: { tools: PLAN_TOOLS.map((name) => ({ name })) } }, h.ctx(TARGET));
     assert.equal(out?.tools, undefined, "no tool substitution while planning");
     assert.equal(out?.max_tokens, undefined, "no budget pin while planning");
     assert.equal(h.notifications.length, 0, "no fail-open warning");
@@ -39,27 +39,28 @@ describe("ds-anchor × plan mode", () => {
 
   it("bootstrap engages on the first post-exit turn when no assistant reply landed", () => {
     setPlanActive(true);
-    const h = createFakePi(PLAN_TOOLS);
+    const h = createFakePi([...PLAN_TOOLS, "str_replace_editor"]);
     h.setEntries([]);
-    h.fire("session_start", {}, h.ctx(PRO));
-    h.fire("before_agent_start", { prompt: "plan it", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(PRO));
-    h.fire("before_provider_request", { payload: { tools: PLAN_TOOLS.map((name) => ({ name })) } }, h.ctx(PRO));
+    h.fire("session_start", {}, h.ctx(TARGET));
+    h.fire("before_agent_start", { prompt: "plan it", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(TARGET));
+    h.fire("before_provider_request", { payload: { tools: PLAN_TOOLS.map((name) => ({ name })) } }, h.ctx(TARGET));
     assert.equal(h.notifications.length, 0, "still no warning after exit");
 
     setPlanActive(false);
-    const r2 = h.fire("before_agent_start", { prompt: "now do it", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(PRO));
-    assert.equal(r2?.systemPrompt, MINIMAL, "plan exit with no durable reply → bootstrap fires");
+    h.fire("before_agent_start", { prompt: "now do it", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(TARGET));
+    const out = h.fire("before_provider_request", { payload: { messages: [{ role: "system", content: "FULL PI PROMPT" }], tools: [{ name: "bash" }, { name: "str_replace_editor" }] } }, h.ctx(TARGET));
+    assert.equal(out.messages[0].content, MINIMAL, "plan exit with no durable reply → bootstrap fires");
   });
 
   it("plan-mode assistant replies promote naturally (no post-exit re-anchor)", () => {
     setPlanActive(true);
     const h = createFakePi(PLAN_TOOLS);
     h.setEntries([]);
-    h.fire("session_start", {}, h.ctx(PRO));
+    h.fire("session_start", {}, h.ctx(TARGET));
     h.setEntries([{ type: "message", message: { role: "assistant", content: [{ type: "text" }] } }]);
 
     setPlanActive(false);
-    const r = h.fire("before_agent_start", { prompt: "execute", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(PRO));
+    const r = h.fire("before_agent_start", { prompt: "execute", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(TARGET));
     assert.notEqual(r?.systemPrompt, MINIMAL, "history diverged from DSH distribution — no re-anchor");
   });
 
@@ -67,7 +68,7 @@ describe("ds-anchor × plan mode", () => {
     setPlanActive(true);
     const h = createFakePi(PLAN_TOOLS);
     h.setEntries([]);
-    h.fire("session_start", {}, h.ctx(PRO));
-    assert.ok(h.status(h.ctx(PRO)).includes("deferred (plan mode)"));
+    h.fire("session_start", {}, h.ctx(TARGET));
+    assert.ok(h.status(h.ctx(TARGET)).includes("deferred (plan mode)"));
   });
 });

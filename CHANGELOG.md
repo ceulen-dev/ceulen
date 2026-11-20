@@ -1,4 +1,12 @@
 # Changelog
+## 0.28.2 — 2026-11-20
+
+- DeepSeek V4.1 Flash gets the same minimal-mode bootstrap as V4 Pro, including
+  `router/combo/deepseek-v4.1-flash`. The full prompt now returns with the full
+  tool catalog after the first assistant reply, even within the same turn.
+  Both models get loadout-aware tool guidance for exact paths, file and symbol
+  search, codemode batching, and targeted tool discovery.
+
 ## 0.28.1 — 2026-11-18
 
 **Serena actually works, and models actually reach for it.** Two independent

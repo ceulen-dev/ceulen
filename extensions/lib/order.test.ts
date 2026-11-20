@@ -6,9 +6,8 @@
 // steering with a prompt-rewriting handler fails HERE even if nobody updates
 // the array-order assertions in registry.test.ts.
 //
-// Live incident class (reviewer 2026-10-06): rtk loaded after steering and
-// its before_agent_start appended the RTK note to the ds-anchor's
-// byte-identical minimal prompt, silently defeating the anchor.
+// Steering sees the prompt and tool loadout after the other composers run.
+// The minimal prompt itself is applied at the provider boundary.
 
 import { describe, it, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -63,7 +62,7 @@ describe("before_agent_start registration order (steering contract)", () => {
       rewroteAfter.map((r) => r.module),
       [],
       `before_agent_start registered AFTER steering by: ${rewroteAfter.map((r) => r.module).join(", ")} — ` +
-        "steering must be the last prompt rewriter (ds-anchor byte-identity). " +
+        "steering should see the final composed prompt and loadout. " +
         `(load failures tolerated: ${failures.length})`,
     );
     // Sanity: the harness captured real registrations from many modules.

@@ -461,9 +461,7 @@ surfaces. `plan.autoApprove` (or bare `/plan-auto`) approves a written plan
 and executes it in the current session on settle, no keypress.
 
 LOAD ORDER: the registry places plan AFTER subagent (its gating reads subagent
-agent frontmatter) and BEFORE steering (steering must stay the last
-`before_agent_start` rewriter; rtk also loads BEFORE steering — its RTK note is
-a prompt append the ds-anchor bootstrap must be able to replace). Standalone
+agent frontmatter) and BEFORE steering (so steering sees the plan loadout). Standalone
 `@bacnh85/pi-plan` must be removed
 when ceulen's plan module is enabled — the conflict guard refuses the
 duplicate commands/tools.
@@ -476,26 +474,21 @@ Ported from the model-family half of `@bacnh85/pi-model-tools` 0.9.5 (see
 `combo/deepseek-v4.1-flash` matches), first-tool hints (bash-first / clone-
 first / find-first — user-message tail ONLY, first provider round of the
 turn), reasoning strip + leaked-content cleaning (the biggest prefix-cache-
-stability factor), error categorization + recovery hints, DeepSeek selection
-guidance / superpower (off by default) / strict-Serena steering, and the
-**ds-anchor** (deepseek-v4-pro minimal-mode two-phase bootstrap, on by
-default: request #1 gets the byte-identical DSH minimal prompt +
-bash/str_replace_editor only, max_tokens 256000; promotes on the first
-durable assistant reply; fail-open everywhere; `/steering` shows the anchor
-trace ring).
+stability factor), error categorization + recovery hints, and DeepSeek selection
+guidance (exact paths, available search tools, codemode batching, deferred tool
+discovery), superpower (off by default), and strict-Serena steering.
 
-LOAD-ORDER CONTRACT (the reason steering is its own registry entry, placed
-last of the prompt rewriters — after every before_agent_start composer
-(ponytail/plan/subagent/munin/advisor/ux/fff/serena/web/rules/rtk — rtk IS a
-prompt rewriter, its before_agent_start appends the RTK note, so it loads
-BEFORE steering) and immediately before config): pi chains
-`before_agent_start` results — each handler's returned systemPrompt becomes
-the next handler's event.systemPrompt. Steering registers LAST of the prompt
-rewriters, so during the anchor bootstrap its returned minimal prompt
-REPLACES everything ponytail/advisor/subagent composed (the only place a
-ceulen module clobbers instead of composes); on the normal path it composes
-onto `event.systemPrompt` and never drops existing content. Do not add a
-second system-prompt-rewriting module after it.
+**ds-anchor** is on by default for V4 Pro and V4.1 Flash. It atomically swaps
+the first eligible provider request to the DSH minimal prompt and
+`bash`/`str_replace_editor` pair, with a 256000 output budget capped at the
+model's limit. The full prompt and tools return immediately after the first
+durable assistant reply, even within the same turn. It skips plan mode,
+custom-triggered runs and loadouts without the pair. Unknown wire shapes
+keep the original prompt and tools. `/steering` shows the trace.
+
+Steering runs after the other `before_agent_start` composers (including
+RTK) so it sees their prompt and tool selections. It always preserves the
+composed prompt there; the bootstrap rewrite is confined to the provider payload.
 
 Settings: the `steering` section (`firstToolHints`, `selectionGuidance`,
 `superpower`, `superpowerPrompt`, `strictSerena`, `stripReasoning`,

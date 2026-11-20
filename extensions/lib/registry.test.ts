@@ -83,15 +83,7 @@ describe("deferredTools tiers", () => {
 });
 
 describe("MODULES load order", () => {
-  // The steering entry must stay behind every before_agent_start prompt
-  // rewriter (its ds-anchor bootstrap REPLACES the final prompt; a rewriter
-  // loaded after it would append to the byte-identical minimal prompt, which
-  // is exactly what serena/web used to do) and ahead of the non-rewriters
-  // (config). Modules registering before_agent_start and loading BEFORE
-  // steering: munin, advisor, ux, ponytail, subagent, plan, fff, serena, web,
-  // rules, rtk — web is the last of them, hence the anchor below. rtk IS a
-  // prompt rewriter (its before_agent_start appends the RTK note), so it must
-  // sit before steering or the ds-anchor bootstrap loses byte-identity.
+  // Steering sees the prompt and loadout after the other composers run.
   it("steering is the last prompt rewriter, after rtk, before config", async () => {
     const { MODULES } = await import("./registry.js");
     const at = (name: string) => MODULES.findIndex((m) => m.name === name);

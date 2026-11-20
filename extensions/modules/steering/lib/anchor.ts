@@ -1,5 +1,5 @@
 /**
- * anchor.ts — DeepSeek v4 Pro "minimal-mode anchor" (two-phase bootstrap).
+ * anchor.ts — DeepSeek V4 Pro / V4.1 Flash minimal-mode bootstrap.
  *
  * DeepSeek v4 Pro GA appears overfitted to DeepSeek Harness (DSH) "minimal
  * mode": a byte-stable system prompt of one line + only bash/str_replace_editor
@@ -10,9 +10,8 @@
  * Two-phase design ported from hank9999/pi-ds-anchored (MIT), itself from
  * xiaobright/dsh-anchored-standard (Project2 benchmark: 98/99).
  *
- * Fail-open by design: any surprise (no session access, malformed payload,
- * missing bash/str_replace_editor) disables filtering and exposes the full
- * catalog rather than breaking the session.
+ * Fail-open by design: if the wire prompt or tool pair isn't available, leave
+ * both untouched.
  */
 // ponytail: vendored from @bacnh85/pi-model-tools 0.9.5
 // (extensions/lib/ds-anchor.ts). Local change: anchorEnabled() /
@@ -84,14 +83,29 @@ export const DSH_BOOTSTRAP_TOOL_DEFS = [
   },
 ] as const;
 
-const TARGET_FRAGMENT = "deepseek-v4-pro";
+const TARGET_PATTERN = /deepseek-v4-pro|deepseek-v4\.1-flash/i;
 
 /** The directive block, prepended verbatim when `steering.weNeed` is on. */
 export const WE_NEED_DIRECTIVE = "When you think, start each thinking paragraph with \"We need…\".\n\n";
 
-/** Target = model ids containing "deepseek-v4-pro" (case-insensitive). */
+/** Match Pro and V4.1 Flash even behind router prefixes or revision suffixes. */
 export function isAnchorTarget(modelId?: string): boolean {
-  return typeof modelId === "string" && modelId.toLowerCase().includes(TARGET_FRAGMENT);
+  return typeof modelId === "string" && TARGET_PATTERN.test(modelId);
+}
+
+/** Replace the wire prompt, not Pi's run-wide prompt. Unknown shapes fail open. */
+export function withMinimalPrompt(payload: Record<string, unknown> | undefined, prompt: string): Record<string, unknown> | undefined {
+  if (!payload) return undefined;
+  // Anthropic Messages carries the prompt separately from the conversation.
+  if (typeof payload.system === "string") return { ...payload, system: prompt };
+  if (Array.isArray(payload.system)) return { ...payload, system: [{ type: "text", text: prompt }] };
+  // The router uses Chat Completions. Preserve the role and any message metadata.
+  if (!Array.isArray(payload.messages)) return undefined;
+  const [head, ...rest] = payload.messages;
+  if ((head?.role === "system" || head?.role === "developer") && typeof head.content === "string") {
+    return { ...payload, messages: [{ ...head, content: prompt }, ...rest] };
+  }
+  return undefined;
 }
 
 export interface AnchorEntry {

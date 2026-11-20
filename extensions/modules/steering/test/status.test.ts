@@ -28,7 +28,7 @@ describe("/steering status", () => {
     assert.match(text, /Super Power Mode \(DeepSeek V4\): off/);
     assert.match(text, /Strict Serena \(DeepSeek V4\): off/);
     assert.match(text, /Reasoning strip: on/);
-    assert.match(text, /ds-anchor \(deepseek-v4-pro\): off/);
+    assert.match(text, /ds-anchor \(V4 Pro \/ V4\.1 Flash\): off/);
     assert.match(text, /We-need directive \(bootstrap\): off/);
     assert.match(text, /Super Power turns: 0/);
   });
@@ -44,25 +44,26 @@ describe("/steering status", () => {
   });
 
   it("flags a thinking level below the recipe's max while the anchor is active", () => {
-    const h = createFakePi(["bash", "read"]);
-    const ctx = h.ctx("deepseek-v4-pro", { thinkingLevel: "high" });
+    const h = createFakePi();
+    const ctx = h.ctx("combo/deepseek-v4.1-flash", { thinkingLevel: "high" });
     h.fire("session_start", {}, ctx);
     h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, ctx);
     const below = h.status(ctx);
     assert.match(below, /Thinking level: high \(recipe wants max\)/);
-    assert.match(below, /ds-anchor \(deepseek-v4-pro\): bootstrapping/);
+    assert.match(below, /ds-anchor \(V4 Pro \/ V4\.1 Flash\): bootstrapping/);
     // A level change past max clears the marker.
     h.fire("thinking_level_select", { level: "max", previousLevel: "high" }, ctx);
     assert.match(h.status(ctx), /Thinking level: max$/m);
   });
 
   it("shows the error tally and the ds-anchor trace ring", () => {
-    const h = createFakePi(["bash", "read"]);
+    const h = createFakePi();
     const ctx = h.ctx("deepseek-v4-pro");
     h.setEntries([]);
     h.fire("session_start", {}, ctx);
-    h.fire("tool_execution_end", { toolName: "read", isError: true, result: "ENOENT: no such file or directory" }, ctx);
     h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, ctx);
+    h.fire("before_provider_request", { payload: { messages: [{ role: "system", content: "FULL" }], tools: [{ name: "bash" }, { name: "str_replace_editor" }] } }, ctx);
+    h.fire("tool_execution_end", { toolName: "read", isError: true, result: "ENOENT: no such file or directory" }, ctx);
     const text = h.status(ctx);
     assert.match(text, /\*\*Errors:\*\* 1 total, last: path_not_found on read/);
     assert.match(text, /\*\*ds-anchor trace:\*\*/);

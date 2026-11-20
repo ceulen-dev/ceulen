@@ -220,22 +220,10 @@ export const MODULES: ModuleEntry[] = [
   { name: "sg", category: "Tools", describe: "Structural search & rewrite via the ast-grep CLI: ast_grep search, ast_edit dry-run-default rewrites. Registers nothing until ast-grep/sg is installed.", load: sgModule, deferredTools: ["ast_grep", "ast_edit"] },
   // notify: harmless desktop ping (bell fallback), herdr multi-pane ergonomics.
   { name: "notify", category: "Tools", describe: "Desktop notification tool: ping the user when long work settles or input is needed (osascript / notify-send / bell).", load: notifyModule, deferredTools: ["notify"] },
-  // rtk is a PROMPT REWRITER (its before_agent_start appends the RTK note), so
-  // it must load BEFORE steering — during a ds-anchor bootstrap, steering's
-  // minimal prompt replaces everything, including this note (byte-identity);
-  // on the normal path steering composes onto it.
-  // Steering LAST of the prompt rewriters, i.e. after EVERY before_agent_start
-  // composer (ponytail/plan/subagent/munin/advisor/ux/fff/serena/web/rules) and
-  // before the config module (load order is load-bearing even though its
-  // /config rows live on the Model tab, which PI_TAB_ORDER sorts
-  // independently): pi chains before_agent_start results, so steering must run
-  // LAST for its deepseek-v4-pro anchor bootstrap to REPLACE the final prompt
-  // (byte-identical minimal prompt) instead of appending to a prompt that
-  // serena/web/rtk then append to. rtk (a prompt rewriter — it appends the
-  // RTK note) loads BEFORE this entry; nothing after steering touches the
-  // prompt — do not move rtk back after it or add a prompt rewriter here.
+  // Steering sees the prompt and tool loadout after the other composers run
+  // (including RTK). The anchor itself rewrites only the first wire payload.
   { name: "rtk", category: "Shell", describe: "Route shell commands through RTK where RTK supports them; chains and unsupported commands pass through.", load: rtkModule, config: rtkConfig },
-  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): first-tool hints, reasoning strip, leak cleaning, error recovery hints, DeepSeek guidance + v4-pro minimal-mode anchor.", load: steeringModule, config: steeringConfig },
+  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): tool guidance, reasoning strip, error recovery, and a minimal-mode anchor for V4 Pro / V4.1 Flash.", load: steeringModule, config: steeringConfig },
   // ── Shell ──────────────────────────────────────────────────────────────
   // Permission after rtk: persistent allow/ask/deny gating. Inert until rules
   // exist; defers to plan mode via the shared plan-bridge flag (order-free).

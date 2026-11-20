@@ -1,99 +1,82 @@
-// Lifecycle test, adapted from pi-model-tools
-// extensions/test/unit/ds-anchor-wiring.test.ts: the real module is wired into a
-// stub ExtensionAPI and the anchor lifecycle is driven directly —
-// session_start → before_agent_start (#1 bootstrap) → before_provider_request
-// (tool filter) → tool_call (bootstrap tool gate) → turn_end (promote) →
-// before_agent_start #2 (full prompt path).
+// Drive the same bootstrap lifecycle for both target model IDs.
+import assert from "node:assert/strict";
+import { after, before, it } from "node:test";
+import { createFakePi, isolateAgentDir, setSteeringSettings } from "./harness.js";
+import { BOOTSTRAP_TOOLS, MINIMAL_SYSTEM_PROMPT, WE_NEED_DIRECTIVE } from "../lib/anchor.js";
 
-import assert from "node:assert";
-import { after, before } from "node:test";
-import { createFakePi, isolateAgentDir } from "./harness.js";
-
-let restoreAgentDir: () => void;
-before(() => { restoreAgentDir = isolateAgentDir("ceulen-steering-wiring-").restore; });
-after(() => { restoreAgentDir(); });
-
-const MINIMAL = "You are a helpful software engineer assistant.";
 const PRO = "deepseek-v4-pro-0813";
+const FLASH = "combo/deepseek-v4.1-flash";
+const TOOLS = ["bash", "str_replace_editor", "read", "find", "apply_patch", "codemode"];
+let isolated: ReturnType<typeof isolateAgentDir>;
+before(() => { isolated = isolateAgentDir("ceulen-steering-wiring-"); });
+after(() => isolated.restore());
 
-// 1. session_start with a target model, empty durable history
-const h = createFakePi(["bash", "read", "edit", "grep"]);
-h.setEntries([]);
-h.fire("session_start", {}, h.ctx(PRO));
+for (const id of [PRO, FLASH]) {
+  it(`${id}: anchors request #1 only, then restores the full composed prompt and catalog in the same turn`, () => {
+    const h = createFakePi(TOOLS);
+    const ctx = h.ctx(id);
+    h.fire("session_start", {}, ctx);
+    const { systemPrompt } = h.fire("before_agent_start", { prompt: "Read limits.ts", systemPrompt: "FULL PI PROMPT" }, ctx);
+    assert.match(systemPrompt, /FULL PI PROMPT/);
+    assert.match(systemPrompt, /Batch independent calls/);
+    const payload = { model: id, messages: [{ role: "system", content: systemPrompt }, { role: "user", content: "Read limits.ts" }], tools: TOOLS.map((name) => ({ function: { name } })), max_tokens: 384000 };
+    const out = h.fire("before_provider_request", { payload }, ctx);
+    assert.deepEqual(out.tools.map((t: any) => t.function.name), BOOTSTRAP_TOOLS);
+    assert.equal(out.messages[0].content, MINIMAL_SYSTEM_PROMPT);
+    assert.match(out.messages[1].content, /current workspace with bash \(`find \. -name/);
+    assert.doesNotMatch(out.messages[1].content, /Call find FIRST/, "no find-tool hint while find is unavailable");
+    assert.equal(out.max_tokens, 256000);
+    assert.match(h.status(ctx), /bootstrap: minimal prompt engaged; tools=\[bash,str_replace_editor\]/);
+    assert.equal(h.fire("tool_call", { toolName: "read", input: {} }, ctx)?.block, true);
+    assert.equal(h.fire("tool_call", { toolName: "str_replace_editor", input: { command: "view", path: "/x" } }, ctx), undefined);
+    h.fire("turn_end", { message: { role: "assistant", stopReason: "toolUse", content: [{ type: "toolCall" }] } }, ctx);
+    assert.equal(h.fire("tool_call", { toolName: "read", input: {} }, ctx), undefined);
+    const next = { ...payload, messages: [...payload.messages, { role: "tool", content: "result" }] };
+    assert.equal(h.fire("before_provider_request", { payload: next }, ctx), undefined);
+    assert.equal(next.messages[0].content, systemPrompt);
+    assert.equal(next.tools.length, TOOLS.length);
+  });
+}
 
-// 2. first agent run → bootstrap: minimal prompt, no guidance
-const r1 = h.fire("before_agent_start", { prompt: "do a task", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(PRO));
-assert.equal(r1?.systemPrompt, MINIMAL, "request #1 gets the Minimal prompt");
+it("keeps guidance and loadout when the pair is absent or hidden", () => {
+  for (const active of [["read", "find"], TOOLS]) {
+    const h = createFakePi(active);
+    const ctx = h.ctx(FLASH);
+    h.fire("session_start", {}, ctx);
+    const hiddenTools = active === TOOLS ? ["bash", "str_replace_editor"] : [];
+    const { systemPrompt } = h.fire("before_agent_start", { prompt: "Read limits.ts", systemPrompt: "CHILD CONTRACT", systemPromptOptions: { selectedTools: active, hiddenTools } }, ctx);
+    const payload = { messages: [{ role: "system", content: systemPrompt }, { role: "user", content: "Read limits.ts" }], tools: active.filter((name) => !hiddenTools.includes(name)).map((name) => ({ name })) };
+    const out = h.fire("before_provider_request", { payload }, ctx);
+    assert.match(out.messages[0].content, /CHILD CONTRACT/);
+    assert.match(out.messages[1].content, /Call find FIRST/);
+    assert.deepEqual(out.tools, payload.tools);
+    assert.equal(out.max_tokens, undefined);
+    assert.equal(h.notifications.length, 0);
+  }
+});
 
-// 3. provider request → tools replaced with the byte-exact DSH Minimal pair
-const payload = { model: PRO, messages: [], tools: [
-  { name: "bash", parameters: {} }, { name: "str_replace_editor", parameters: {} },
-  { name: "edit", parameters: {} }, { name: "read", parameters: {} }, { name: "grep", parameters: {} },
-] };
-const out = h.fire("before_provider_request", { payload }, h.ctx(PRO));
-assert.deepEqual(out.tools.map((t: any) => t?.function?.name ?? t?.name), ["bash", "str_replace_editor"], "payload tools replaced with the DSH Minimal pair (flat shape preserved)");
-assert.equal(out.tools[0].description.length > 100, true, "DSH bash description is present");
-assert.equal(out.tools[1].parameters.properties.command.enum.length, 4, "str_replace_editor command enum present");
-assert.equal(out.tools[1].strict, undefined, "no strict field (DSH schema has none)");
-assert.equal(out.max_tokens, 256000, "bootstrap budget matches DSH's captured payload");
+it("fails open atomically when the wire tools differ from the selected tools", () => {
+  const h = createFakePi(TOOLS);
+  const ctx = h.ctx(FLASH);
+  h.fire("session_start", {}, ctx);
+  h.fire("before_agent_start", { prompt: "hello", systemPrompt: "FULL" }, ctx);
+  const payload = { messages: [{ role: "system", content: "FULL" }], tools: [{ name: "bash" }, { name: "read" }] };
+  assert.equal(h.fire("before_provider_request", { payload }, ctx), undefined);
+  assert.equal(h.fire("tool_call", { toolName: "read", input: {} }, ctx), undefined);
+  assert.match(h.notifications[0], /full prompt and catalog preserved/);
+});
 
-// 4. tool_call during bootstrap: a name outside the pair is blocked, the pair passes
-const blocked = h.fire("tool_call", { toolName: "read", input: {} }, h.ctx(PRO));
-assert.equal(blocked?.block, true, "hidden tool (read) blocked during bootstrap");
-const blockedEdit = h.fire("tool_call", { toolName: "edit", input: {} }, h.ctx(PRO));
-assert.equal(blockedEdit?.block, true, "hidden tool (edit) blocked during bootstrap");
-const okBash = h.fire("tool_call", { toolName: "bash", input: { command: "ls" } }, h.ctx(PRO));
-assert.equal(okBash, undefined, "bash allowed during bootstrap");
-const okEditor = h.fire("tool_call", { toolName: "str_replace_editor", input: { command: "view", path: "/x" } }, h.ctx(PRO));
-assert.equal(okEditor, undefined, "str_replace_editor allowed during bootstrap");
-
-// 5. assistant reply lands durably → the next before_agent_start scan promotes
-h.setEntries([{ type: "message", message: { role: "assistant", content: [{ type: "toolCall" }] } }]);
-h.fire("turn_end", { turnIndex: 0, message: { role: "assistant", content: [] }, toolResults: [] }, h.ctx(PRO));
-
-// 6. second agent run → NOT minimal; full-prompt path (returns undefined when unchanged)
-const r2 = h.fire("before_agent_start", { prompt: "next task", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(PRO));
-assert.notEqual(r2?.systemPrompt, MINIMAL, "request #2 uses the full prompt");
-
-// 7. provider request #2 → tools NOT filtered, budget NOT pinned
-const out2 = h.fire("before_provider_request", { payload }, h.ctx(PRO));
-assert.equal(out2?.tools, undefined, "no tool filtering after promotion (payload untouched or guidance-only)");
-assert.notEqual(out2?.max_tokens, 256000, "budget pin is bootstrap-only");
-
-// 8. non-target model: anchor inert from the start
-h.setEntries([]);
-h.fire("session_start", {}, h.ctx("deepseek-v4-flash"));
-const rFlash = h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx("deepseek-v4-flash"));
-assert.notEqual(rFlash?.systemPrompt, MINIMAL, "flash model: normal guidance path, no anchor");
-assert.ok(rFlash.systemPrompt.includes("FULL PI PROMPT"), "flash keeps the full prompt");
-
-// 9. resume edge: target session with existing assistant reply → instantly promoted
-h.setEntries([{ type: "message", message: { role: "assistant", content: [{ type: "text" }] } }]);
-h.fire("session_start", {}, h.ctx(PRO));
-const rResume = h.fire("before_agent_start", { prompt: "continue", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, h.ctx(PRO));
-assert.notEqual(rResume?.systemPrompt, MINIMAL, "resumed session with replies: no bootstrap");
-assert.ok(rResume.systemPrompt.includes("FULL PI PROMPT"), "resumed session keeps the full prompt");
-
-// 10. REGRESSION: session starts as FLASH (a2a gateway agent config), proxy
-// silently serves deepseek-v4-pro — model_select NEVER fires. The anchor must
-// still engage on the first agent run (live failure: anchorReady was latched
-// only at session_start/model_select, so the bootstrap silently skipped).
-h.setEntries([]); // genuinely fresh session — no durable replies yet
-const servedCtx = h.ctx("deepseek/deepseek-v4-pro", { model: { id: "deepseek/deepseek-v4-pro", provider: "opencode-go" } });
-h.fire("session_start", {}, h.ctx("opencode-go/deepseek-v4-flash"));
-const rRewritten = h.fire("before_agent_start", { prompt: "task", systemPrompt: "FULL PI PROMPT", systemPromptOptions: {} }, servedCtx);
-assert.equal(rRewritten?.systemPrompt, MINIMAL, "served-pro session bootstraps even though session started as flash");
-const outRewritten = h.fire("before_provider_request", { payload }, servedCtx);
-assert.deepEqual(outRewritten.tools.map((t: any) => t?.function?.name ?? t?.name), ["bash", "str_replace_editor"], "rewritten session gets the DSH Minimal pair");
-
-// 11. anchor trace surfaces in the /steering status output
-const h2 = createFakePi(["bash", "read", "edit", "str_replace_editor"]);
-h2.setEntries([]);
-h2.fire("session_start", {}, h2.ctx("deepseek-v4-pro"));
-h2.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, h2.ctx("deepseek-v4-pro"));
-h2.fire("before_provider_request", { payload: { tools: [{ name: "bash" }, { name: "str_replace_editor" }] } }, h2.ctx("deepseek-v4-pro"));
-const statusText = h2.status(h2.ctx("deepseek-v4-pro"));
-assert.match(statusText, /bootstrap: minimal prompt engaged/, "trace shows bootstrap engagement");
-assert.match(statusText, /payload: tools=\[bash,str_replace_editor\] \+ max_tokens=256000/, "trace shows the bootstrap payload + DSH budget");
-
-console.log("steering ds-anchor wiring: all lifecycle checks passed");
+it("anchors the proxied served model, honors the we-need flag and clamps to the model limit", () => {
+  setSteeringSettings(isolated.dir, { weNeed: true });
+  try {
+    const h = createFakePi(TOOLS);
+    h.fire("session_start", {}, h.ctx("deepseek-v4-flash"));
+    const ctx = h.ctx(FLASH, { model: { id: FLASH, provider: "router", maxTokens: 64000 } });
+    h.fire("before_agent_start", { prompt: "task", systemPrompt: "FULL" }, ctx);
+    const payload = { messages: [{ role: "developer", content: "FULL" }], tools: TOOLS.map((name) => ({ name })), max_tokens: 8192, max_completion_tokens: 8192 };
+    const out = h.fire("before_provider_request", { payload }, ctx);
+    assert.equal(out.messages[0].content, WE_NEED_DIRECTIVE + MINIMAL_SYSTEM_PROMPT);
+    assert.equal(out.max_completion_tokens, 64000);
+    assert.equal(out.max_tokens, undefined);
+  } finally { setSteeringSettings(isolated.dir, {}); }
+});

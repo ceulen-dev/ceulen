@@ -37,7 +37,7 @@ export function buildSteeringGroups(cfg: SteeringSettings): PanelGroup[] {
           cfg.selectionGuidance = Boolean(v);
         }, {
           defaultValue: true,
-          description: "DeepSeek V4 tool-routing table prepended to the system prompt. Static per session, so the prefix cache stays warm.",
+          description: "Shared DeepSeek V4 guidance for file and symbol navigation, batching calls, and tool discovery.",
         }),
         row("steering.superpower", "Super Power prompt", "toggle", cfg.superpower, (v) => {
           cfg.superpower = Boolean(v);
@@ -67,8 +67,8 @@ export function buildSteeringGroups(cfg: SteeringSettings): PanelGroup[] {
           cfg.dsAnchor = Boolean(v);
         }, {
           defaultValue: true,
-          warning: "deepseek-v4-pro only: request #1 gets a minimal prompt + bash/str_replace_editor only; full catalog returns after the first reply. Repair module must be enabled for the anchor tool pair.",
-          description: "Two-phase bootstrap that anchors request #1 to the DeepSeek Harness minimal-mode distribution.",
+          warning: "V4 Pro and V4.1 Flash: request #1 uses only bash and str_replace_editor when both are declared. The full prompt and catalog return after the first reply.",
+          description: "DeepSeek Harness minimal-mode bootstrap. Skipped in plan mode and restricted tool loadouts without the tool pair.",
         }),
         row("steering.weNeed", "We-need directive", "toggle", cfg.weNeed, (v) => {
           cfg.weNeed = Boolean(v);

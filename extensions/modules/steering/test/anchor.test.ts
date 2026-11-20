@@ -18,10 +18,12 @@ import {
 } from "../lib/anchor.js";
 
 describe("isAnchorTarget", () => {
-  it("matches v4-pro ids in any case/format, rejects everything else", () => {
+  it("matches V4 Pro and V4.1 Flash, not older Flash or other families", () => {
     assert.equal(isAnchorTarget("deepseek-v4-pro"), true);
     assert.equal(isAnchorTarget("deepseek-v4-pro-0813"), true);
     assert.equal(isAnchorTarget("OCG/DeepSeek-V4-Pro"), true);
+    assert.equal(isAnchorTarget("router/combo/deepseek-v4.1-flash"), true);
+    assert.equal(isAnchorTarget("OCG/DeepSeek-V4.1-Flash-1017"), true);
     assert.equal(isAnchorTarget("deepseek-v4-flash"), false);
     assert.equal(isAnchorTarget("deepseek-chat"), false);
     assert.equal(isAnchorTarget("deepseek-v3"), false);

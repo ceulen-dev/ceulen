@@ -3,9 +3,8 @@
  * and Super Power Mode.
  *
  * Gating lives in index.ts: the apply_patch preference hint (edit +
- * create-file steering) covers DeepSeek V4 + GLM; the verbose selection
- * guidance and Super Power Mode stay DeepSeek-only (eval: GLM reaches full
- * tool-selection accuracy without them).
+ * create-file steering) covers DeepSeek V4 + GLM; the selection guidance
+ * and Super Power Mode stay DeepSeek-only.
  */
 // ponytail: vendored from @bacnh85/pi-model-tools 0.9.5
 // (extensions/lib/guidance.ts). Local change: the env-toggle helpers
@@ -24,35 +23,31 @@ export function clearGuidanceCache(): void {
   guidanceCache.clear();
 }
 
-export function deepSeekSelectionGuidance(activeTools: readonly string[]): string {
-  const cacheKey = [...activeTools].sort().join(",");
+export function deepSeekSelectionGuidance(activeTools: readonly string[], directTools = activeTools): string {
+  const cacheKey = `${[...activeTools].sort().join(",")}|${[...directTools].sort().join(",")}`;
   const cached = guidanceCache.get(cacheKey);
-  if (cached) return cached;
+  if (cached !== undefined) return cached;
 
-  const serenaActive = activeTools.some((tool) => tool.startsWith("serena_"));
-  // Compact routing table — the ONLY part that proved useful in eval (the
-  // verbose serena descriptions duplicate Pi's own tool descriptions; the
-  // NEVER/BLOCKED block duplicates the runtime tool_call hook; GitHub-clone is
-  // handled by the dynamic githubCloneFirstToolHint). Eval (2026-08-04):
-  // guidance ON vs OFF showed identical 60% first-tool accuracy, so the verbose
-  // form was pure prefix cost. This compact form keeps the routing value at 1/3
-  // the token cost.
-  const lines: string[] = [
-    "DeepSeek V4 — pick the right tool on the first try:",
-    '  • "run tests" / "build" / "lint" → bash (NOT find/ls/read first)',
-    '  • "list files in <dir>" → ls',
-    '  • "find test files" / "find *.ts files" → find',
-    '  • "search README/docs/config for <text>" → grep',
-    '  • bare filename, path uncertain → find before read (never guess a path)',
-    '  • read a verified path → read; create a file → write (not bash echo >)',
-  ];
-  if (serenaActive) {
-    lines.push('  • "definition of <name>" → serena_find_symbol');
-    lines.push('  • "references/usages of <name>" → serena_find_referencing_symbols');
-    lines.push('  • "outline symbols in <file>" → serena_get_symbols_overview');
-  }
+  const has = (name: string) => activeTools.includes(name);
+  const finder = has("fffind") ? "fffind" : has("find") ? "find" : undefined;
+  const search = has("ffgrep") ? "ffgrep" : has("grep") ? "grep" : undefined;
+  const lines = [
+    has("bash") && '"run tests" / build / lint → bash; run a known command without discovery first.',
+    has("ls") && '"list files in <dir>" → ls',
+    finder && `Find files by name or glob → ${finder}`,
+    search && `Search literal text in docs, config, or source → ${search}`,
+    has("read") && "Exact path supplied → read it directly; don't inventory the repo first.",
+    finder && has("read") && `Bare filename, path uncertain → ${finder} before read; never guess a path.`,
+    has("write") && "Create a new file → write, not shell redirects.",
+    has("serena_find_symbol") && "Named code symbol → serena_find_symbol",
+    has("serena_find_referencing_symbols") && "Symbol usages → serena_find_referencing_symbols",
+    has("serena_get_symbols_overview") && "File symbol outline → serena_get_symbols_overview",
+    directTools.includes("codemode") && "Batch independent calls (e.g. reads of known paths) in one codemode script with Promise.allSettled; await dependencies in order. For one simple call, use the direct tool if declared.",
+    directTools.includes("codemode") && directTools.length < activeTools.length && "For tools not declared directly, call them through codemode (tools.<name>(args)).",
+    directTools.includes("tool_search") && "To load a deferred tool for direct use, make one targeted tool_search, then call the match.",
+  ].filter(Boolean);
 
-  const result = lines.join("\n");
+  const result = lines.length ? `DeepSeek V4 — pick the right tool on the first try:\n  • ${lines.join("\n  • ")}` : "";
   if (guidanceCache.size >= 100) {
     const first = guidanceCache.keys().next().value;
     if (first !== undefined) guidanceCache.delete(first);
@@ -112,7 +107,7 @@ export function runTaskFirstToolHint(prompt: string): string | undefined {
  * exact dir/file path. Why: DeepSeek V4 Flash non-deterministically guesses
  * dir/filename and calls read, hitting the path-not-found block.
  */
-export function readUncertainPathHint(prompt: string): string | undefined {
+export function readUncertainPathHint(prompt: string, finder: "find" | "fffind" = "find"): string | undefined {
   const p = (prompt || "").toLowerCase();
   const isReadTask = /\b(read|show|open|view|display|cat|head|tail|first \d+ lines?|last \d+ lines?|top \d+ lines?)\b/.test(p);
   if (!isReadTask) return undefined;
@@ -123,7 +118,7 @@ export function readUncertainPathHint(prompt: string): string | undefined {
   const files = p.match(new RegExp("\\b[a-z0-9_-]+\\." + codeExt + "\\b", "g")) || [];
   const hasBareCodeFile = files.some((f) => !p.includes("/" + f));
   if (!hasBareCodeFile) return undefined;
-  return "⚠️ THIS request reads a source file referenced only by a bare filename with no directory path — its exact location is uncertain. Call find FIRST to resolve the path, THEN read the exact path find returns. Do NOT guess the path and call read first (a guessed path that doesn't exist is a blocked, wasted turn).";
+  return `Call ${finder} FIRST to resolve the bare filename, then read the exact path it returns. Do not guess the directory.`;
 }
 
 /**
