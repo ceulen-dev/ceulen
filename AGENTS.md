@@ -1197,6 +1197,10 @@ Two scripts, different scopes:
   is ERROR — a failed request establishes nothing about absence. Its contract
   is pinned by `extensions/lib/test/audit-attestations.test.sh`, which drives it
   against a local fake registry for each failure mode (it runs under `npm test`).
+  A truncated response counts as ERROR even when it reports a usable status:
+  curl exits non-zero on the transfer failure while still printing e.g. 404, so
+  the wrapper must check curl's exit before the status — otherwise a cut-short
+  404 body reads as "absent" and the audit looks clean.
 
 For a checkout
 OLD enough that the script predates it (it landed in c048d54, after the v0.29.1

@@ -12,6 +12,12 @@
 #             200 whose payload lacks a usable `attestations` array. These are
 #             NOT evidence of absence.
 #
+# A truncated response is classified ERROR even though it carries a usable HTTP
+# status: curl exits non-zero on a transfer failure (18) while still reporting
+# e.g. 404, and the request wrapper below checks curl's exit FIRST. Reading the
+# status alone would file a broken response as "absent" and make the audit look
+# clean. Pinned by extensions/lib/test/audit-attestations.test.sh case 9.
+#
 # Exit: 0 = every version classified (attested or absent), 1 = at least one
 # ERROR, or the packument could not be read. A universal claim may only be made
 # from a 0 exit.

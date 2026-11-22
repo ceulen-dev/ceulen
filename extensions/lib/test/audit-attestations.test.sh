@@ -41,6 +41,15 @@ http.createServer((req, res) => {
   const path = url.pathname;
   const f = fixtures[path];
   if (!f) { res.writeHead(500); res.end("no fixture"); return; }
+  if (f.truncate) {
+    // Promise a body far larger than we send, then kill the socket: curl sees
+    // its HTTP status AND a transfer failure on the same response.
+    res.writeHead(f.status, { "content-type": "application/json", "content-length": "5000" });
+    // A partial JSON fragment; the point is the socket dies mid-body.
+    res.write(f.partial || "{\"error\":\"trunc");
+    setTimeout(() => res.socket.destroy(), 20);
+    return;
+  }
   res.writeHead(f.status, { "content-type": "application/json" });
   res.end(typeof f.body === "string" ? f.body : JSON.stringify(f.body));
 }).listen(Number(process.argv[3]), "127.0.0.1");
@@ -110,6 +119,16 @@ start_server "{\"/pkg\":{\"status\":500,\"body\":\"nope\"},\"/-/npm/v1/attestati
 check "unreadable packument => non-zero" 1 pkg
 stop_server
 
+# ---- case 9: TRUNCATED body on a 404 => non-zero ------------------------------
+# curl reports BOTH an HTTP status (404) and a transfer failure (exit 18) when a
+# body is cut short — measured: `curl -sS -w '%{http_code}'` prints 404 while
+# exiting 18. The transfer failure must take precedence, or reading the status
+# alone files this version as "absent" and a broken audit looks clean.
+start_server "{\"/pkg\":{\"status\":200,\"body\":$PK},\"/-/npm/v1/attestations/pkg@1.0.0\":{\"status\":404,\"body\":{}},\"/-/npm/v1/attestations/pkg@2.0.0\":{\"status\":404,\"truncate\":true}}"
+check "truncated 404 body (transport failure) => non-zero" 1 pkg
+out_trunc="$out"
+stop_server
+
 # ---- assertions on the clean-history report content ---------------------------
 for want in "total versions  : 2" "attested (any)  : 1" "SLSA provenance : 1" "absent (404)    : 1" "ERRORS          : 0" "OK: every version classified"; do
   if printf '%s' "$out_clean" | grep -qF "$want"; then
@@ -136,6 +155,16 @@ if printf '%s' "$out_429" | grep -q "ERRORS          : 1"; then
   echo "ok   [429 case] counted in the ERROR tally"
 else
   echo "FAIL [429 case] not counted in the ERROR tally"; printf '%s\n' "$out_429" | sed 's/^/    /'; fail=1
+fi
+if printf '%s' "$out_trunc" | grep -q "absent (404)    : 1"; then
+  echo "ok   [truncated case] transport failure did not enter the absent tally"
+else
+  echo "FAIL [truncated case] a truncated 404 was counted as absent"; printf '%s\n' "$out_trunc" | sed 's/^/    /'; fail=1
+fi
+if printf '%s' "$out_trunc" | grep -q "ERRORS          : 1"; then
+  echo "ok   [truncated case] counted in the ERROR tally"
+else
+  echo "FAIL [truncated case] not counted in the ERROR tally"; printf '%s\n' "$out_trunc" | sed 's/^/    /'; fail=1
 fi
 
 [ "$fail" -eq 0 ] && echo && echo "ALL PASS" || { echo >&2; echo "FAILURES PRESENT" >&2; exit 1; }
