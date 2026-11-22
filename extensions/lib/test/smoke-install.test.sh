@@ -39,11 +39,12 @@ expect() {
   rc=$?
   set -e
 
-  if [ "$want" = 0 ] && [ "$rc" -ne 0 ]; then
-    echo "FAIL [$desc] expected rc=0, got $rc"; sed 's/^/    /' "$TMPOUT"; fail=1; return
-  fi
-  if [ "$want" != 0 ] && [ "$rc" -eq 0 ]; then
-    echo "FAIL [$desc] expected non-zero rc, got 0"; sed 's/^/    /' "$TMPOUT"; fail=1; return
+  # Exact comparison, not a "did it fail at all" test. Collapsing every negative
+  # case to "non-zero" would let the usage path (2) pass while reporting 1, i.e.
+  # it would stop pinning the documented distinction between a usage error and a
+  # failed check.
+  if [ "$rc" -ne "$want" ]; then
+    echo "FAIL [$desc] expected rc=$want, got $rc"; sed 's/^/    /' "$TMPOUT"; fail=1; return
   fi
   if [ -n "$wantMsg" ] && ! grep -qF "$wantMsg" "$TMPOUT"; then
     echo "FAIL [$desc] exited $rc but without the expected message: $wantMsg"
