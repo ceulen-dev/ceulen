@@ -1229,16 +1229,18 @@ What a raw `grep -q 'https://slsa.dev/provenance/v1'` gets wrong, measured on fi
 200 bodies (the false POSITIVES are the dangerous ones — they report provenance
 that does not exist):
 
-| body | grep | correct |
-|---|---|---|
-| `{"attestations":[{"predicateType":"…slsa…"}]}` (genuine) | match | pass |
-| `{"error":"… https://slsa.dev/provenance/v1 …"}` | **match (false positive)** | fail |
-| `{"attestations":[{"predicateType":"…/publish/v0.1","description":"see …slsa…"}]}` | **match (false positive)** | fail |
-| `{"attestations":[]}` | no match | fail |
-| `{"ok":true}` | no match | fail |
+| # | body (exact fixture) | grep | correct |
+|---|---|---|---|
+| 1 | `{"attestations":[{"predicateType":"https://slsa.dev/provenance/v1"}]}` | match | pass |
+| 2 | `{"error":"no https://slsa.dev/provenance/v1 here"}` | **match (false positive)** | fail |
+| 3 | `{"attestations":[{"predicateType":"https://github.com/npm/attestation/x","description":"see https://slsa.dev/provenance/v1"}]}` | **match (false positive)** | fail |
+| 4 | `{"attestations":[]}` | no match | fail |
+| 5 | `{"ok":true}` | no match | fail |
 
-The last two happen to agree with grep, but only by accident (the URL is absent);
-they are not evidence that substring matching is safe. Sanity-check the checker
+Rows 4 and 5 happen to agree with grep, but only by accident (the URL is absent);
+they are not evidence that substring matching is safe. Rows 1-5 are the literal
+bodies `scripts/check-provenance-fixtures.sh` extracts from this table and
+re-runs, so the table cannot drift from the measurement. Sanity-check the checker
 against the two false-positive bodies before trusting a pass.
 
 Capture the body FIRST and let curl's exit decide whether it is trustworthy;
