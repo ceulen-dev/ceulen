@@ -23,46 +23,70 @@ SCRIPT="$ROOT/scripts/smoke-install.sh"
 VER="${SMOKE_TEST_VERSION:-0.29.2}"
 
 fail=0
+# expect <desc> <want-rc> [--expect-msg <substring>] -- <script args>...
+#
+# Exit status ALONE is not enough: every failure path in the script exits 1, so a
+# transient registry error makes "missing --require" pass for the wrong reason.
+# A case that cares WHICH check fired asserts its message too.
 expect() {
   desc="$1"; want="$2"; shift 2
+  wantMsg=""
+  if [ "${1:-}" = "--expect-msg" ]; then wantMsg="$2"; shift 2; fi
+  [ "${1:-}" = "--" ] && shift
+
   set +e
   sh "$SCRIPT" "$@" > "$TMPOUT" 2>&1
   rc=$?
   set -e
+
   if [ "$want" = 0 ] && [ "$rc" -ne 0 ]; then
     echo "FAIL [$desc] expected rc=0, got $rc"; sed 's/^/    /' "$TMPOUT"; fail=1; return
   fi
   if [ "$want" != 0 ] && [ "$rc" -eq 0 ]; then
     echo "FAIL [$desc] expected non-zero rc, got 0"; sed 's/^/    /' "$TMPOUT"; fail=1; return
   fi
-  echo "ok   [$desc] rc=$rc"
+  if [ -n "$wantMsg" ] && ! grep -qF "$wantMsg" "$TMPOUT"; then
+    echo "FAIL [$desc] exited $rc but without the expected message: $wantMsg"
+    echo "     (a different failure — e.g. a registry error — cannot satisfy this case)"
+    sed 's/^/    /' "$TMPOUT"; fail=1; return
+  fi
+  echo "ok   [$desc] rc=$rc${wantMsg:+ [$wantMsg]}"
 }
 
 TMPOUT=$(mktemp)
 trap 'rm -f "$TMPOUT"' EXIT INT TERM
 
 # Baseline: the real payload asserts clean.
-expect "real payload => exit 0" 0 "$VER" \
+expect "real payload => exit 0" 0 -- \
+  "$VER" \
   --require extensions/modules/repair/lib/persistent-bash.ts \
   --forbid extensions/modules/steering/lib/anchor.ts
 
 # A missing --require path must be fatal (this is the defect being pinned: the
 # old inline check printed the miss and still exited 0).
-expect "missing --require => non-zero" 1 "$VER" --require scripts/does-not-exist.sh
+expect "missing --require => its own message" 1 \
+  --expect-msg "FAIL: missing scripts/does-not-exist.sh" -- \
+  "$VER" --require scripts/does-not-exist.sh
 
 # A --forbid path that IS present must be fatal (a deleted file must stay gone).
-expect "violated --forbid => non-zero" 1 "$VER" \
-  --forbid extensions/modules/repair/lib/persistent-bash.ts
+expect "violated --forbid => its own message" 1 \
+  --expect-msg "unexpected extensions/modules/repair/lib/persistent-bash.ts" -- \
+  "$VER" --forbid extensions/modules/repair/lib/persistent-bash.ts
 
 # An install failure must be fatal, not silently skipped.
-expect "nonexistent version => non-zero" 1 "9.9.9"
+expect "nonexistent version => install-failure message" 1 \
+  --expect-msg "FAIL: npm install ceulen@9.9.9 exited non-zero" -- \
+  "9.9.9"
 
 # A version mismatch must be fatal, exercised through the real CLI via
 # --expect-version (install one version, assert another).
-expect "version mismatch => non-zero" 1 "$VER" --expect-version 0.0.0-deliberately-wrong
+expect "version mismatch => its own message" 1 \
+  --expect-msg "installed version $VER != requested 0.0.0-deliberately-wrong" -- \
+  "$VER" --expect-version 0.0.0-deliberately-wrong
 
 # Usage errors are distinguishable from check failures.
-expect "no version argument => usage error" 2
+expect "no version argument => usage message" 2 \
+  --expect-msg "usage: smoke-install.sh"
 
 # The success path must actually SAY it checked the version, so a reader can
 # tell a real pass from a vacuous one.
