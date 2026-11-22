@@ -175,7 +175,7 @@ describe("tool_call honors the trusted-project layer (A5 e2e)", () => {
 });
 
 describe("buildRepairGroups (panel contract)", () => {
-  it("renders the seven repair.* rows on the Tools tab with the documented defaults", () => {
+  it("renders the eleven repair.* rows on the Tools tab with the documented defaults", () => {
     const cfg: RepairSettings = { ...DEFAULT_REPAIR_SETTINGS };
     const groups = buildRepairGroups(cfg);
     assert.equal(groups.length, 1);
@@ -190,6 +190,10 @@ describe("buildRepairGroups (panel contract)", () => {
       "repair.autoBg",
       "repair.autoBgSecs",
       "repair.persistentBash",
+      "repair.spillMaxTokens",
+      "repair.repeatReminder",
+      "repair.clock",
+      "repair.clockRefreshMs",
     ]);
     assert.ok(keys.every((k) => k.startsWith("repair.")), "row keys route back to this module");
     const byKey = new Map(groups[0].rows.map((r) => [r.key, r]));

@@ -34,6 +34,14 @@ export interface RepairSettings {
   /** One persistent bash shell per session (cwd/env/jobs survive across calls).
    *  Binds at load — the shell description sits in the cache-safe request head. */
   persistentBash: boolean;
+  /** Token budget for one tool result; excess is spilled to a retrievable file. 0 = off. */
+  spillMaxTokens: number;
+  /** Advisory footer when the same tool call repeats with identical arguments. */
+  repeatReminder: boolean;
+  /** Inject a model-visible clock (pi injects no date/time anywhere). */
+  clock: boolean;
+  /** Minimum milliseconds between clock injections in one session. */
+  clockRefreshMs: number;
 }
 
 export const DEFAULT_REPAIR_SETTINGS: RepairSettings = {
@@ -44,6 +52,11 @@ export const DEFAULT_REPAIR_SETTINGS: RepairSettings = {
   autoBg: false,
   autoBgSecs: 120,
   persistentBash: false,
+  // DSH base-preset value (packages/bundle/base/cordis.patch.yml maxInlineTokens).
+  spillMaxTokens: 12_500,
+  repeatReminder: true,
+  clock: false,
+  clockRefreshMs: 600_000,
 };
 
 function agentDir(): string {
@@ -67,13 +80,21 @@ function section(json: Record<string, unknown> | null, key: string): Record<stri
 /** Merge one settings layer's `repair` keys over out (field-wise override). */
 function mergeLayer(out: RepairSettings, json: Record<string, unknown> | null): void {
   const s = section(json, "repair");
-  for (const key of ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg", "persistentBash"] as const) {
+  for (const key of ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg", "persistentBash", "repeatReminder", "clock"] as const) {
     if (typeof s[key] === "boolean") out[key] = s[key];
   }
   if (typeof s.autoBgSecs === "number" && Number.isFinite(s.autoBgSecs)) {
     // Clamp to ≥1: "0.5" would floor to 0 → a 0 ms timer = instant-background
     // everything (upstream's env reader clamped for the same reason).
     out.autoBgSecs = Math.max(1, Math.floor(s.autoBgSecs));
+  }
+  if (typeof s.spillMaxTokens === "number" && Number.isFinite(s.spillMaxTokens)) {
+    // Clamp at 0 (= disabled). A negative budget would otherwise mean "spill
+    // everything to nothing", the opposite of what a typo intended.
+    out.spillMaxTokens = Math.max(0, Math.floor(s.spillMaxTokens));
+  }
+  if (typeof s.clockRefreshMs === "number" && Number.isFinite(s.clockRefreshMs)) {
+    out.clockRefreshMs = Math.max(0, Math.floor(s.clockRefreshMs));
   }
 }
 

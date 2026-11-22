@@ -466,6 +466,111 @@ discarded. While on, `autoBg` is SUSPENDED (a backgrounded queued exec would
 park later foreground calls behind the job — the shell's own `&` backgrounding
 is the taught model); `/repair` discloses both.
 
+**Three DeepSeek Harness enrichments (2026-11, all-model, all opt-in except
+repeat-reminder)** — each a DIRECT port of a DSH package, each a `tool_result`
+or `before_agent_start` handler, none of them a new tool:
+
+- **`repair.spillMaxTokens`** (default 12500 = DSH's base-preset
+  `maxInlineTokens`, 0 = off) — `lib/spill.ts` + `lib/spill-store.ts`, ported
+  from DSH `packages/spill/{spill-policy,spill-local}`. A tool result over the
+  budget keeps head+tail **within** budget (DSH `retainContent`: half budget per
+  end, binary-searched text fit, surrogate-pair-safe) and the full text is
+  written to a private per-process temp root; the notice names the path so the
+  model can `read` it back. Estimation is DSH's fixed density
+  (`ceil(chars/4) + 4` per text block) — no tokenizer dependency.
+  **SCOPE IS RETURNED CONTENT**: pi's `read`/`bash` truncate INSIDE the tool
+  before `tool_result` fires (`read.js:117` at 2000 lines/50 KB; `bash.js:261`
+  sets `fullOutputPath`), so their dropped bytes are unrecoverable at this seam
+  and those results are EXCLUDED. The beneficiaries are the tools with no
+  self-truncation — subagent reports, `github pr_diff`, `web_extract`,
+  `munin_*`. **EXCLUSION IS `details.fullOutputPath`, not a tool list**: any
+  tool that spills itself reports it, and that is how `codemode` is covered —
+  it truncates at 10,000 tokens (`execute.js:248 DEFAULT_MAX_OUTPUT_TOKENS`)
+  and sets `fullOutputPath`, so at its default budget it lands at ~10,061
+  estimated tokens, UNDER the 12,500 spill budget, and can never reach this
+  seam (live herdr finding: a codemode probe "passing" the spill check was
+  really measuring the density boundary; raise `// @options
+  max_output_tokens` to exercise spill through codemode). **The read exclusion
+  is METADATA-based, never
+  text-based**: it keys on `details.truncation.truncated`, the typed field pi
+  sets only on its truncation paths. A phrase match on `Use offset=` would
+  wrongly suppress spilling a WRAPPED read of a file that merely CONTAINS the
+  phrase (pi's own `read.js`, this repo's AGENTS.md), and the user-limit path
+  prints the same phrase without truncation. The wrapped read views ceulen's
+  own repair module builds — archive members ≤1 MiB and multi-range/`:raw`/
+  `:conflicts` slices (`readWithSelector`) — are UNBOUNDED and already strip
+  `details` (`index.ts:509,535`), so they spill. Image-bearing results are
+  skipped (no image token calculator at this seam → fail-open). Any fs error is
+  fail-open too: the model never loses its result to a spill problem.
+  **The recovery hint ALWAYS pages by bytes — `read` is never recommended**,
+  because the spill file exceeds the budget BY DEFINITION, so any read that
+  returns enough of it re-spills and loops the model. Two independent proofs:
+  pi's `read` REFUSES a single line over 50 KB (`read.js:250-255`, "Line 1 is
+  146.5KB, exceeds 50.0KB limit") — a dead end measured against ceulen's own
+  spill file; and for SHORT-line payloads `read` succeeds but has no
+  byte-budget parameter, so at a lowered budget even a tiny page overflows
+  (live: a 100-line read at budget 2000 cost 2,254 tokens and respilled,
+  `RESPILLED_ON_READ = YES`). The notice therefore emits a **UTF-8-safe page
+  command**: `iconv -c` drops the incomplete trailing sequence and the page
+  PRINTS ITS OWN next offset (offset + bytes printed), which the caller feeds
+  back in — a raw `head -c` would split a multibyte character at the boundary,
+  and bash decodes each page independently, so that character is lost in BOTH
+  pages (measured: a 3-byte `日` straddling byte 996 decoded to U+FFFD at page
+  1's end AND page 2's start). OFFSET is a shell VARIABLE inside the emitted
+  `bash -c` body, never a pasted literal — it appears twice (the `tail -c`
+  argument and the next-offset arithmetic) and a naive substitution breaks on
+   page 2. **Pages are capped on THREE axes** — token budget, bytes, lines. The byte window
+  alone is not enough: pi's bash truncates with `truncateTail`, keeping the
+  LAST 2000 lines and DROPPING THE HEAD (`bash.js:270`), so a 6,246-byte page
+  of 3-byte lines is 2,083 lines and silently loses its first 83 lines (~247
+  bytes) while our offset has already advanced past them. `maxRecoveryPageBytes`
+   therefore takes the minimum of the token window, `minLine * PAGE_LINE_LIMIT`
+   (1,900) and `PAGE_BYTE_LIMIT` (45,000). **The byte clamp is not implied by the
+   budget**: pi's bash ALSO caps at 50 KiB with the same head loss
+   (`truncate.js` DEFAULT_MAX_BYTES). A raised `repair.spillMaxTokens` of
+   200,000 asks for up to a 99,996-byte page — nearly twice the cap (measured) —
+   but the LINE window binds first for short lines: `byLines = minLine * 1900`,
+   so the exact 99,996 figure requires **minLine ≥ 53** (52.629 rounded up) and
+   the over-cap region starts at **minLine ≥ 27** (51,200/1,900 = 26.95). Below
+   that the old window was already safe (minLine=1 → 1,900 bytes; minLine=26 →
+   49,400), which is why the hole stayed invisible until a long-line,
+   high-budget case was measured. The
+   emitted command pipes through `head -n PAGE_LINE_LIMIT`, so a page can never
+   overflow the line cap either. Verified by running every emitted page's RAW
+   OUTPUT, offset marker included (the marker is part of what bash cap-checks),
+   through pi's OWN `truncateTail`: zero pages truncated, byte-exact reassembly
+   on 3-byte / 1-byte / bare-newline / multibyte / 400-char-line fixtures at
+   budgets 12,500 / 50,000 / 200,000, with the old byte-only shape as the
+   control (2,083 lines → 83 dropped, head confirmed) and an unclamped-formula
+   control that fails both the arithmetic test and the end-to-end one.
+  N = `maxRecoveryPageBytes(activeBudget, shortestLine)` ≤ budget/2 chars. **N must derive from the
+  ACTIVE budget, never a constant**: a hardcoded `head -c 50000` costs 12,504
+  estimated tokens with block overhead, i.e. OVER the 12,500 default, so the
+  recovery would itself spill (advisor finding; measured). Executing the
+  emitted command verbatim was verified live in herdr panes at both budgets:
+  6,246 bytes → 1,566 tokens → no re-spill, and advancing by the
+  named chunk size returns new content.
+- **`repair.repeatReminder`** (default true) — `lib/repeat-reminder.ts`,
+  ported from DSH `packages/guard/repeat-tool-reminder`. Consecutive EXACT
+  repeats (tool name + deep-key-sorted canonical args, so property order is
+  irrelevant) get an ADVISORY footer at the 3rd/5th/8th call — gentle first,
+  then detailed with a 500-char args preview. It never blocks: the call runs
+  and its real output survives, which is what distinguishes it from the two
+  guards that REFUSE (permission's doom-loop on denied calls, munin's dampener,
+  whose `munin_*` tools are excluded here). Chain state is per session id
+  (persistent-bash pattern); a new user message (`before_agent_start`
+  `messageType === "user"`) resets it — cron fires and follow-ups are not
+  interjections; nested calls (`parentToolCallId`) are skipped.
+- **`repair.clock`** (default false) + **`repair.clockRefreshMs`** (default
+  600000) — `lib/clock.ts`, ported from DSH `packages/context/time-context`.
+  pi injects NO model-visible date/time anywhere (`dist/core/system-prompt.js`
+  renders with `timestamp: 0`), so a long goal/cron session has no idea when
+  "today" is. `before_agent_start` returns a `ceulen-clock` custom message
+  (`display:false`) carrying an ISO stamp with numeric offset + IANA zone and
+  the elapsed span since the last activity. One injection per refresh window
+  keeps the appended message out of the cache-churn path. DSH itself ships this
+  only in its `sdk-app` bundle, not base/minimal — hence opt-in here.
+
 ### Plan module (plan)
 
 Ported from `@bacnh85/pi-plan` 0.16.6 (see `extensions/modules/plan/`), reduced

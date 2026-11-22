@@ -1,3 +1,66 @@
+## 0.30.0 — 2026-11-22
+
+Three DeepSeek Harness enrichments in the **repair** module — all-model, all
+handlers (no new tool, no new module), plus the hardening that live panes and
+review forced out of the spill recovery hint.
+
+- **`repair.spillMaxTokens`** (default 12500 = DSH's base-preset
+  `maxInlineTokens`, `0` disables) — a tool result over the budget keeps its
+  head and tail (DSH's half-budget-per-end retention, surrogate-pair-safe), the
+  full text lands in a private per-process temp file, and the notice names the
+  path. Estimation is DSH's fixed density (`ceil(chars/4) + 4` per text block),
+  so there is no tokenizer dependency. **Scope is returned content**: pi's
+  `read`/`bash` truncate inside the tool before `tool_result` fires, so their
+  dropped bytes are unrecoverable at this seam and those results are excluded —
+  keyed on `details.truncation.truncated` / `details.fullOutputPath` METADATA,
+  never on notice text, so a wrapped read of a file that merely *contains*
+  "Use offset=" still spills. The beneficiaries are the tools with no
+  self-truncation (subagent reports, `github pr_diff`, `web_extract`, `munin_*`).
+- **`repair.repeatReminder`** (default on) — an advisory footer on the
+  3rd/5th/8th consecutive call with identical arguments (deep key-sorted
+  canonicalization, so property order is irrelevant). It never blocks: the call
+  runs and its real output survives, which is what distinguishes it from the two
+  guards that refuse (permission's doom-loop on denied calls, munin's dampener —
+  whose `munin_*` tools are excluded here). A new user message resets the chain;
+  nested calls are skipped.
+- **`repair.clock`** (default off) + `repair.clockRefreshMs` (default 600000) —
+  pi injects no model-visible date/time anywhere (`system-prompt.js` renders with
+  `timestamp: 0`), so a long goal/cron session cannot tell when "today" is. A
+  `ceulen-clock` custom message carries an ISO stamp with numeric offset + IANA
+  zone and the elapsed span, one injection per refresh window so the appended
+  message stays out of the cache-churn path.
+
+**Spill recovery is an executable hint, and it took four rounds of live-pane
+findings to get right.** Each was measured, not theorised:
+
+1. A hardcoded `head -c 50000` costs 12,504 estimated tokens — *over* the
+   12,500 default — so the recovery re-spilled and the model looped. The page
+   size is now derived from the ACTIVE budget.
+2. `read` is never a safe recovery: the spill file exceeds the budget by
+   definition, and pi's read has no byte-budget parameter. A 100-line read at
+   budget 2000 cost 2,254 tokens and respilled live. The hint always pages by
+   bytes through `bash`.
+3. A raw `head -c` splits multibyte characters at the page boundary, and bash
+   decodes each page independently, so a 3-byte character straddling the cut is
+   lost in **both** pages. Pages now pass through `iconv -c` and print their own
+   next offset, so a trimmed byte is re-read whole.
+4. pi's bash caps at **both** 2000 lines and 50 KiB, truncating with
+   `truncateTail` — it drops the page's HEAD while the offset has already
+   advanced past it (measured: 2,083 lines → 83 lines / 247 bytes lost). Pages
+   are now clamped on three axes (token budget, `minLine × 1900`, and 45,000
+   bytes) and piped through `head -n`.
+
+- **Tests** — `spill`, `repeat-reminder`, `clock`, `dsh-enrichments` and
+  `spill-utf8` suites (66 new cases). The spill tests run the notice's OWN
+  emitted command and reassemble, and every page is validated by passing its RAW
+  output — offset marker included — through pi's real `truncateTail`, because a
+  text assertion cannot see any of the four failures above.
+- **AGENTS.md** — the repair section documents the three features, the
+  returned-content scope, the metadata-only exclusions, and the binding
+  thresholds of the page clamps (the 99,996-byte window requires `minLine ≥ 53`;
+  the over-cap region starts at 27) so the documented blast radius cannot drift
+  from the code.
+
 # Changelog
 ## 0.29.2 — 2026-11-22
 

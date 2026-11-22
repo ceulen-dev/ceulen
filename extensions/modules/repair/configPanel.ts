@@ -78,13 +78,41 @@ export function buildRepairGroups(cfg: RepairSettings): PanelGroup[] {
           description: "One bash per session: cwd, exported variables, functions, and background jobs survive across calls (DeepSeek Harness parity). Plan mode always runs one-shot.",
           warning: "Binds at session start — applies to the next session. While on, auto-background bash is suspended: background long jobs inside the shell with '&'.",
         }),
+        row("repair.spillMaxTokens", "Tool-result token budget", "number", cfg.spillMaxTokens, (v) => {
+          // Mirror the autoBgSecs guard: non-numeric input must not persist NaN.
+          const n = Math.floor(Number(v));
+          if (Number.isFinite(n) && n >= 0) cfg.spillMaxTokens = n;
+        }, {
+          defaultValue: DEFAULT_REPAIR_SETTINGS.spillMaxTokens,
+          description: "Results over this many estimated tokens keep their head and tail; the full text is saved to a file the model can read. 0 disables. (DeepSeek Harness spill-policy.)",
+        }),
+        row("repair.repeatReminder", "Repeat-call reminder", "toggle", cfg.repeatReminder, (v) => {
+          cfg.repeatReminder = v === true;
+        }, {
+          defaultValue: DEFAULT_REPAIR_SETTINGS.repeatReminder,
+          description: "Advisory footer when the same tool call repeats with identical arguments (3rd/5th/8th). Never blocks — targeting DeepSeek Flash's loop failure mode.",
+        }),
+        row("repair.clock", "Model-visible clock", "toggle", cfg.clock, (v) => {
+          cfg.clock = v === true;
+        }, {
+          defaultValue: DEFAULT_REPAIR_SETTINGS.clock,
+          description: "Inject the current date/time and elapsed-since-last-activity into the request. Pi injects no clock anywhere (DeepSeek Harness time-context).",
+        }),
+        row("repair.clockRefreshMs", "Clock refresh interval", "number", cfg.clockRefreshMs, (v) => {
+          const n = Math.floor(Number(v));
+          if (Number.isFinite(n) && n >= 0) cfg.clockRefreshMs = n;
+        }, {
+          defaultValue: DEFAULT_REPAIR_SETTINGS.clockRefreshMs,
+          description: "Minimum milliseconds between clock injections in one session (default 600000 = 10 min). Keeps the appended clock out of the cache-churn path.",
+        }),
       ],
     },
   ];
 }
 
 const OWNED_PREFIX = "repair.";
-const BOOL_KEYS = ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg", "persistentBash"] as const;
+const BOOL_KEYS = ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg", "persistentBash", "repeatReminder", "clock"] as const;
+const NUMBER_KEYS = ["autoBgSecs", "spillMaxTokens", "clockRefreshMs"] as const;
 
 /** repair's ModuleConfig for the central /config panel. The factory receives
  *  the module's guarded pi but needs nothing from it — settings live in the
@@ -100,7 +128,9 @@ export function repairConfig(_pi: ExtensionAPI): ModuleConfig {
       for (const key of BOOL_KEYS) {
         if (working[key] !== before[key]) patch[key] = working[key];
       }
-      if (working.autoBgSecs !== before.autoBgSecs) patch.autoBgSecs = working.autoBgSecs;
+      for (const key of NUMBER_KEYS) {
+        if (working[key] !== before[key]) patch[key] = working[key];
+      }
       const file = writeRepairSection(patch);
       const notes = [`Repair settings saved to ${file}.`];
       if (patch.autoBg !== undefined || patch.autoBgSecs !== undefined) {

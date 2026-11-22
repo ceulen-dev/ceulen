@@ -17,6 +17,13 @@
  *  - apply_patch (Codex-style V4D diffs) and str_replace_editor (DSH Minimal
  *    pair) as new tools.
  *  - a `tool_call` guard hook and the `/repair` status command.
+ *  - three DeepSeek Harness enrichments (2026-11): a `tool_result` SPILL policy
+ *    (oversized results keep head+tail, the full text lands in a retrievable
+ *    file), a `tool_result` REPEAT-CALL reminder (advisory footer at the
+ *    3rd/5th/8th identical call — targets Flash's loop failure mode), and a
+ *    `before_agent_start` CLOCK (pi injects no date/time anywhere). Spill is
+ *    scoped to RETURNED content: stock read/bash truncate inside the tool
+ *    before `tool_result` fires, so their dropped bytes are already gone.
  *
  * Settings (`repair` section, lib/settings.ts) are read PER TOOL CALL, so the
  * /config toggles apply to the next turn. Exception: the bash description
@@ -43,6 +50,10 @@ import {
 import { Type } from "typebox";
 import { abortAllBgJobs, bashAutoBgClause, setBgDeliveryEnabled, wrapWithAutoBg } from "./lib/auto-bg.js";
 import { killPersistentShells, persistentBashClause, wrapWithPersistentShell } from "./lib/persistent-bash.js";
+import { DEFAULT_CLOCK_REFRESH_MS, renderClock, shouldInject, type ClockState } from "./lib/clock.js";
+import { advanceChain, type RepeatChain } from "./lib/repeat-reminder.js";
+import { DEFAULT_SPILL_MAX_TOKENS, estimateTokens, formatSpillNotice, longestLineLength, retainContent, shortestLineLength } from "./lib/spill.js";
+import { saveSpill } from "./lib/spill-store.js";
 import {
   computeRetryEdit,
   isEditMismatchError,
@@ -668,6 +679,15 @@ export default function repairModule(pi: ExtensionAPI) {
   // unresolvable misses on the same file (26% retry-fail tail).
   const editMismatchCounts = new Map<string, number>();
 
+  // Per-session advisory/awareness state, keyed by session id (persistent-bash
+  // pattern). Keyed maps cannot collide across sessions, so no isChildSession
+  // gate is needed — the a2a contamination incident was UNKEYED module scope.
+  const repeatChains = new Map<string, RepeatChain>();
+  const clockStates = new Map<string, ClockState>();
+  const sessionKey = (id?: string): string => id ?? process.env.PI_SESSION_ID ?? "_default_";
+  /** Separator between retained head and tail in a spilled result. */
+  const GAP_TEXT = "\n\n[...]\n\n";
+
   const onRepair = (toolName: string, repairs: readonly RepairKind[]) => {
     repairCounts.set(toolName, (repairCounts.get(toolName) ?? 0) + 1);
   };
@@ -867,6 +887,109 @@ export default function repairModule(pi: ExtensionAPI) {
     }
   });
 
+  // ── tool_result: spill + repeat-tool-reminder (ALL models) ──
+  // Both are ADVISORY: they rewrite the model-visible result and never block.
+  pi.on("tool_result", async (event, ctx) => {
+    const live = readRepairSettings(ctx?.cwd);
+    const key = sessionKey(ctx?.sessionManager?.getSessionId?.());
+    // Nested calls (a codemode script fanning out) are the parent's business;
+    // DSH skips them for both features and so do we.
+    const nested = typeof (event as any).parentToolCallId === "string";
+
+    let content = [...event.content];
+    let changed = false;
+
+    // Repeat-tool-reminder: counts EXACT repeats of ALLOWED calls, which the
+    // blocking guards (permission doom-loop, munin dampener) never see.
+    if (live.repeatReminder && !nested) {
+      const advanced = advanceChain(repeatChains.get(key), event.toolName, event.input);
+      if (advanced) {
+        repeatChains.set(key, advanced.chain);
+        if (advanced.footer) {
+          const lastText = [...content].reverse().find((b): b is { type: "text"; text: string } => b.type === "text");
+          content = lastText
+            ? content.map((b) => (b === lastText ? { ...b, text: `${lastText.text}${advanced.footer}` } : b))
+            : [...content, { type: "text", text: advanced.footer }];
+          changed = true;
+        }
+      }
+    }
+
+    // Spill: bound an oversized result and name the file holding it. Scope is
+    // RETURNED content — stock read/bash truncate inside the tool before this
+    // hook fires, so their dropped bytes are unrecoverable here and those
+    // results are excluded (see lib/spill.ts header).
+    if (live.spillMaxTokens > 0) {
+      const details = event.details as { fullOutputPath?: unknown; truncation?: { truncated?: unknown } } | undefined;
+      // Any tool that already spilled itself (bash, codemode, grep…) reports
+      // fullOutputPath in details. codemode is the one that surprised a live
+      // probe: it truncates at 10,000 tokens (execute.js:248) and sets this
+      // too, so it can never reach the seam oversized.
+      const selfTruncated = typeof details?.fullOutputPath === "string";
+      // Metadata, never notice text: a wrapped read of a file CONTAINING
+      // "Use offset=" must still spill (the wrapper strips details.truncation
+      // on its own views; the stock pass-through keeps it).
+      const selfTruncatedByRead = event.toolName === "read" && details?.truncation?.truncated === true;
+      const hasImages = content.some((b) => b.type === "image");
+      if (!selfTruncated && !selfTruncatedByRead && !hasImages) {
+      const textBlocks = content.filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string");
+        if (textBlocks.length > 0 && estimateTokens(textBlocks) > live.spillMaxTokens) {
+          const full = textBlocks.map((b) => b.text).join("\n");
+          try {
+            const file = await saveSpill(event.toolName, event.toolCallId, full);
+            // Reserve the notice + gap BEFORE retaining so the patched result
+            // fits the caller's budget rather than overshooting it.
+            const longest = longestLineLength(full);
+            // Shortest line drives the LINE cap: short lines mean many lines
+            // per byte window, and pi's bash drops a page's HEAD past 2000
+            // lines while our offset has already advanced past it.
+            const shortest = shortestLineLength(full);
+            const worstNotice = formatSpillNotice(full.length, file, longest, live.spillMaxTokens, shortest);
+            const reserved = estimateTokens([{ type: "text", text: GAP_TEXT }, { type: "text", text: worstNotice }]);
+            const retained = retainContent(textBlocks.map((b) => b.text), Math.max(0, live.spillMaxTokens - reserved));
+            const notice = formatSpillNotice(retained.omittedBytes, file, longest, live.spillMaxTokens, shortest);
+            content =
+              retained.head.length + retained.tail.length === 0
+                ? [{ type: "text", text: notice.trimStart() }]
+                : [...retained.head, { type: "text", text: GAP_TEXT }, ...retained.tail, { type: "text", text: notice }];
+            changed = true;
+          } catch {
+            /* fail-open: an unwritable store must never cost the model its result */
+          }
+        }
+      }
+    }
+
+    return changed ? { content } : undefined;
+  });
+
+  // ── before_agent_start: clock injection + repeat-chain reset ──
+  pi.on("before_agent_start", (event, ctx) => {
+    const key = sessionKey(ctx?.sessionManager?.getSessionId?.());
+    // A new user message means the previous context is gone: repetition across
+    // an interjection is not a loop (DSH's reset rule). Only real user runs
+    // reset — cron fires and follow-ups are not interjections.
+    if (event.messageType === "user") repeatChains.delete(key);
+
+    const live = readRepairSettings(ctx?.cwd);
+    const now = Date.now();
+    const state = clockStates.get(key);
+    const refreshMs = live.clockRefreshMs === undefined ? DEFAULT_CLOCK_REFRESH_MS : live.clockRefreshMs;
+    if (live.clock && shouldInject(state, now, refreshMs)) {
+      const elapsed = state?.lastActivity === undefined ? undefined : now - state.lastActivity;
+      clockStates.set(key, { lastInjection: now, lastActivity: now });
+      return {
+        message: {
+          customType: "ceulen-clock",
+          content: renderClock(now, elapsed),
+          display: false,
+        },
+      };
+    }
+    if (state) clockStates.set(key, { ...state, lastActivity: now });
+    return undefined;
+  });
+
   // ── /repair (bare = status) ──
   pi.registerCommand("repair", {
     description: "Show tool-hardening status: repair counts, guards, bash auto-background, persistent shell.",
@@ -883,6 +1006,9 @@ export default function repairModule(pi: ExtensionAPI) {
         `  Auto-generated write guard: ${live.autoGenGuard ? "on" : "off"}`,
         `  Auto-background bash: ${live.autoBg ? `on @${live.autoBgSecs}s` : "off"}${live.autoBg !== autoBgOn || live.autoBgSecs !== autoBgSecs ? ` (bound at load: ${autoBgOn ? `on @${autoBgSecs}s` : "off"} — next session applies)` : ""}`,
         `  Persistent bash: ${live.persistentBash ? "on" : "off"}${live.persistentBash !== persistentBashOn ? ` (bound at load: ${persistentBashOn ? "on" : "off"} — next session applies)` : ""}${persistentBashOn && (live.autoBg || autoBgOn) ? " · auto-background suspended while persistent is on" : ""}`,
+        `  Tool-result spill: ${live.spillMaxTokens > 0 ? `over ${live.spillMaxTokens} tok → saved to a file` : "off"}`,
+        `  Repeat-call reminder: ${live.repeatReminder ? "on (3rd/5th/8th identical call)" : "off"}`,
+        `  Model-visible clock: ${live.clock ? `on @${Math.round(live.clockRefreshMs / 1000)}s` : "off"}`,
         "",
         `**Repairs this session:** ${total} total`,
       ];
