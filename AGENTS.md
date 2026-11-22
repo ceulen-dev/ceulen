@@ -1210,8 +1210,28 @@ tag), the equivalent is self-contained:
 if ! body=$(curl -fsS "https://registry.npmjs.org/-/npm/v1/attestations/$PKG@$VER" 2>/dev/null); then
   exit 1   # HTTP error or transfer failure — nothing to trust
 fi
-printf '%s' "$body" | grep -q 'https://slsa.dev/provenance/v1'
+printf '%s' "$body" | node -e '
+let s = "";
+process.stdin.on("data", (d) => { s += d; }).on("end", () => {
+  let j;
+  try { j = JSON.parse(s); } catch (e) { process.exit(1); }
+  const list = j.attestations;
+  if (!Array.isArray(list)) process.exit(1);
+  process.exit(list.some((a) => a && a.predicateType === "https://slsa.dev/provenance/v1") ? 0 : 1);
+});
+'
 ```
+
+Parse the JSON — do NOT substring-match the body. A 200 whose `error` field merely
+mentions the URL, or an unrelated attestation whose `description` does, would sail
+through a `grep`, and so would an empty/absent `attestations` array. Require an
+exact `attestations[].predicateType` equality (measured: `{error:"… https://slsa.dev/provenance/v1 …"}`,
+`{attestations:[{predicateType:"…/publish/v0.1", description:"… slsa …"}]}`, `{attestations:[]}`
+and `{}` all fail the parse form and all passed `grep`). Sanity-check the
+checker itself against two negative controls before trusting a pass:
+`{error:"... https://slsa.dev/provenance/v1 ..."}` and
+`{attestations:[{predicateType:".../publish/v0.1",description:"... slsa ..."}]}`
+must both FAIL.
 
 Capture the body FIRST and let curl's exit decide whether it is trustworthy;
 `-f` makes an HTTP error (404 = no attestations) non-zero as well. A plain

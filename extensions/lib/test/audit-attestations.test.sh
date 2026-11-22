@@ -119,6 +119,23 @@ start_server "{\"/pkg\":{\"status\":500,\"body\":\"nope\"},\"/-/npm/v1/attestati
 check "unreadable packument => non-zero" 1 pkg
 stop_server
 
+
+# ---- case 10: the SLSA URL present OUTSIDE predicateType => ERROR -------------
+# A body can mention https://slsa.dev/provenance/v1 in an error message or in an
+# unrelated attestation description. Only an exact predicateType equality is
+# evidence; a substring match would call these provenanced.
+ERRBODY='{"error":"no https://slsa.dev/provenance/v1 here"}'
+DESCBODY='{"attestations":[{"predicateType":"https://github.com/npm/attestation/tree/main/specs/publish/v0.1","description":"see https://slsa.dev/provenance/v1"}]}'
+start_server "{\"/pkg\":{\"status\":200,\"body\":$PK},\"/-/npm/v1/attestations/pkg@1.0.0\":{\"status\":200,\"body\":$ERRBODY},\"/-/npm/v1/attestations/pkg@2.0.0\":{\"status\":200,\"body\":$DESCBODY}}"
+check "SLSA URL only in an error field / description => non-zero" 1 pkg
+out_urloutside="$out"
+if printf '%s' "$out_urloutside" | grep -q "SLSA provenance : 0"; then
+  echo "ok   [URL-outside case] SLSA tally stayed 0 (no substring credit)"
+else
+  echo "FAIL [URL-outside case] the URL outside predicateType was counted as SLSA provenance"; printf '%s\n' "$out_urloutside" | sed 's/^/    /'; fail=1
+fi
+stop_server
+
 # ---- case 9: TRUNCATED body on a 404 => non-zero ------------------------------
 # curl reports BOTH an HTTP status (404) and a transfer failure (exit 18) when a
 # body is cut short — measured: `curl -sS -w '%{http_code}'` prints 404 while
