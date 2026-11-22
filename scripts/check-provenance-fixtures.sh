@@ -28,8 +28,7 @@ for (let i = head + 2; i < lines.length; i++) {
   const n = cells[1];
   const m = /^`(.+)`$/.exec(cells[2] || "");
   if (!m) { console.error("FAIL: row " + n + " body is not one backticked literal"); process.exit(1); }
-  const grepClaim = /false positive/.test(cells[3]) ? "match" : cells[3];
-  out.push([n, m[1], grepClaim, cells[4]].join("\t"));
+  out.push([n, m[1], cells[3], cells[4]].join("\t"));
 }
 if (!out.length) { console.error("FAIL: fixture table has no rows"); process.exit(1); }
 console.log(out.join("\n"));
@@ -55,9 +54,20 @@ printf '%s\n' "$rows" | while IFS="$(printf '\t')" read -r n body grepClaim corr
   if printf '%s' "$body" | grep -q 'https://slsa.dev/provenance/v1'; then measuredGrep="match"; else measuredGrep="no match"; fi
   if printf '%s' "$body" | parse; then measuredParse="pass"; else measuredParse="fail"; fi
 
+  # A "false positive" is a COMPOUND claim, not a synonym for "match": grep must
+  # match AND the correct answer must be fail. Normalizing it to "match" would
+  # let a genuine-provenance row be relabelled a false positive and still pass.
+  case "$grepClaim" in
+    *"false positive"*) expectGrep="match"; expectParseForFalsePositive="fail" ;;
+    *)                  expectGrep="$grepClaim"; expectParseForFalsePositive="" ;;
+  esac
+
   verdict=ok
-  [ "$measuredGrep" = "$grepClaim" ] || { verdict="MISMATCH(grep)"; fail=1; }
+  [ "$measuredGrep" = "$expectGrep" ] || { verdict="MISMATCH(grep)"; fail=1; }
   [ "$measuredParse" = "$correctClaim" ] || { verdict="MISMATCH(parse)"; fail=1; }
+  if [ -n "$expectParseForFalsePositive" ] && [ "$measuredParse" != "$expectParseForFalsePositive" ]; then
+    verdict="BAD(false-positive-claim)"; fail=1
+  fi
   printf '%-3s %-10s %-10s %-10s %-10s %s\n' "$n" "$measuredGrep" "$grepClaim" "$measuredParse" "$correctClaim" "$verdict"
   # Signal out of the subshell via a file so the exit status survives the pipe.
   [ "$verdict" = ok ] || echo "$n" >> "${TMP:-/tmp}/.prov-fixture-fails.$$"
