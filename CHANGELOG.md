@@ -3,11 +3,11 @@
 
 - **npm provenance actually enabled.** `publish.yml` ran `npm publish --access
   public` and nothing else; `id-token: write` permits provenance but does not
-  request it, so every release up to and including 0.29.0 shipped with **no
-  attestation** (`dist.attestations` absent, and
-  `registry.npmjs.org/-/npm/v1/attestations/ceulen@0.28.2` 404s). The flag is
-  now `--provenance` on the publish command, and AGENTS.md documents the check
-  so a workflow permissions block is never mistaken for evidence again.
+  request it. Checked **all 31 published versions** against the registry
+  (`dist.attestations` in the packument, plus the attestation endpoint for a
+  sample): **none** carries an attestation except this one (0.29.1). The flag
+  is now `--provenance` on the publish command, and AGENTS.md documents the
+  check so a workflow permissions block is never mistaken for evidence again.
 - Nothing else changed: no module, setting, or tool behavior differs from
   0.29.0.
 

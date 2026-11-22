@@ -1173,10 +1173,11 @@ declares it). Resolves its default mode from `PI_UX_DEFAULT_MODE`, then `~/.conf
 Bump `version` in `package.json` → commit → `git tag vX.Y.Z` → push → `gh release create vX.Y.Z` — the GitHub **release** (not the tag push) triggers `publish.yml` (npm publish). CI (`ci.yml`) runs typecheck + tests on every push/PR.
 
 Provenance is `--provenance` on the publish command, NOT implied by the
-workflow's `id-token: write` (that only permits it). Everything up to and
-including 0.29.0 shipped WITHOUT an attestation — `dist.attestations` is
-absent and `registry.npmjs.org/-/npm/v1/attestations/ceulen@<ver>` 404s — so
-the flag was added to `publish.yml`. Verify a release with the attestation
+workflow's `id-token: write` (that only permits it). Every release before
+0.29.1 shipped WITHOUT an attestation: ALL 31 published versions were checked
+against the packument's `dist.attestations` (plus the attestation endpoint for
+a sample) and only 0.29.1 has one. The flag was added to `publish.yml`; older
+versions cannot be retro-signed. Verify a release with the attestation
 endpoint, not with the workflow's permissions block.
 
 Registry propagation lags the publish job: `npm view` and even the version
