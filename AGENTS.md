@@ -1190,12 +1190,16 @@ tag), the equivalent is self-contained:
 
 ```sh
 curl -sS "https://registry.npmjs.org/-/npm/v1/attestations/$PKG@$VER" \
-  | grep -q 'https://slsa.dev/provenance/v1'; echo "provenance rc=$?"   # 0 = present
+  | grep -q 'https://slsa.dev/provenance/v1'
 ```
 
-Check the exit code of the pipeline, not of a follow-up command — appending
-`&& echo OK || echo FAIL` after the grep and then reading `$?` reports the
-echo's status and always looks successful.
+The snippet's OWN exit status is the verdict (0 = present). NOTHING may follow
+the `grep`: any trailing `echo "rc=$?"`, `&& echo OK`, or `|| echo FAIL` becomes
+the pipeline's last command, so the block exits 0 no matter what it printed —
+verified: with a trailing echo, a version lacking provenance printed `rc=1`
+and the script still exited 0. To display the value rather than gate on it,
+run the command with the echo as a SEPARATE step and do not treat its status
+as the check.
 
 Registry propagation lags the publish job: `npm view` and even the version
 metadata listing can report the OLD version for several minutes after the job
