@@ -1174,9 +1174,10 @@ Bump `version` in `package.json` → commit → `git tag vX.Y.Z` → push → `g
 
 Provenance is `--provenance` on the publish command, NOT implied by the
 workflow's `id-token: write` (that only permits it). Every release before
-0.29.1 shipped WITHOUT an attestation: ALL 31 published versions were checked
-against the packument's `dist.attestations` (plus the attestation endpoint for
-a sample) and only 0.29.1 has one. The flag was added to `publish.yml`; older
+0.29.1 shipped WITHOUT an attestation. ALL 31 published versions were checked
+BOTH ways — `dist.attestations` in the packument, and the attestation endpoint
+queried per version: exactly one returns 200 (0.29.1, with both predicates) and
+the other 30 return 404 with neither. The flag was added to `publish.yml`; older
 versions cannot be retro-signed. Verify a release with the attestation
 endpoint, not with the workflow's permissions block — and not by HTTP status
 alone. The endpoint can carry two DISTINCT attestations: npm's own publish

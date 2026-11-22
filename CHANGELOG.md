@@ -13,8 +13,9 @@
   SLSA build provenance — and only the latter is a build-provenance claim, so an
   HTTP 200 (or a `publish/v0.1` alone) does not establish it.
   `scripts/verify-provenance.sh <version>` fails unless
-  `https://slsa.dev/provenance/v1` is present (0.29.1 lists both; 0.29.0 and
-  every earlier release return 404 with neither).
+  `https://slsa.dev/provenance/v1` is present. Endpoint checked on all 31
+  published versions: 0.29.1 is the only 200 (both predicates); the other 30
+  return 404 with neither.
 - Nothing else changed: no module, setting, or tool behavior differs from
   0.29.0.
 
