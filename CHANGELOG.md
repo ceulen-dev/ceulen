@@ -1,4 +1,33 @@
 # Changelog
+## 0.29.2 — 2026-11-22
+
+Verification tooling only — no module, setting, or tool behavior changed.
+
+- **`scripts/audit-attestations.sh`** — audits the attestation endpoint for
+  every published version, which is what a claim like "no earlier release has
+  provenance" actually requires. Classification is three-way and only a **404**
+  counts as absent: a 429/5xx, a transport failure, or a malformed 200 (non-JSON,
+  missing/empty `attestations`, attestation without `predicateType`) is an
+  ERROR, and any ERROR makes the script exit non-zero. It also verifies its own
+  cover invariant, so a bucket that silently absorbs anomalies cannot make a
+  broken audit look clean.
+- **`scripts/verify-provenance.sh`** — one release; fails unless
+  `https://slsa.dev/provenance/v1` is present. HTTP 200 is not the gate, and
+  neither is a bare `publish/v0.1` attestation.
+- **`scripts/check-provenance-fixtures.sh`** — extracts the fixture bodies from
+  AGENTS.md's own grep-vs-parse table and re-runs both matchers on each, so the
+  documented table cannot drift from the measurement.
+- **Tests** — `audit-attestations.test.sh` (10 cases: clean history, 429, 500,
+  non-JSON 200, missing `attestations`, empty array, missing `predicateType`,
+  unreadable packument, truncated 404 body, SLSA URL outside `predicateType`)
+  and `check-provenance-fixtures.test.sh` (7 cases, verifying the verifier).
+  Both run under `npm test`.
+- **AGENTS.md Release flow** corrected: provenance is the `--provenance` flag and
+  not implied by `id-token: write`; read a tool's own exit status rather than a
+  pipeline's; capture a response body before matching it; parse the JSON and
+  require exact `attestations[].predicateType` equality (a substring match
+  accepts the URL sitting in an `error` field or an unrelated `description`).
+
 ## 0.29.1 — 2026-11-22
 
 - **npm provenance actually enabled.** `publish.yml` ran `npm publish --access
