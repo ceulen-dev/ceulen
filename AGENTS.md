@@ -1205,7 +1205,10 @@ The snippet's OWN exit status is the verdict (0 = present). What may follow the
 | `grep -q … \|\| echo FAIL` | 0 | **no** — the `\|\|` runs on failure and its status replaces the result. |
 
 So the maskers are `;` and `||`, not `&&`. To show the value rather than gate
-on it, use the `;` form and read the printed rc — never its exit status.
+on it, use the `;` form and read the printed rc (`provenance rc=1` on a version
+without provenance) — never its exit status. Do not read `|| echo FAIL` as the
+same thing: that echo fires only when the check FAILS, so silence means success
+and its own status is always 0.
 
 Registry propagation lags the publish job: `npm view` and even the version
 metadata listing can report the OLD version for several minutes after the job
