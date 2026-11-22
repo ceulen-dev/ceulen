@@ -1207,13 +1207,23 @@ OLD enough that the script predates it (it landed in c048d54, after the v0.29.1
 tag), the equivalent is self-contained:
 
 ```sh
-curl -sS "https://registry.npmjs.org/-/npm/v1/attestations/$PKG@$VER" \
-  | grep -q 'https://slsa.dev/provenance/v1'
+if ! body=$(curl -fsS "https://registry.npmjs.org/-/npm/v1/attestations/$PKG@$VER" 2>/dev/null); then
+  exit 1   # HTTP error or transfer failure — nothing to trust
+fi
+printf '%s' "$body" | grep -q 'https://slsa.dev/provenance/v1'
 ```
 
-The snippet's OWN exit status is the verdict (0 = present). What may follow the
-`grep` depends on the operator — verified against a version with NO provenance
-(a correct gate must exit non-zero):
+Capture the body FIRST and let curl's exit decide whether it is trustworthy;
+`-f` makes an HTTP error (404 = no attestations) non-zero as well. A plain
+`curl -sS ... | grep -q` can PASS on a TRUNCATED response — grep matches the
+partial body before curl reports exit 18 (measured). And the `if !` form is
+required: `if body=$(...); then match; fi` with no `else` yields the `if`'s own
+status (0) when curl fails, so it silently passes.
+
+The snippet's OWN exit status is the verdict (0 = present). Whatever form you
+build from it, what may follow the final test depends on the operator —
+verified against a version with NO provenance (a correct gate must exit
+non-zero):
 
 | form | exit | gates? |
 |---|---|---|
