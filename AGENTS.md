@@ -1184,9 +1184,21 @@ alone. The endpoint can carry two DISTINCT attestations: npm's own publish
 recording (`https://github.com/npm/attestation/.../publish/v0.1`) and the SLSA
 build provenance. Only the latter is a build-provenance claim, and a 200 or a
 `publish/v0.1` alone does not establish it, so require the
-`https://slsa.dev/provenance/v1` predicate in the body. Use
-`scripts/verify-provenance.sh <version>` (exits non-zero unless that predicate
-is present); it is the gate, `curl -w '%{http_code}'` is not. For a checkout
+`https://slsa.dev/provenance/v1` predicate in the body.
+
+Two scripts, different scopes:
+
+- `scripts/verify-provenance.sh <version>` — ONE release; exits non-zero unless
+  the SLSA predicate is present. `curl -w '%{http_code}'` is not the gate.
+- `scripts/audit-attestations.sh` — the whole history, for a claim like "no
+  earlier release has provenance". It classifies every version three ways:
+  attested (well-formed 200), absent (404 ONLY), or ERROR
+  (429/5xx/transport failure/malformed 200), and exits non-zero if any version
+  is ERROR — a failed request establishes nothing about absence. Its contract
+  is pinned by `extensions/lib/test/audit-attestations.test.sh`, which drives it
+  against a local fake registry for each failure mode (it runs under `npm test`).
+
+For a checkout
 OLD enough that the script predates it (it landed in c048d54, after the v0.29.1
 tag), the equivalent is self-contained:
 
