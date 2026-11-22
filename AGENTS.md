@@ -1178,7 +1178,13 @@ workflow's `id-token: write` (that only permits it). Every release before
 against the packument's `dist.attestations` (plus the attestation endpoint for
 a sample) and only 0.29.1 has one. The flag was added to `publish.yml`; older
 versions cannot be retro-signed. Verify a release with the attestation
-endpoint, not with the workflow's permissions block.
+endpoint, not with the workflow's permissions block — and not by HTTP status
+alone: npm attaches its OWN
+`.../npm/attestation/.../publish/v0.1` attestation to any publish, so a 200 can
+carry no SLSA build provenance. The provenance claim requires the
+`https://slsa.dev/provenance/v1` predicate in the body. Use
+`scripts/verify-provenance.sh <version>` (exits non-zero unless that predicate
+is present); it is the gate, `curl -w '%{http_code}'` is not.
 
 Registry propagation lags the publish job: `npm view` and even the version
 metadata listing can report the OLD version for several minutes after the job

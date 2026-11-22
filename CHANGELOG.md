@@ -8,6 +8,11 @@
   sample): **none** carries an attestation except this one (0.29.1). The flag
   is now `--provenance` on the publish command, and AGENTS.md documents the
   check so a workflow permissions block is never mistaken for evidence again.
+  The check itself is predicate-based, not status-based: npm attaches its own
+  `publish/v0.1` attestation to any publish, so an HTTP 200 can carry no SLSA
+  build provenance. `scripts/verify-provenance.sh <version>` fails unless
+  `https://slsa.dev/provenance/v1` is present (0.29.1 lists both that and
+  `publish/v0.1`).
 - Nothing else changed: no module, setting, or tool behavior differs from
   0.29.0.
 
