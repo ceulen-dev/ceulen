@@ -1179,9 +1179,10 @@ against the packument's `dist.attestations` (plus the attestation endpoint for
 a sample) and only 0.29.1 has one. The flag was added to `publish.yml`; older
 versions cannot be retro-signed. Verify a release with the attestation
 endpoint, not with the workflow's permissions block — and not by HTTP status
-alone: npm attaches its OWN
-`.../npm/attestation/.../publish/v0.1` attestation to any publish, so a 200 can
-carry no SLSA build provenance. The provenance claim requires the
+alone. The endpoint can carry two DISTINCT attestations: npm's own publish
+recording (`https://github.com/npm/attestation/.../publish/v0.1`) and the SLSA
+build provenance. Only the latter is a build-provenance claim, and a 200 or a
+`publish/v0.1` alone does not establish it, so require the
 `https://slsa.dev/provenance/v1` predicate in the body. Use
 `scripts/verify-provenance.sh <version>` (exits non-zero unless that predicate
 is present); it is the gate, `curl -w '%{http_code}'` is not. For a checkout

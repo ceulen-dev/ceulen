@@ -1,11 +1,12 @@
 #!/bin/sh
 # Verify a ceulen release carries SLSA provenance, not just an npm signature.
 #
-# HTTP 200 alone is NOT sufficient: npm publishes its own
-# `.../npm/attestation/.../publish/v0.1` attestation for any publish, so a
-# response can be 200 while carrying no SLSA build provenance. The provenance
-# claim is only satisfied by the presence of the
-# `https://slsa.dev/provenance/v1` predicate.
+# HTTP 200 alone is NOT sufficient. The endpoint can carry two DISTINCT
+# attestations: npm's own publish recording
+# (`https://github.com/npm/attestation/.../publish/v0.1`) and the SLSA build
+# provenance. Only the latter is a build-provenance claim, so a 200 — or a
+# `publish/v0.1` by itself — does not establish it. The claim is satisfied only
+# by the presence of the `https://slsa.dev/provenance/v1` predicate.
 #
 # Usage: scripts/verify-provenance.sh <version> [package]
 set -eu
