@@ -1235,6 +1235,14 @@ not call a release shipped until
 `curl -o /dev/null -w '%{http_code}' https://registry.npmjs.org/ceulen/-/ceulen-<ver>.tgz`
 returns 200, then install it from a clean directory.
 
+When reporting any of those checks, read the tool's OWN exit status: `… | tail`
+and `… | grep` report the LAST command's status, so `sh script.sh 2>&1 | tail -6`
+followed by `$?` says nothing about the script. Redirect to a file and read it
+(`sh script.sh > out 2>&1; rc=$?`), or use `set -o pipefail`. This repo has made
+that mistake repeatedly; a success claim is only as good as the exit code behind
+it. Sanity-check a pass against a known failure (the same script pointed at an
+unreachable registry must exit non-zero), so "0" is not vacuous.
+
 ## Central config panel (config module)
 
 The `config` module owns `/config` — a central settings panel rendered from
