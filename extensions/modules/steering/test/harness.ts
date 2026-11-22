@@ -1,7 +1,7 @@
 // Fake-pi harness for the steering lifecycle tests (adapted from
-// pi-model-tools' ds-anchor-wiring / cache-stats / guidance harnesses): the
-// module's handlers are collected off a stub ExtensionAPI and fired directly
-// with synthetic events, so the returned results can be asserted on.
+// pi-model-tools' cache-stats / guidance harnesses): the module's handlers are
+// collected off a stub ExtensionAPI and fired directly with synthetic events,
+// so the returned results can be asserted on.
 
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";

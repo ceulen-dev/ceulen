@@ -57,16 +57,18 @@ async function writeProject(cwdPath: string, repair: unknown): Promise<void> {
 }
 
 describe("readRepairSettings", () => {
-  it("defaults: repair on, guards on, autoBg off @120s", () => {
+  it("defaults: repair on, guards on, autoBg off @120s, persistent bash off", () => {
     assert.deepEqual(readRepairSettings(cwd), DEFAULT_REPAIR_SETTINGS);
+    assert.equal(DEFAULT_REPAIR_SETTINGS.persistentBash, false, "opt-in: binds at load, so it stays off until asked for");
   });
 
   it("reads the global agent-dir `repair` section", async () => {
-    await writeGlobal({ arguments: false, autoBg: true, autoBgSecs: 30 });
+    await writeGlobal({ arguments: false, autoBg: true, autoBgSecs: 30, persistentBash: true });
     const s = readRepairSettings(cwd);
     assert.equal(s.arguments, false);
     assert.equal(s.autoBg, true);
     assert.equal(s.autoBgSecs, 30);
+    assert.equal(s.persistentBash, true);
     assert.equal(s.guards, true, "untouched keys keep the default");
   });
 
@@ -173,7 +175,7 @@ describe("tool_call honors the trusted-project layer (A5 e2e)", () => {
 });
 
 describe("buildRepairGroups (panel contract)", () => {
-  it("renders the six repair.* rows on the Tools tab with the documented defaults", () => {
+  it("renders the seven repair.* rows on the Tools tab with the documented defaults", () => {
     const cfg: RepairSettings = { ...DEFAULT_REPAIR_SETTINGS };
     const groups = buildRepairGroups(cfg);
     assert.equal(groups.length, 1);
@@ -187,6 +189,7 @@ describe("buildRepairGroups (panel contract)", () => {
       "repair.autoGenGuard",
       "repair.autoBg",
       "repair.autoBgSecs",
+      "repair.persistentBash",
     ]);
     assert.ok(keys.every((k) => k.startsWith("repair.")), "row keys route back to this module");
     const byKey = new Map(groups[0].rows.map((r) => [r.key, r]));

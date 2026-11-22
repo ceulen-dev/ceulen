@@ -381,8 +381,8 @@ Ported from the tool-hardening half of `@bacnh85/pi-model-tools` 0.9.5 (see
 `extensions/modules/repair/`). Wraps the 7 built-in tools (read, write, edit,
 grep, find, ls, bash) EXACTLY ONCE each (pi lets an extension tool override a
 built-in by name) and adds `apply_patch` (Codex-style V4D diff tool) and
-`str_replace_editor` (byte-faithful DSH Minimal-pair editor — the schema text
-is load-bearing for the steering module's anchor).
+`str_replace_editor` (byte-faithful DSH-pair editor — the schema text is
+load-bearing for models that call the tool).
 
 DELIBERATE DEVIATION from upstream: the deterministic half is MODEL-AGNOSTIC
 here — schema argument repair, read-notice decontamination, and the tool_call
@@ -392,11 +392,79 @@ lives in the steering module, a different file set). Edit mismatch repair
 (strip read-notice contamination, trim-tolerant retry, nearest-region error,
 apply_patch escalation) is gated on `repair.editRetry`.
 
-Settings: the `repair` section (`arguments`, `editRetry`, `guards` — read PER
-TOOL CALL; `autoBg`, `autoBgSecs` — bind at module LOAD because the wrapped
-bash description sits in the cache-safe request head, so those rows take
-effect next session; `/repair` status discloses the load-bound values).
-Layering: defaults → global settings.json → trusted project file.
+Settings: the `repair` section (`arguments`, `editRetry`, `guards`,
+`autoGenGuard` — read PER TOOL CALL; `autoBg`, `autoBgSecs`, `persistentBash` —
+bind at module LOAD because the wrapped bash description sits in the cache-safe
+request head, so those rows take effect next session; `/repair` status discloses
+the load-bound values). Layering: defaults → global settings.json → trusted
+project file. Per-command deadline: an explicit `timeout` argument wins,
+otherwise `DEFAULT_COMMAND_TIMEOUT_SECS` (300 s, source constant — not a
+settings row) bounds every command so a hung shell always recovers.
+
+**`repair.persistentBash`** (default false) wraps the bash tool's
+`BashOperations` seam with ONE long-lived `bash --noprofile --norc` per
+`PI_SESSION_ID`, so cwd, exported variables, functions, and background jobs
+survive across calls — the DeepSeek Harness `tool-bash-persistent` composition
+(`lib/persistent-bash.ts`; DSH's 2026-09-03 minimal profile is persistent shell
++ read_image only). Framing is DSH's single physical line
+`command builtin eval $'<ANSI-C-escaped>'; command builtin printf
+'<marker>%s\n' "$?"`, so a syntactically incomplete command is a syntax error
+rather than a swallowed marker. **`command builtin` on every framing step is
+load-bearing**: the shell is persistent by design, so a function the model
+defined in an earlier call is still live when the framing runs. Probed
+shadowings, escalating: `printf() { :; }` suppressed the marker bare (a
+SUCCESSFUL command then hung to the timeout — live-reproduced, the defining call
+itself timed out at 5 s); `eval() { :; }` captured body dispatch; `builtin() {
+:; }` ALSO broke it because `builtin` is resolved by NAME — `command` is what
+rescues that one (with only `builtin` shadowed, the marker prints).
+**REMAINING CEILING — `command() { :; }` ALONE**: `command` is resolved FIRST and
+is itself shadowable, so no `builtin` shadowing is needed to skip the body and
+suppress the marker. Escaping it needs a non-portable absolute path
+(`/usr/bin/printf`). The ceiling is self-healing rather than silent: that call
+times out, the timeout RESETS the shell (reset-never-repair), and the next call
+runs on a fresh shell with the shadow gone (`type command` reports the builtin
+again).
+
+**`DEFAULT_COMMAND_TIMEOUT_SECS` = 300 is what makes that recovery BOUNDED** —
+it is NOT optional. pi's bash `timeout` is optional and undefined means the
+one-shot path runs with no timer at all; on a persistent shell that would let a
+single never-settling command (a shadowed `command`, a foreground child reading
+stdin, a runaway job) wedge the shell AND every queued call behind it FOREVER,
+with no reset to recover by. The wrapper therefore applies the 300 s floor when
+the caller supplies no timeout (DSH's `tool-bash-persistent` defaults
+`timeoutMs: 300_000` for the same reason). An explicit `timeout` always wins.
+The serialization queue is keyed by SESSION, not by the shell object, so a call
+queued behind a reset re-resolves the shell and respawns instead of failing
+against the dead child — that wedging bug was found by the queue test. Evidence
+matters here: an injected low floor proves the MECHANISM, and a fake-clock test
+pins the SHIPPED constant (at 299 s still pending, at 300 s `timeout:300`), so
+neither claim rests on a probe that waits five minutes or on the outer harness
+limit. Seven regression tests pin the framing + deadline contract
+(`test/persistent-bash.test.ts` § framing): retained `printf`/`eval`/`builtin`,
+all shadowed + non-zero exit, `command`-alone timeout-then-reset, the default
+floor with no caller timeout, an explicit timeout overriding the floor, a
+queued call surviving a hung head, and the shipped-constant fake-clock case.
+ONE
+permanent stdout/stderr listener pair per shell (per-command attach/detach
+races a chunk landing mid-attach); line-holdback keeps the trailing partial
+line so a marker split across chunks is never read as output, and bytes after
+the marker go to a `pending` buffer that prepends the next call's stream
+(background-job output is never dropped). Marker matched by `lastIndexOf`
+within a complete-lines chunk — a cross-chunk echo is an accepted ceiling
+(needs a settle timer; DSH's scrollback poll buys that) and unreachable in
+practice since the nonce is generated AFTER the command text exists. Reset
+never repair: exit/timeout/abort/spawn-failure/EOF kills the process GROUP and
+forgets the shell; timeout rejects `timeout:<secs>`, abort rejects `aborted`
+(both parsed by pi's bash tool). A per-shell promise queue serializes
+concurrent execs without the tool's `executionMode:"sequential"`.
+`session_shutdown` kills by session id (child sessions get their own, so no
+`isChildSession` gate). **PLAN MODE always runs one-shot** (`isPlanActive()` →
+`local.exec`): the plan gate auto-allows reads by COMMAND TEXT, and a retained
+cwd/function/alias from before plan mode could change what that text does; the
+shell keeps its pre-plan state and resumes on exit, plan-mode mutations are
+discarded. While on, `autoBg` is SUSPENDED (a backgrounded queued exec would
+park later foreground calls behind the job — the shell's own `&` backgrounding
+is the taught model); `/repair` discloses both.
 
 ### Plan module (plan)
 
@@ -478,21 +546,25 @@ stability factor), error categorization + recovery hints, and DeepSeek selection
 guidance (exact paths, available search tools, codemode batching, deferred tool
 discovery), superpower (off by default), and strict-Serena steering.
 
-**ds-anchor** is on by default for V4 Pro and V4.1 Flash. It atomically swaps
-the first eligible provider request to the DSH minimal prompt and
-`bash`/`str_replace_editor` pair, with a 256000 output budget capped at the
-model's limit. The full prompt and tools return immediately after the first
-durable assistant reply, even within the same turn. It skips plan mode,
-custom-triggered runs and loadouts without the pair. Unknown wire shapes
-keep the original prompt and tools. `/steering` shows the trace.
+The **ds-anchor** (DSH minimal-mode bootstrap) was DELETED 2026-11. The A/B
+evidence (48 isolated fixture sessions + herdr probes over
+`router/combo/deepseek-v4.1-flash` and V4 Pro) showed it HURT Flash cold tool
+use — 3/5 with the anchor, 5/5 with it off: the pair-only request #1 hid
+codemode/tool_search, and explicit requests for them ended without a tool call
+before promotion. DeepSeek Harness itself dropped that composition
+(`str_replace_editor` removed from minimal on 2026-09-03: one file-mutation
+interface = the shell); its benchmark score belongs to the persistent-shell
+composition, not a first-round bootstrap. Do not reintroduce one. The useful
+DSH work now lives in the repair module's `repair.persistentBash`.
 
 Steering runs after the other `before_agent_start` composers (including
-RTK) so it sees their prompt and tool selections. It always preserves the
-composed prompt there; the bootstrap rewrite is confined to the provider payload.
+RTK) so it sees their prompt and tool selections. It always composes onto the
+incoming prompt and never replaces it.
 
 Settings: the `steering` section (`firstToolHints`, `selectionGuidance`,
 `superpower`, `superpowerPrompt`, `strictSerena`, `stripReasoning`,
-`dsAnchor`, `weNeed`, `thinkTool`), read per turn. `steering.thinkTool`
+`thinkTool`), read per turn. The deleted `dsAnchor`/`weNeed` keys are ignored
+by the reader if still present. `steering.thinkTool`
 (default false) registers the OMP-parity `think` scratchpad tool at load
 (repair autoBg precedent: the /config row warns it takes effect after
 /reload); the tool's call renders as one dim marker so planning notes stay
@@ -500,7 +572,7 @@ out of the visible transcript. OMP's externalThinking reasoning-suppression
 is deliberately NOT ported (providers flag the request shape as abuse; pi's
 thinking levels are the honest off-switch). The steering reminder customType
 is `ceulen-steering`. `/steering` = status (family, flags, cache stats,
-anchor state + trace). The zai-provider payload hooks (fast-mode body,
+errors). The zai-provider payload hooks (fast-mode body,
 throttle, signing) are NOT here — the zai module owns them, gated on provider
 id, not model family.
 
@@ -1038,7 +1110,7 @@ The contract (`extensions/lib/child-session.ts`):
   permission, repair).
 - Factory-time arms (intervals created at module load — cron's tick timer,
   router's catalog refresh) gate on `childFactoryDepth() > 0`.
-- Children KEEP their tools and per-turn handlers (steering anchor, fff,
+- Children KEEP their tools and per-turn handlers (steering hints, fff,
   repair arg-fixing) — only host-owned bookkeeping is protected. Factory-
   scope state (closures inside the factory function) is per-session and
   needs no gate.
@@ -1290,10 +1362,11 @@ defaults never written; clear-to-empty deletes = default restored),
 `subagent.{idle,hard}TimeoutMins` — writes the GLOBAL `subagent` section,
 applied live (settings read per execute()); **Tasks** tab, `Subagents`
 section) and **steering** (`steering.{firstToolHints,selectionGuidance,
-superpower,superpowerPrompt,strictSerena,stripReasoning,dsAnchor,weNeed}` —
+superpower,superpowerPrompt,strictSerena,stripReasoning,thinkTool}` —
 writes the GLOBAL `steering` section, read per turn so saves apply live;
 **Model** tab, `Steering` section) and **repair** (`repair.{arguments,
-editRetry,guards,autoBg,autoBgSecs}` — writes the GLOBAL `repair` section;
+editRetry,guards,autoGenGuard,autoBg,autoBgSecs,persistentBash}` — writes the
+GLOBAL `repair` section;
 first three apply next turn, the bash pair binds at load = next session,
 disclosed by row warning + save notify; **Tools** tab, `Repair` section) and
 **zai** (`zai.{baseUrl,speed,signing,minIntervalMs}` — writes the GLOBAL

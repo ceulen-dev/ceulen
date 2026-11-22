@@ -52,33 +52,31 @@ describe("readSteeringSettings layering", () => {
       superpowerPrompt: "",
       strictSerena: false,
       stripReasoning: true,
-      dsAnchor: true,
-      weNeed: false,
       thinkTool: false,
     });
   });
 
   it("reads the global section, ignoring unknown keys and bad types", () => {
-    writeGlobal({ steering: { superpower: true, superpowerPrompt: "  custom  ", dsAnchor: "yes", strictSerena: 1, firstToolHints: false } });
+    writeGlobal({ steering: { superpower: true, superpowerPrompt: "  custom  ", stripReasoning: "yes", strictSerena: 1, firstToolHints: false } });
     const s = readSteeringSettings();
     assert.equal(s.superpower, true);
     assert.equal(s.superpowerPrompt, "custom", "trimmed");
-    assert.equal(s.dsAnchor, true, "non-boolean ignored → default");
+    assert.equal(s.stripReasoning, true, "non-boolean ignored → default");
     assert.equal(s.strictSerena, false, "non-boolean ignored → default");
     assert.equal(s.firstToolHints, false);
   });
 
   it("a TRUSTED project file overrides the global section per field", () => {
-    writeGlobal({ steering: { superpower: true, weNeed: true, stripReasoning: false } });
+    writeGlobal({ steering: { superpower: true, strictSerena: true, stripReasoning: false } });
     writeProject({ steering: { superpower: false, stripReasoning: true } });
     const s = readSteeringSettings({ cwd: REPO, isProjectTrusted: () => true });
     assert.equal(s.superpower, false, "project wins");
     assert.equal(s.stripReasoning, true, "project wins");
-    assert.equal(s.weNeed, true, "untouched field falls through to global");
+    assert.equal(s.strictSerena, true, "untouched field falls through to global");
   });
 
   it("an UNTRUSTED project file is ignored entirely", () => {
-    writeProject({ steering: { dsAnchor: false, superpower: true } });
+    writeProject({ steering: { superpower: true, firstToolHints: false } });
     const s = readSteeringSettings({ cwd: REPO, isProjectTrusted: () => false });
     assert.deepEqual(s, DEFAULT_STEERING_SETTINGS);
     assert.equal(projectOverridesSteering(REPO, false), false, "untrusted project never disclosed as shadowing");
@@ -92,19 +90,19 @@ describe("readSteeringSettings layering", () => {
 
 describe("writeSteeringSection", () => {
   it("merges into the file without clobbering siblings", () => {
-    writeGlobal({ theme: "dark", router: { baseUrl: "http://x/v1" }, steering: { weNeed: true } });
+    writeGlobal({ theme: "dark", router: { baseUrl: "http://x/v1" }, steering: { strictSerena: true } });
     writeSteeringSection({ superpower: true, superpowerPrompt: "go loud" });
     const s = readBack();
     assert.equal(s.theme, "dark");
     assert.equal(s.router.baseUrl, "http://x/v1");
-    assert.equal(s.steering.weNeed, true, "existing steering keys survive");
+    assert.equal(s.steering.strictSerena, true, "existing steering keys survive");
     assert.equal(s.steering.superpower, true);
     assert.equal(s.steering.superpowerPrompt, "go loud");
   });
 
   it("writes only the patched keys and refuses to clobber a corrupt file", () => {
-    writeSteeringSection({ dsAnchor: false });
-    assert.deepEqual(readBack().steering, { dsAnchor: false }, "one key patched, nothing else written");
+    writeSteeringSection({ stripReasoning: false });
+    assert.deepEqual(readBack().steering, { stripReasoning: false }, "one key patched, nothing else written");
     writeFileSync(globalFile(), "{ not json");
     assert.throws(() => writeSteeringSection({ superpower: true }), /not valid JSON/);
   });
@@ -112,7 +110,7 @@ describe("writeSteeringSection", () => {
 
 describe("projectOverridesSteering", () => {
   it("is true only for a trusted project that actually sets steering.*", () => {
-    writeProject({ steering: { dsAnchor: false } });
+    writeProject({ steering: { stripReasoning: false } });
     assert.equal(projectOverridesSteering(REPO, true), true);
     writeProject({ munin: { project: "x" } });
     assert.equal(projectOverridesSteering(REPO, true), false, "another module's section is not a steering override");
@@ -133,14 +131,11 @@ describe("/config contribution", () => {
       "steering.superpowerPrompt",
       "steering.strictSerena",
       "steering.stripReasoning",
-      "steering.dsAnchor",
-      "steering.weNeed",
       "steering.thinkTool",
     ]);
-    const anchor = groups[0].rows.find((r) => r.key === "steering.dsAnchor")!;
-    assert.equal(anchor.kind, "toggle");
-    assert.equal(anchor.defaultValue, true);
-    assert.match(anchor.warning!, /V4 Pro and V4\.1 Flash:.*bash and str_replace_editor when both are declared/);
+    const think = groups[0].rows.find((r) => r.key === "steering.thinkTool")!;
+    assert.equal(think.kind, "toggle");
+    assert.equal(think.defaultValue, false);
     // No Enable row here — the config module prepends it.
     assert.equal(keys.some((k) => k.startsWith("ceulen.disabled")), false);
   });
@@ -155,7 +150,7 @@ describe("/config contribution", () => {
   });
 
   it("save writes the changed keys to the global file and discloses a project override", async () => {
-    writeProject({ steering: { dsAnchor: false } });
+    writeProject({ steering: { strictSerena: true } });
     const contrib = steeringConfig();
     const rows = contrib.groups()[0].rows;
     rows.find((r) => r.key === "steering.stripReasoning")!.set(false);

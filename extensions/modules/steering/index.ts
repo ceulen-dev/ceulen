@@ -10,7 +10,7 @@
  *     fast-mode body) — the "zai" module.
  *
  * What stays here is everything that depends on knowing WHICH model family is
- * serving the request, plus the DeepSeek V4 Pro / V4.1 Flash minimal-mode anchor:
+ * serving the request:
  *
  *   1. family detection (deepseek-v4 | glm), latched from the requested model
  *      and the session-captured one (proxies rewrite ctx.model between hooks).
@@ -23,14 +23,20 @@
  *   4. tool-error categorization → the next turn's recovery hint, plus the
  *      reasoning-accumulation 400 detector.
  *   5. DeepSeek-only semantic-miss / dedicated-tool steering on tool_call.
- *   6. the request-scoped ds-anchor two-phase bootstrap.
+ *
+ * The ds-anchor (DSH minimal-mode bootstrap) was DELETED 2026-11: the A/B
+ * evidence showed it HURT DeepSeek Flash cold tool use (3/5 vs 5/5 with it
+ * off — the pair-only request #1 hid codemode/tool_search and explicit
+ * requests for them ended without a tool call), and DeepSeek Harness itself
+ * dropped that composition (str_replace_editor removed from minimal
+ * 2026-09-03: one file-mutation interface = the shell). Do not reintroduce a
+ * first-request bootstrap here; the persistent-shell work lives in repair.
  *
  * ORDERING CONTRACT (why this module is its own unit): in ceulen's registry
  * `steering` loads AFTER ponytail and subagent, so this `before_agent_start`
  * handler runs LAST in the chain (each handler's returned systemPrompt becomes
- * the next handler's event.systemPrompt). Always compose the full prompt here.
- * Replace it only at the wire boundary, atomically with the bootstrap tool pair,
- * so a fail-open or the next tool round gets the original composed prompt.
+ * the next handler's event.systemPrompt). Always compose the full prompt here —
+ * never replace it.
  *
  * Config: the `steering` section of the agent-dir settings.json, overlaid by a
  * trusted project `.pi/settings.json` (lib/settings.ts), read per turn — so
@@ -43,8 +49,7 @@
 // reminders threshold is now a fixed policy inside strictSerena, and the
 // reasoning-truncation budget is a function argument.
 
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { isPlanActive } from "../../lib/plan-bridge.ts";
+import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { detectFamily, type ModelFamily } from "./lib/family.js";
 import {
   applyPatchPreferenceGuidance,
@@ -61,15 +66,6 @@ import {
   stripReasoningContent,
   tailIsPlainUserPrompt,
 } from "./lib/history.js";
-import {
-  BOOTSTRAP_TOOLS,
-  MINIMAL_SYSTEM_PROMPT,
-  WE_NEED_DIRECTIVE,
-  dshBootstrapTools,
-  hasPromotionSignal,
-  isAnchorTarget,
-  withMinimalPrompt,
-} from "./lib/anchor.js";
 import {
   categorizeToolError,
   detectReasoningRejection,
@@ -95,8 +91,6 @@ export { steeringConfig } from "./configPanel.js";
 const BLOCK_AFTER_REMINDERS = 3;
 /** Cap on the per-tool error-history map (upstream's default). */
 const MAX_ERROR_HISTORY = 100;
-/** DSH's captured minimal-mode output budget — pinned on the bootstrap request. */
-const BOOTSTRAP_MAX_TOKENS = 256000;
 /** customType for steering notes. LLM-visible (unlike …status output). */
 const STEERING_MESSAGE_TYPE = "ceulen-steering";
 
@@ -128,28 +122,12 @@ export default function steeringModule(pi: ExtensionAPI): void {
   // reinforcement) stashed here and appended to the CURRENT user message by
   // before_provider_request — never the system prompt (the cache head).
   let pendingGuidance: string | undefined;
-  let bootstrapGuidance: string | undefined;
   // Effective settings — refreshed per turn (before_agent_start) and at
-  // session_start (the anchor bootstrap keys off dsAnchor/weNeed).
+  // session_start.
   let settings: SteeringSettings = readSteeringSettings();
 
-  // DeepSeek V4 Pro / V4.1 Flash minimal-mode anchor state.
-  // Invariant: anchorBootstrapping = dsAnchor && target && !anchorPromoted.
-  let anchorReady = false;
-  let anchorPromoted = false;
-  let anchorRunActive = false;
-  let anchorInspectedCount = 0;
-  let anchorWarned = false;
-  // Last-known thinking level (thinking_level_select) — surfaced in status
-  // because the DSH minimal-mode recipe requires max thinking.
+  // Last-known thinking level (thinking_level_select) — surfaced in status.
   let currentThinking: string | undefined;
-  // Ring buffer of anchor decisions — surfaced by /steering so the bootstrap can
-  // be verified without any debug env.
-  const anchorTrace: string[] = [];
-  function anchorTracePush(line: string) {
-    anchorTrace.push(`${new Date().toISOString().slice(11, 19)} ${line}`);
-    if (anchorTrace.length > 8) anchorTrace.shift();
-  }
 
   const reminderCounts = new Map<string, number>();
   const errorHistory = new Map<string, { count: number; lastCategory: ErrorCategory }>();
@@ -164,60 +142,10 @@ export default function steeringModule(pi: ExtensionAPI): void {
     return detectFamily(model) ?? detectFamily(sessionModel);
   }
 
-  // Anchor target: check BOTH ctx.model and session-captured model — proxies
-  // rewrite ctx.model between hooks (see family() above for the same defense).
-  function anchorTarget(model?: { id?: string }): boolean {
-    return settings.dsAnchor && (isAnchorTarget(model?.id) || isAnchorTarget(sessionModel?.id));
-  }
-
-  function warnAnchorOnce(ctx: ExtensionContext, message: string) {
-    if (anchorWarned) return;
-    anchorWarned = true;
-    try { ctx.ui?.notify?.(message, "warning"); } catch { /* no UI */ }
-  }
-
-  // Scan durable entries for a promotion signal; fail-open on error.
-  function scanAnchorEntries(ctx: ExtensionContext) {
-    if (anchorPromoted) return;
-    try {
-      const entries = ctx.sessionManager.getEntries() as unknown[];
-      const from = entries.length >= anchorInspectedCount ? anchorInspectedCount : 0;
-      if (hasPromotionSignal(entries.slice(from) as never)) anchorPromoted = true;
-      anchorInspectedCount = entries.length;
-      if (!anchorReady) anchorReady = true;
-    } catch {
-      anchorPromoted = true;
-      warnAnchorOnce(ctx, "steering: ds-anchor session inspection failed; full catalog exposed");
-    }
-  }
-
-  function anchorBootstrapping(model?: { id?: string }): boolean {
-    // Target check per hook — proxies rewrite ctx.model between hooks WITHOUT
-    // firing model_select (e.g. a session requested as flash that is served
-    // deepseek-v4-pro). Requiring a session_start-latched ready flag silently
-    // skipped the bootstrap for such sessions — the exact failure observed in
-    // a live a2a gateway session. anchorReady is display-only here.
-    const target = anchorTarget(model);
-    if (target && !anchorReady) anchorReady = true;
-    // Plan mode hard-blocks the mutator tools (str_replace_editor is in
-    // plan's BLOCKED_TOOLS), so the DSH pair can never reach the payload.
-    // Defer — not fail-open — so the session stays anchorable and the
-    // fail-open warning never fires: plan-mode replies promote naturally via
-    // the entries scan, and with no replies the bootstrap engages on the
-    // first post-exit turn (permission-module precedent: plan-bridge).
-    if (isPlanActive()) return false;
-    return target && !anchorPromoted;
-  }
-
   // ── /steering ──
   pi.registerCommand("steering", {
-    description: "Show per-model-family steering state: active family, flags, ds-anchor, prompt-cache stats.",
+    description: "Show per-model-family steering state: active family, flags, prompt-cache stats.",
     handler: async (_args, cmdCtx) => {
-      const anchorActive = anchorTarget(cmdCtx.model); // includes sessionModel fallback
-      const anchorState = !anchorActive || !anchorReady
-        ? "off"
-        : isPlanActive() && !anchorPromoted ? "deferred (plan mode)"
-        : anchorPromoted ? "promoted" : "bootstrapping";
       const totalErrors = [...errorHistory.values()].reduce((sum, e) => sum + e.count, 0);
       const status = [
         "## steering status",
@@ -233,9 +161,7 @@ export default function steeringModule(pi: ExtensionAPI): void {
         `  Strict Serena (DeepSeek V4): ${settings.strictSerena ? `on (block after ${BLOCK_AFTER_REMINDERS} reminders)` : "off"}`,
         `  Reasoning strip: ${settings.stripReasoning ? "on" : "off"}`,
         `  Leaked content cleaning: always on for detected families`,
-        `  ds-anchor (V4 Pro / V4.1 Flash): ${anchorState}`,
-        `  We-need directive (bootstrap): ${settings.weNeed ? "on" : "off"}`,
-        `  Thinking level: ${currentThinking ?? "unknown"}${currentThinking !== "max" && anchorActive ? " (recipe wants max)" : ""}`,
+        `  Thinking level: ${currentThinking ?? "unknown"}`,
         `  Super Power turns: ${turnCounter}`,
         "",
         ...(cacheStats.input > 0
@@ -258,7 +184,6 @@ export default function steeringModule(pi: ExtensionAPI): void {
             })()
           : []),
         `**Errors:** ${totalErrors} total${lastErrorInfo ? `, last: ${lastErrorInfo.category} on ${lastErrorInfo.toolName}` : ""}`,
-        ...(anchorTrace.length > 0 ? ["", "**ds-anchor trace:**", ...anchorTrace.map((l) => `  ${l}`)] : []),
       ];
       cmdCtx.ui.notify(status.join("\n"), "info");
     },
@@ -270,18 +195,8 @@ export default function steeringModule(pi: ExtensionAPI): void {
     settings = readSteeringSettings(ctx);
     // Capture the session's initial thinking level: thinking_level_select only
     // fires on CHANGES, so a session born at max would otherwise show "unknown"
-    // — exactly the case the DSH recipe cares about.
+    // — the value the status line should report.
     currentThinking = ctx.thinkingLevel;
-    // ds-anchor: reset and init from durable state (resume of a session that
-    // already has an assistant reply = instantly promoted, no bootstrap).
-    anchorReady = anchorTarget(ctx.model);
-    anchorPromoted = false;
-    anchorRunActive = false;
-    anchorInspectedCount = 0;
-    anchorWarned = false;
-    anchorTrace.length = 0; // per-session trace — never leak prior-session lines
-    anchorTracePush(`session_start: requested=${ctx.model?.id ?? "?"}${anchorTarget(ctx.model) ? " → target" : " → not target"}`);
-    scanAnchorEntries(ctx);
     activeFamily = null;
     hasErrorThisTurn = false;
     lastErrorInfo = null;
@@ -296,35 +211,19 @@ export default function steeringModule(pi: ExtensionAPI): void {
     cacheStats.hitTurns = 0;
     cacheStats.missTurns = 0;
     pendingGuidance = undefined;
-    bootstrapGuidance = undefined;
   });
 
-  // ── thinking_level_select: track the level (max is required by the DSH recipe) ──
+  // ── thinking_level_select: track the level ──
   pi.on("thinking_level_select", (event) => { currentThinking = event.level; });
 
-  // ── model_select: keep the latched model in sync + re-init the anchor when
-  //    switching to/from a target ──
-  pi.on("model_select", (event, ctx) => {
-    // The stale-sessionModel fallback would otherwise keep matching the OLD
-    // target after a /model switch away (bootstrap firing on e.g. flash,
-    // pinning max_tokens and hiding tools for a non-target model).
+  // ── model_select: keep the latched model in sync ──
+  pi.on("model_select", (event) => {
+    // The stale-sessionModel fallback in family() would otherwise keep
+    // matching the OLD family after a /model switch away.
     sessionModel = event.model ? { id: event.model.id, provider: event.model.provider } : undefined;
-    if (isAnchorTarget(event.model?.id)) {
-      if (!anchorReady) {
-        anchorReady = true;
-        anchorPromoted = false;
-        anchorInspectedCount = 0;
-        scanAnchorEntries(ctx);
-      }
-      return;
-    }
-    // Switched away (or to a non-target): anchor goes inert.
-    anchorReady = false;
-    anchorPromoted = false;
-    anchorRunActive = false;
   });
 
-  // ── before_agent_start: anchor bootstrap, static prompt blocks, dynamic guidance ──
+  // ── before_agent_start: static prompt blocks + dynamic guidance ──
   //
   // Cache-stability split: the system prompt is the byte-stable HEAD of the
   // prefix cache — DeepSeek (exact prefix) and GLM (Z.ai automatic
@@ -354,21 +253,8 @@ export default function steeringModule(pi: ExtensionAPI): void {
     const hidden = event.systemPromptOptions?.hiddenTools;
     const directTools = hidden?.length ? activeForHint.filter((name) => !hidden.includes(name)) : activeForHint;
 
-    // Read-only child loadouts, codemode-only, plan mode and custom runs keep
-    // their prompt and tools. Wire-level validation below is still authoritative.
-    anchorRunActive = false;
-    if (!isCustomRun && anchorBootstrapping(ctx.model)) {
-      scanAnchorEntries(ctx);
-      if (!anchorPromoted && BOOTSTRAP_TOOLS.every((name) => directTools.includes(name))) {
-        anchorRunActive = true;
-      } else if (!anchorPromoted) {
-        anchorTracePush("bootstrap skipped: bash/str_replace_editor not declared");
-      }
-    }
-
     remindedThisTurn = false;
     pendingGuidance = undefined;
-    bootstrapGuidance = undefined;
     if (!activeFamily) return;
 
     const dynamicParts: string[] = [];
@@ -390,9 +276,6 @@ export default function steeringModule(pi: ExtensionAPI): void {
     // Hints heuristically read the USER's task text: a custom-triggered run has
     // no prompt, and hinting off a machine message would be noise.
     const runPrompt = !isCustomRun && "prompt" in event ? event.prompt : "";
-    if (settings.firstToolHints && anchorRunActive && readUncertainPathHint(runPrompt)) {
-      bootstrapGuidance = "Resolve the bare filename inside the current workspace with bash (`find . -name ...`), not by searching from `/`.";
-    }
     if (settings.firstToolHints && !isCustomRun && directTools.includes("bash")) {
       const runHint = runTaskFirstToolHint(runPrompt);
       if (runHint) dynamicParts.push(runHint);
@@ -447,40 +330,13 @@ export default function steeringModule(pi: ExtensionAPI): void {
     return systemPrompt === event.systemPrompt ? undefined : { systemPrompt };
   });
 
-  // ── before_provider_request: anchor payload + dynamic guidance + history cleaning ──
+  // ── before_provider_request: dynamic guidance + history cleaning ──
   //
   // before_provider_headers / after_provider_response are NOT registered here —
   // the zai module owns those (fast-mode + client signing).
   pi.on("before_provider_request", (event, ctx) => {
     if (!family(ctx.model)) return;
     let payload: unknown = event.payload;
-    // ds-anchor bootstrap: replace the provider payload's tools with the
-    // byte-exact DSH Minimal pair. Request-level only — Pi's global active-tool
-    // state is untouched; execution routes to the registered tools by name.
-    if (anchorBootstrapping(ctx.model) && anchorRunActive) {
-      const p = payload as Record<string, unknown> | undefined;
-      const filtered = dshBootstrapTools(p?.tools);
-      const minimal = filtered.ok && withMinimalPrompt(p, settings.weNeed ? WE_NEED_DIRECTIVE + MINIMAL_SYSTEM_PROMPT : MINIMAL_SYSTEM_PROMPT);
-      if (!minimal) {
-        const reason = filtered.reason ?? "system prompt unavailable in payload";
-        anchorPromoted = true; // fail-open
-        anchorRunActive = false;
-        anchorTracePush(`FAIL-OPEN: ${reason}`);
-        warnAnchorOnce(ctx, `steering: ds-anchor ${reason}; bootstrap disabled, full prompt and catalog preserved`);
-      } else {
-        // max_tokens: the DSH captured minimal-mode payload sent 256000, and
-        // dsh-anchored-standard issue #11 isolated the output budget as a
-        // trajectory lever. Match it on the bootstrap request only. Exactly one
-        // budget field is emitted — the other is dropped from the spread so a
-        // payload carrying both can't send conflicting fields.
-        const other = minimal.max_completion_tokens !== undefined ? "max_completion_tokens" : "max_tokens";
-        const dropped = other === "max_tokens" ? "max_completion_tokens" : "max_tokens";
-        const { [dropped]: _omit, ...rest } = minimal;
-        const maxTokens = Math.min(BOOTSTRAP_MAX_TOKENS, ctx.model?.maxTokens ?? BOOTSTRAP_MAX_TOKENS);
-        payload = { ...rest, tools: filtered.tools, [other]: maxTokens };
-        anchorTracePush(`bootstrap: minimal prompt engaged; tools=[bash,str_replace_editor] + ${other}=${maxTokens} sent to ${ctx.model?.id ?? "?"}`);
-      }
-    }
     // Append per-turn dynamic guidance to the current user message (request
     // tail) so the system-prompt cache head stays byte-identical across turns
     // (both DeepSeek exact-prefix and GLM Z.ai content-similarity caches).
@@ -488,7 +344,7 @@ export default function steeringModule(pi: ExtensionAPI): void {
     // prompt): mid-turn rounds end with tool results, where re-appending the
     // hint reads as a fresh repeated demand and loops strict models into
     // re-running bash ("I've been complying") instead of settling.
-    const guidance = anchorRunActive ? bootstrapGuidance : pendingGuidance;
+    const guidance = pendingGuidance;
     if (guidance && tailIsPlainUserPrompt(payload)) {
       const withGuidance = appendGuidanceToLastUserMessage(payload, guidance);
       if (withGuidance !== payload) payload = withGuidance;
@@ -533,30 +389,9 @@ export default function steeringModule(pi: ExtensionAPI): void {
   // ── agent_end: the per-turn steering latch closes with the run ──
   pi.on("agent_end", () => { remindedThisTurn = false; });
 
-  // ── agent_settled: end of the anchor run window ──
-  pi.on("agent_settled", () => { anchorRunActive = false; });
-
-  // ── turn_end: anchor promotion + prompt-cache usage bookkeeping ──
+  // ── turn_end: prompt-cache usage bookkeeping ──
   pi.on("turn_end", (event) => {
-    // ds-anchor: promote only on a DURABLE assistant reply — an error/aborted
-    // bootstrap request (429, network blip, 400 from the injected payload) must
-    // NOT silently promote the session (matches hasPromotionSignal's
-    // non-empty-content semantics; keeps the retry anchored).
     const msg = event.message as unknown as AssistantLike;
-    if (anchorRunActive && msg.role === "assistant") {
-      const durable =
-        msg.stopReason !== "error" &&
-        msg.stopReason !== "aborted" &&
-        Array.isArray(msg.content) &&
-        msg.content.length > 0;
-      if (durable) {
-        anchorPromoted = true;
-        anchorRunActive = false;
-        anchorTracePush("promoted: first durable assistant reply received");
-      } else {
-        anchorTracePush(`bootstrap: reply not durable (stopReason=${msg.stopReason ?? "?"}) — retry stays anchored`);
-      }
-    }
     // turn_end fires once per assistant LLM call (agent-loop emits per round),
     // so each message.usage is a single API call — no double-counting.
     if (msg.role !== "assistant") return;
@@ -584,16 +419,6 @@ export default function steeringModule(pi: ExtensionAPI): void {
   pi.on("tool_call", (event, ctx) => {
     const f = family(ctx.model);
     if (!f) return;
-
-    // ds-anchor bootstrap: the payload declared only bash + str_replace_editor
-    // (before_provider_request), so block a hallucinated name instead of
-    // burning a turn — the model must use the declared pair.
-    if (anchorBootstrapping(ctx.model) && anchorRunActive) {
-      if (!BOOTSTRAP_TOOLS.includes(event.toolName)) {
-        return { block: true, reason: `steering: ${event.toolName} is unavailable during the bootstrap request; use bash or str_replace_editor (command: "view" to read files).` };
-      }
-      return;
-    }
 
     // A Serena call is the behavior we steer TOWARD — re-arm the per-turn latch.
     if (event.toolName.startsWith("serena_")) { remindedThisTurn = false; return; }

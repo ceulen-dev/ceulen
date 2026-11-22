@@ -100,7 +100,7 @@ function makeSessionRunner(ctx: ExtensionContext, cfg?: A2AConfig): SessionRunne
     });
     // The loader must NOT receive the inMemory settingsManager: it would then
     // resolve zero extension packages and the child session would run without
-    // any host extensions (pi-model-tools' ds-anchor bootstrap included).
+    // any host extensions.
     // Letting DefaultResourceLoader fall back to SettingsManager.create(cwd,
     // agentDir) loads the real on-disk settings/packages — the same path
     // pi-subagent's runner uses.

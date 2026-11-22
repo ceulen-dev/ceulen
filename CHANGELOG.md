@@ -1,4 +1,49 @@
 # Changelog
+## 0.29.0 — 2026-11-22
+
+**The ds-anchor is gone; DeepSeek gets the composition DSH actually ships.**
+
+- **`ds-anchor` DELETED** (steering). The first-request bootstrap — swap the
+  wire prompt to the DSH minimal persona and the tool list to
+  `bash`/`str_replace_editor` — was measured to make DeepSeek V4.1 Flash
+  *worse*: 3/5 on cold tool fixtures with it on versus 5/5 with it off and 5/5
+  with steering unloaded, because the pair-only request #1 hides `codemode` and
+  `tool_search` and explicit requests for them ended without any tool call
+  before promotion. DeepSeek Harness itself dropped that composition on
+  2026-09-03 ("one file-mutation interface = the shell"); its benchmark scores
+  belong to the persistent-shell whole-task composition, not a first-round
+  bootstrap. Removed with it: `steering.dsAnchor`, `steering.weNeed`, both
+  `/config` rows, the `/steering` anchor state and trace, and the anchor tests.
+  Existing settings files need no migration — the reader ignores unknown keys.
+  Everything else in steering (first-tool hints, selection guidance, strict
+  Serena, reasoning strip, error recovery, apply_patch preference) is unchanged.
+- **`repair.persistentBash` (new, default off)** brings the DSH
+  `tool-bash-persistent` behavior: ONE long-lived `bash --noprofile --norc` per
+  session over pi's own `BashOperations` seam, so working directory, exported
+  variables, functions, and background jobs survive across bash calls. Framing
+  is DSH's single physical line — `command builtin eval $'…'; command builtin
+  printf '<marker>%s\n' "$?"` — so a syntactically incomplete command is a
+  syntax error instead of a swallowed completion marker. `command builtin` (not
+  bare, not `builtin` alone) is load-bearing: `printf()`, `eval()`, and even
+  `builtin()` are shadowable by a function the model defined in an earlier call,
+  and a suppressed marker makes a *successful* command hang until the timeout
+  (`builtin` is itself resolved by name; `command` is what escapes that).
+  Reset-never-repair: exit, timeout, abort, or shell death kills the process
+  group and the next call starts fresh.
+- **A default per-command deadline (300 s)** applies when the caller supplies no
+  `timeout`. pi's bash timeout is optional, and without a floor one stuck command
+  would wedge the shell *and every queued call behind it* forever with no reset
+  to recover by. An explicit `timeout` still wins.
+- **Plan mode always runs one-shot.** While plan mode is active the wrapper
+  delegates to pi's stateless local shell: the plan gate auto-allows reads by
+  command text, and a shell retaining a pre-plan `cd`, function, or alias could
+  change what that text actually does. The persistent shell is left untouched —
+  verified by process identity (same `$$` before and after, different per-call
+  `$$` inside) — its pre-plan state resumes on exit, and plan-mode mutations are
+  discarded. While `persistentBash` is on, `autoBg` is suspended: a
+  backgrounded queued exec would park later foreground calls behind the job, and
+  the shell's own `&` backgrounding is the taught model.
+
 ## 0.28.2 — 2026-11-20
 
 - DeepSeek V4.1 Flash gets the same minimal-mode bootstrap as V4 Pro, including

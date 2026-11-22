@@ -221,9 +221,9 @@ export const MODULES: ModuleEntry[] = [
   // notify: harmless desktop ping (bell fallback), herdr multi-pane ergonomics.
   { name: "notify", category: "Tools", describe: "Desktop notification tool: ping the user when long work settles or input is needed (osascript / notify-send / bell).", load: notifyModule, deferredTools: ["notify"] },
   // Steering sees the prompt and tool loadout after the other composers run
-  // (including RTK). The anchor itself rewrites only the first wire payload.
+  // (including RTK), so it is the last system-prompt composer.
   { name: "rtk", category: "Shell", describe: "Route shell commands through RTK where RTK supports them; chains and unsupported commands pass through.", load: rtkModule, config: rtkConfig },
-  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): tool guidance, reasoning strip, error recovery, and a minimal-mode anchor for V4 Pro / V4.1 Flash.", load: steeringModule, config: steeringConfig },
+  { name: "steering", category: "Model", describe: "Per-model-family steering (DeepSeek/GLM): tool guidance, reasoning strip, error recovery.", load: steeringModule, config: steeringConfig },
   // ── Shell ──────────────────────────────────────────────────────────────
   // Permission after rtk: persistent allow/ask/deny gating. Inert until rules
   // exist; defers to plan mode via the shared plan-bridge flag (order-free).

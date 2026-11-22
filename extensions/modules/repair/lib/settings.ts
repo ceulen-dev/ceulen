@@ -31,6 +31,9 @@ export interface RepairSettings {
   autoBg: boolean;
   /** Foreground threshold (seconds) before auto-backgrounding. */
   autoBgSecs: number;
+  /** One persistent bash shell per session (cwd/env/jobs survive across calls).
+   *  Binds at load — the shell description sits in the cache-safe request head. */
+  persistentBash: boolean;
 }
 
 export const DEFAULT_REPAIR_SETTINGS: RepairSettings = {
@@ -40,6 +43,7 @@ export const DEFAULT_REPAIR_SETTINGS: RepairSettings = {
   autoGenGuard: true,
   autoBg: false,
   autoBgSecs: 120,
+  persistentBash: false,
 };
 
 function agentDir(): string {
@@ -63,7 +67,7 @@ function section(json: Record<string, unknown> | null, key: string): Record<stri
 /** Merge one settings layer's `repair` keys over out (field-wise override). */
 function mergeLayer(out: RepairSettings, json: Record<string, unknown> | null): void {
   const s = section(json, "repair");
-  for (const key of ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg"] as const) {
+  for (const key of ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg", "persistentBash"] as const) {
     if (typeof s[key] === "boolean") out[key] = s[key];
   }
   if (typeof s.autoBgSecs === "number" && Number.isFinite(s.autoBgSecs)) {

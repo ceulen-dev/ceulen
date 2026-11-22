@@ -63,19 +63,6 @@ export function buildSteeringGroups(cfg: SteeringSettings): PanelGroup[] {
           defaultValue: true,
           description: "Strip accumulated reasoning_content from prior turns (prefix-cache stability; prevents provider 400s).",
         }),
-        row("steering.dsAnchor", "DS minimal-mode anchor", "toggle", cfg.dsAnchor, (v) => {
-          cfg.dsAnchor = Boolean(v);
-        }, {
-          defaultValue: true,
-          warning: "V4 Pro and V4.1 Flash: request #1 uses only bash and str_replace_editor when both are declared. The full prompt and catalog return after the first reply.",
-          description: "DeepSeek Harness minimal-mode bootstrap. Skipped in plan mode and restricted tool loadouts without the tool pair.",
-        }),
-        row("steering.weNeed", "We-need directive", "toggle", cfg.weNeed, (v) => {
-          cfg.weNeed = Boolean(v);
-        }, {
-          defaultValue: false,
-          description: "A/B knob: prepend the 'We need…' thinking directive to the bootstrap prompt.",
-        }),
         row("steering.thinkTool", "Think scratchpad tool", "toggle", cfg.thinkTool, (v) => {
           cfg.thinkTool = Boolean(v);
         }, {
@@ -95,8 +82,6 @@ const OWNED_KEYS = [
   "steering.superpowerPrompt",
   "steering.strictSerena",
   "steering.stripReasoning",
-  "steering.dsAnchor",
-  "steering.weNeed",
   "steering.thinkTool",
 ];
 

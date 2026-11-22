@@ -71,13 +71,20 @@ export function buildRepairGroups(cfg: RepairSettings): PanelGroup[] {
           defaultValue: DEFAULT_REPAIR_SETTINGS.autoBgSecs,
           description: "Seconds a foreground bash call may run before it is auto-backgrounded.",
         }),
+        row("repair.persistentBash", "Persistent bash shell", "toggle", cfg.persistentBash, (v) => {
+          cfg.persistentBash = v === true;
+        }, {
+          defaultValue: DEFAULT_REPAIR_SETTINGS.persistentBash,
+          description: "One bash per session: cwd, exported variables, functions, and background jobs survive across calls (DeepSeek Harness parity). Plan mode always runs one-shot.",
+          warning: "Binds at session start — applies to the next session. While on, auto-background bash is suspended: background long jobs inside the shell with '&'.",
+        }),
       ],
     },
   ];
 }
 
 const OWNED_PREFIX = "repair.";
-const BOOL_KEYS = ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg"] as const;
+const BOOL_KEYS = ["arguments", "editRetry", "guards", "autoGenGuard", "autoBg", "persistentBash"] as const;
 
 /** repair's ModuleConfig for the central /config panel. The factory receives
  *  the module's guarded pi but needs nothing from it — settings live in the

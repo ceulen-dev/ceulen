@@ -13,10 +13,13 @@
 //     "superpowerPrompt": "",      // custom text; empty = built-in
 //     "strictSerena": false,       // escalate dedicated-tool misses to a block
 //     "stripReasoning": true,      // drop accumulated reasoning_content
-//     "dsAnchor": true,            // V4 Pro / V4.1 Flash minimal-mode bootstrap
-//     "weNeed": false,             // A/B: "We need…" bootstrap directive
 //     "thinkTool": false           // register the OMP-parity think scratchpad
 //   }
+//
+// The `dsAnchor` / `weNeed` keys (DSH minimal-mode bootstrap) were DELETED
+// 2026-11 with the anchor itself — the A/B evidence showed it hurt DeepSeek
+// Flash cold tool use and DSH dropped that composition. Unknown keys are
+// ignored by the reader, so existing settings files need no migration.
 
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import os from "node:os";
@@ -31,8 +34,6 @@ export interface SteeringSettings {
   superpowerPrompt: string;
   strictSerena: boolean;
   stripReasoning: boolean;
-  dsAnchor: boolean;
-  weNeed: boolean;
   /** Register the OMP-parity `think` scratchpad tool. Presence binds at load. */
   thinkTool: boolean;
 }
@@ -44,8 +45,6 @@ export const DEFAULT_STEERING_SETTINGS: SteeringSettings = {
   superpowerPrompt: "",
   strictSerena: false,
   stripReasoning: true,
-  dsAnchor: true,
-  weNeed: false,
   thinkTool: false,
 };
 
@@ -79,7 +78,7 @@ function section(json: Record<string, unknown> | null): Record<string, unknown> 
 /** Merge one settings layer's `steering` keys into out. */
 function mergeLayer(out: SteeringSettings, json: Record<string, unknown> | null): void {
   const s = section(json);
-  for (const key of ["firstToolHints", "selectionGuidance", "superpower", "strictSerena", "stripReasoning", "dsAnchor", "weNeed", "thinkTool"] as const) {
+  for (const key of ["firstToolHints", "selectionGuidance", "superpower", "strictSerena", "stripReasoning", "thinkTool"] as const) {
     if (typeof s[key] === "boolean") out[key] = s[key] as boolean;
   }
   if (typeof s.superpowerPrompt === "string") out.superpowerPrompt = s.superpowerPrompt.trim();

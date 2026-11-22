@@ -42,6 +42,7 @@ import {
 } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
 import { abortAllBgJobs, bashAutoBgClause, setBgDeliveryEnabled, wrapWithAutoBg } from "./lib/auto-bg.js";
+import { killPersistentShells, persistentBashClause, wrapWithPersistentShell } from "./lib/persistent-bash.js";
 import {
   computeRetryEdit,
   isEditMismatchError,
@@ -658,6 +659,9 @@ export default function repairModule(pi: ExtensionAPI) {
   // byte-stable per session (never per-turn guidance).
   const autoBgOn = settings.autoBg;
   const autoBgSecs = settings.autoBgSecs;
+  // Same bind-at-load contract: the persistent-bash description half sits in
+  // the cache-safe request head.
+  const persistentBashOn = settings.persistentBash;
 
   const repairCounts = new Map<string, number>();
   // Per-file edit-mismatch counters — escalate to apply_patch after repeated
@@ -679,11 +683,17 @@ export default function repairModule(pi: ExtensionAPI) {
     find: createFindToolDefinition,
     ls: createLsToolDefinition,
     bash: (cwd: string) => {
-      const def = createBashToolDefinition(
-        cwd,
-        autoBgOn ? { operations: wrapWithAutoBg(createLocalBashOperations(), { pi, thresholdSecs: autoBgSecs }) } : undefined,
-      );
-      return { ...def, description: `${def.description}\n\n${bashAutoBgClause(autoBgOn, autoBgSecs)}` };
+      const local = createLocalBashOperations();
+      // ponytail: persistent wins over autoBg when both are on — auto-backgrounding
+      // a QUEUED persistent exec would park later foreground calls behind a long
+      // job, while the shell's own `&` backgrounding covers the same need (and the
+      // description teaches it). /repair status discloses the suspension.
+      const operations = persistentBashOn
+        ? wrapWithPersistentShell(local)
+        : autoBgOn ? wrapWithAutoBg(local, { pi, thresholdSecs: autoBgSecs }) : undefined;
+      const def = createBashToolDefinition(cwd, operations ? { operations } : undefined);
+      const clause = persistentBashOn ? persistentBashClause() : bashAutoBgClause(autoBgOn, autoBgSecs);
+      return { ...def, description: `${def.description}\n\n${clause}` };
     },
   };
   for (const factory of Object.values(toolFactories)) {
@@ -796,6 +806,18 @@ export default function repairModule(pi: ExtensionAPI) {
       abortAllBgJobs(true);
     });
   }
+  if (persistentBashOn) {
+    // Keyed kill: a child session's shell dies with the child while the HOST's
+    // shell (a different PI_SESSION_ID) is untouched — the scoping is inherent,
+    // so no isChildSession gate is needed here.
+    pi.on("session_shutdown", (_event, ctx) => {
+      try {
+        killPersistentShells(ctx?.sessionManager?.getSessionId?.());
+      } catch {
+        /* a dying session must not throw */
+      }
+    });
+  }
 
   // ── tool_call: destructive-bash + read-on-guessed-path guards (ALL models).
   // Upstream gated these on a detected family; repair is the model-agnostic
@@ -847,7 +869,7 @@ export default function repairModule(pi: ExtensionAPI) {
 
   // ── /repair (bare = status) ──
   pi.registerCommand("repair", {
-    description: "Show tool-hardening status: repair counts, guards, bash auto-background.",
+    description: "Show tool-hardening status: repair counts, guards, bash auto-background, persistent shell.",
     handler: async (_args, ctx) => {
       const live = readRepairSettings(ctx?.cwd);
       const total = [...repairCounts.values()].reduce((a, b) => a + b, 0);
@@ -860,6 +882,7 @@ export default function repairModule(pi: ExtensionAPI) {
         `  Tool-call guards: ${live.guards ? "on" : "off"}`,
         `  Auto-generated write guard: ${live.autoGenGuard ? "on" : "off"}`,
         `  Auto-background bash: ${live.autoBg ? `on @${live.autoBgSecs}s` : "off"}${live.autoBg !== autoBgOn || live.autoBgSecs !== autoBgSecs ? ` (bound at load: ${autoBgOn ? `on @${autoBgSecs}s` : "off"} — next session applies)` : ""}`,
+        `  Persistent bash: ${live.persistentBash ? "on" : "off"}${live.persistentBash !== persistentBashOn ? ` (bound at load: ${persistentBashOn ? "on" : "off"} — next session applies)` : ""}${persistentBashOn && (live.autoBg || autoBgOn) ? " · auto-background suspended while persistent is on" : ""}`,
         "",
         `**Repairs this session:** ${total} total`,
       ];

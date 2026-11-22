@@ -28,9 +28,8 @@ describe("/steering status", () => {
     assert.match(text, /Super Power Mode \(DeepSeek V4\): off/);
     assert.match(text, /Strict Serena \(DeepSeek V4\): off/);
     assert.match(text, /Reasoning strip: on/);
-    assert.match(text, /ds-anchor \(V4 Pro \/ V4\.1 Flash\): off/);
-    assert.match(text, /We-need directive \(bootstrap\): off/);
     assert.match(text, /Super Power turns: 0/);
+    assert.doesNotMatch(text, /ds-anchor/, "the anchor was deleted — no status surface may reference it");
   });
 
   it("reflects settings rows and the custom Super Power prompt", () => {
@@ -43,20 +42,19 @@ describe("/steering status", () => {
     assert.match(text, /Reasoning strip: off/);
   });
 
-  it("flags a thinking level below the recipe's max while the anchor is active", () => {
+  it("reports the thinking level and follows a level change", () => {
     const h = createFakePi();
     const ctx = h.ctx("combo/deepseek-v4.1-flash", { thinkingLevel: "high" });
     h.fire("session_start", {}, ctx);
     h.fire("before_agent_start", { prompt: "x", systemPrompt: "FULL", systemPromptOptions: {} }, ctx);
     const below = h.status(ctx);
-    assert.match(below, /Thinking level: high \(recipe wants max\)/);
-    assert.match(below, /ds-anchor \(V4 Pro \/ V4\.1 Flash\): bootstrapping/);
-    // A level change past max clears the marker.
+    assert.match(below, /Thinking level: high/);
+    assert.doesNotMatch(below, /recipe wants max/);
     h.fire("thinking_level_select", { level: "max", previousLevel: "high" }, ctx);
     assert.match(h.status(ctx), /Thinking level: max$/m);
   });
 
-  it("shows the error tally and the ds-anchor trace ring", () => {
+  it("shows the error tally", () => {
     const h = createFakePi();
     const ctx = h.ctx("deepseek-v4-pro");
     h.setEntries([]);
@@ -66,7 +64,6 @@ describe("/steering status", () => {
     h.fire("tool_execution_end", { toolName: "read", isError: true, result: "ENOENT: no such file or directory" }, ctx);
     const text = h.status(ctx);
     assert.match(text, /\*\*Errors:\*\* 1 total, last: path_not_found on read/);
-    assert.match(text, /\*\*ds-anchor trace:\*\*/);
-    assert.match(text, /bootstrap: minimal prompt engaged/);
+    assert.doesNotMatch(text, /\*\*ds-anchor trace:\*\*/);
   });
 });
