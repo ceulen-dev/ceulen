@@ -1273,7 +1273,27 @@ metadata listing can report the OLD version for several minutes after the job
 prints `+ ceulen@<ver>`, and the tarball can 404 for ~9 minutes past that. Do
 not call a release shipped until
 `curl -o /dev/null -w '%{http_code}' https://registry.npmjs.org/ceulen/-/ceulen-<ver>.tgz`
-returns 200, then install it from a clean directory.
+returns 200. Then run the install smoke test — `scripts/smoke-install.sh <ver>
+[--require <path>]... [--forbid <path>]...` — which installs into a temporary
+directory and makes EVERY assertion fatal: npm's own exit status (captured
+without a pipe), the installed `package.json` version against the version you
+asked for, each `--require` path present, and each `--forbid` path absent.
+`--forbid` is the half that catches a deleted file coming back.
+
+Do not hand-roll this check. Doing so has produced exit codes that meant
+nothing more than once: `$?` captured after `npm install … | tail -2` reports
+`tail`, and a `node -e` that prints results without calling `process.exit`
+always exits 0 — so "PAYLOAD OK" appeared while missing files were only
+printed.
+
+Its contract test is `extensions/lib/test/smoke-install.test.sh` (7 cases:
+real payload, missing `--require`, violated `--forbid`, install failure,
+`--expect-version` mismatch, usage error, and that the report names the
+version). That test is deliberately NOT in `npm test` — it needs the registry,
+while the rest of the suite is offline (`audit-attestations.test.sh` points
+`AUDIT_REGISTRY` at a local fake server; `check-provenance-fixtures.test.sh`
+makes no network calls). Run it as part of the release flow, after the tarball
+resolves.
 
 When reporting any of those checks, read the tool's OWN exit status: `… | tail`
 and `… | grep` report the LAST command's status, so `sh script.sh 2>&1 | tail -6`
