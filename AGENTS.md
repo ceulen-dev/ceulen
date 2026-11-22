@@ -1184,7 +1184,18 @@ alone: npm attaches its OWN
 carry no SLSA build provenance. The provenance claim requires the
 `https://slsa.dev/provenance/v1` predicate in the body. Use
 `scripts/verify-provenance.sh <version>` (exits non-zero unless that predicate
-is present); it is the gate, `curl -w '%{http_code}'` is not.
+is present); it is the gate, `curl -w '%{http_code}'` is not. For a checkout
+OLD enough that the script predates it (it landed in c048d54, after the v0.29.1
+tag), the equivalent is self-contained:
+
+```sh
+curl -sS "https://registry.npmjs.org/-/npm/v1/attestations/$PKG@$VER" \
+  | grep -q 'https://slsa.dev/provenance/v1'; echo "provenance rc=$?"   # 0 = present
+```
+
+Check the exit code of the pipeline, not of a follow-up command — appending
+`&& echo OK || echo FAIL` after the grep and then reading `$?` reports the
+echo's status and always looks successful.
 
 Registry propagation lags the publish job: `npm view` and even the version
 metadata listing can report the OLD version for several minutes after the job
