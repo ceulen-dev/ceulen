@@ -1193,13 +1193,19 @@ curl -sS "https://registry.npmjs.org/-/npm/v1/attestations/$PKG@$VER" \
   | grep -q 'https://slsa.dev/provenance/v1'
 ```
 
-The snippet's OWN exit status is the verdict (0 = present). NOTHING may follow
-the `grep`: any trailing `echo "rc=$?"`, `&& echo OK`, or `|| echo FAIL` becomes
-the pipeline's last command, so the block exits 0 no matter what it printed —
-verified: with a trailing echo, a version lacking provenance printed `rc=1`
-and the script still exited 0. To display the value rather than gate on it,
-run the command with the echo as a SEPARATE step and do not treat its status
-as the check.
+The snippet's OWN exit status is the verdict (0 = present). What may follow the
+`grep` depends on the operator — verified against a version with NO provenance
+(a correct gate must exit non-zero):
+
+| form | exit | gates? |
+|---|---|---|
+| `grep -q …` alone | 1 | **yes** |
+| `grep -q … && echo OK` | 1 | **yes** — `&&` SKIPS the echo on failure, so grep's status survives. This is the readable gate. |
+| `grep -q …; echo "rc=$?"` | 0 | **no** — the echo runs unconditionally and its status replaces the result. |
+| `grep -q … \|\| echo FAIL` | 0 | **no** — the `\|\|` runs on failure and its status replaces the result. |
+
+So the maskers are `;` and `||`, not `&&`. To show the value rather than gate
+on it, use the `;` form and read the printed rc — never its exit status.
 
 Registry propagation lags the publish job: `npm view` and even the version
 metadata listing can report the OLD version for several minutes after the job
