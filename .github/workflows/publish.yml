@@ -24,6 +24,9 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm pack --dry-run
-      - run: npm publish --access public
+      # --provenance is OPT-IN: id-token: write alone publishes nothing extra.
+      # Without this flag the package carries no attestation (verified: neither
+      # 0.28.2 nor 0.29.0 had one, and the provenance endpoint 404s).
+      - run: npm publish --access public --provenance
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_API_KEY }}

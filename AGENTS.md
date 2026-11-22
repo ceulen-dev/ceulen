@@ -1170,7 +1170,21 @@ declares it). Resolves its default mode from `PI_UX_DEFAULT_MODE`, then `~/.conf
 
 ## Release flow
 
-Bump `version` in `package.json` → commit → `git tag vX.Y.Z` → push → `gh release create vX.Y.Z` — the GitHub **release** (not the tag push) triggers `publish.yml` (npm publish, provenance on). CI (`ci.yml`) runs typecheck + tests on every push/PR.
+Bump `version` in `package.json` → commit → `git tag vX.Y.Z` → push → `gh release create vX.Y.Z` — the GitHub **release** (not the tag push) triggers `publish.yml` (npm publish). CI (`ci.yml`) runs typecheck + tests on every push/PR.
+
+Provenance is `--provenance` on the publish command, NOT implied by the
+workflow's `id-token: write` (that only permits it). Everything up to and
+including 0.29.0 shipped WITHOUT an attestation — `dist.attestations` is
+absent and `registry.npmjs.org/-/npm/v1/attestations/ceulen@<ver>` 404s — so
+the flag was added to `publish.yml`. Verify a release with the attestation
+endpoint, not with the workflow's permissions block.
+
+Registry propagation lags the publish job: `npm view` and even the version
+metadata listing can report the OLD version for several minutes after the job
+prints `+ ceulen@<ver>`, and the tarball can 404 for ~9 minutes past that. Do
+not call a release shipped until
+`curl -o /dev/null -w '%{http_code}' https://registry.npmjs.org/ceulen/-/ceulen-<ver>.tgz`
+returns 200, then install it from a clean directory.
 
 ## Central config panel (config module)
 
