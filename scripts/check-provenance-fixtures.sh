@@ -10,6 +10,13 @@
 #
 # Usage: scripts/check-provenance-fixtures.sh [path-to-AGENTS.md]
 # Exit: 0 = every row reproduced; 1 = a row disagreed or the table changed shape.
+#
+# NOTE: this checks the REPO's documentation, so it needs AGENTS.md — which is
+# deliberately not in package.json `files` (npm ships extensions/skills/themes/
+# scripts + README/LICENSE/CHANGELOG). In an npm-installed copy there is no
+# table to check and the script fails with "no such file"; run it from a
+# checkout. `verify-provenance.sh` and `audit-attestations.sh` have no such
+# dependency and work from an installed package.
 set -eu
 
 DOC="${1:-$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)/AGENTS.md}"
