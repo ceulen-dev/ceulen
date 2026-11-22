@@ -1222,16 +1222,24 @@ process.stdin.on("data", (d) => { s += d; }).on("end", () => {
 '
 ```
 
-Parse the JSON — do NOT substring-match the body. A 200 whose `error` field merely
-mentions the URL, or an unrelated attestation whose `description` does, would sail
-through a `grep`, and so would an empty/absent `attestations` array. Require an
-exact `attestations[].predicateType` equality (measured: `{error:"… https://slsa.dev/provenance/v1 …"}`,
-`{attestations:[{predicateType:"…/publish/v0.1", description:"… slsa …"}]}`, `{attestations:[]}`
-and `{}` all fail the parse form and all passed `grep`). Sanity-check the
-checker itself against two negative controls before trusting a pass:
-`{error:"... https://slsa.dev/provenance/v1 ..."}` and
-`{attestations:[{predicateType:".../publish/v0.1",description:"... slsa ..."}]}`
-must both FAIL.
+Parse the JSON — do NOT substring-match the body. Require an exact
+`attestations[].predicateType` equality.
+
+What a raw `grep -q 'https://slsa.dev/provenance/v1'` gets wrong, measured on five
+200 bodies (the false POSITIVES are the dangerous ones — they report provenance
+that does not exist):
+
+| body | grep | correct |
+|---|---|---|
+| `{"attestations":[{"predicateType":"…slsa…"}]}` (genuine) | match | pass |
+| `{"error":"… https://slsa.dev/provenance/v1 …"}` | **match (false positive)** | fail |
+| `{"attestations":[{"predicateType":"…/publish/v0.1","description":"see …slsa…"}]}` | **match (false positive)** | fail |
+| `{"attestations":[]}` | no match | fail |
+| `{"ok":true}` | no match | fail |
+
+The last two happen to agree with grep, but only by accident (the URL is absent);
+they are not evidence that substring matching is safe. Sanity-check the checker
+against the two false-positive bodies before trusting a pass.
 
 Capture the body FIRST and let curl's exit decide whether it is trustworthy;
 `-f` makes an HTTP error (404 = no attestations) non-zero as well. A plain
