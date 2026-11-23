@@ -70,9 +70,15 @@ describe("runTaskFirstToolHint", () => {
     assert.ok(runTaskFirstToolHint("Lint the source files."));
     assert.ok(runTaskFirstToolHint("Execute the test suite."));
     assert.ok(runTaskFirstToolHint("Compile the TypeScript."));
+    assert.ok(runTaskFirstToolHint("Run the tests, then read the report."));
+    assert.ok(runTaskFirstToolHint("Run the tests after lunch, then read the report."));
+    assert.ok(runTaskFirstToolHint("Run the tests, then deploy after reviewing the results"));
   });
 
-  it("returns undefined for discovery/explanation tasks (no false positives)", () => {
+  it("does not force bash for discovery, explanation, or a prerequisite read", () => {
+    assert.equal(runTaskFirstToolHint("Read fixtures/runbook.txt, then run its command and report the exact stdout."), undefined);
+    assert.equal(runTaskFirstToolHint("Run the command after you read fixtures/runbook.txt"), undefined);
+    assert.equal(runTaskFirstToolHint("Run the command after reading fixtures/runbook.txt."), undefined);
     assert.equal(runTaskFirstToolHint("Find all test files for the project."), undefined);
     assert.equal(runTaskFirstToolHint("Find TypeScript test files under extensions/test."), undefined);
     assert.equal(runTaskFirstToolHint("Inspect symbols in index.ts and summarize them."), undefined);

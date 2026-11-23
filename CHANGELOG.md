@@ -1628,3 +1628,28 @@ Wave 1: first two production modules merged into the bundle.
 ## 0.1.0 — 2026-09-21
 
 Name reservation + bundle scaffold.
+## 0.31.0 — 2026-11-23
+
+DeepSeek V4 tool-selection guidance stops overriding a prerequisite read, and
+the `bash`-first hint stops mis-firing on "after" clauses.
+
+- **Selection guidance** (`steering.selectionGuidance`, DeepSeek V4 only) no
+  longer pushes one `codemode` script for every batch. It now says "use a
+  direct call for one simple step; batch independent calls in one round
+  (parallel direct calls, **or** codemode with `Promise.allSettled` to filter
+  or compute in place)". Live Herdr run on `router/combo/deepseek-v4.1-flash`:
+  the four-file sum task dropped from 2 tool rounds to 1 (four parallel
+  `read` calls, then one `bash`), which the previous codemode-first wording
+  never produced.
+- **`runTaskFirstToolHint`** used to fire on any execution verb anywhere in the
+  prompt, so "Read `fixtures/runbook.txt`, then run its command" got a
+  "FIRST tool call MUST be bash … Do NOT call read first" hint that directly
+  contradicted the read the task requires (live-observed: Flash read the file,
+  then re-read it because the reminder demanded compliance). Suppressed when a
+  read/open/review/check precedes the first execution verb, and when an
+  `after you read` / `after reading` clause makes the read a prerequisite.
+- **Scoped to the first execution clause**: "Run the tests, then deploy after
+  reviewing the results" keeps the `bash`-first hint — the review gates the
+  deploy, not the tests. An earlier revision scanned the whole suffix and
+  silently dropped the hint there.
+

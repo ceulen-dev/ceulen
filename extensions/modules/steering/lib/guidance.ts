@@ -42,7 +42,7 @@ export function deepSeekSelectionGuidance(activeTools: readonly string[], direct
     has("serena_find_symbol") && "Named code symbol → serena_find_symbol",
     has("serena_find_referencing_symbols") && "Symbol usages → serena_find_referencing_symbols",
     has("serena_get_symbols_overview") && "File symbol outline → serena_get_symbols_overview",
-    directTools.includes("codemode") && "Batch independent calls (e.g. reads of known paths) in one codemode script with Promise.allSettled; await dependencies in order. For one simple call, use the direct tool if declared.",
+    directTools.includes("codemode") && "Use a direct call for one simple step. Batch independent calls in one round (parallel direct calls, or codemode with Promise.allSettled to filter or compute in place). Await dependencies in order.",
     directTools.includes("codemode") && directTools.length < activeTools.length && "For tools not declared directly, call them through codemode (tools.<name>(args)).",
     directTools.includes("tool_search") && "To load a deferred tool for direct use, make one targeted tool_search, then call the match.",
   ].filter(Boolean);
@@ -80,6 +80,8 @@ export function applyPatchPreferenceGuidance(activeTools: readonly string[]): st
 
 // ── Prompt-aware first-tool hints ──
 
+const EXEC_VERBS_RE = /\b(run|running|execute|executing|build|building|compile|compiling|lint|linting|format|typecheck|type-check|deploy|install|start)\b/g;
+
 /**
  * Detect a clear RUN/BUILD/EXECUTE intent in the user prompt and return a
  * targeted first-tool hint that forces bash on turn 1. Returns undefined for
@@ -93,10 +95,18 @@ export function runTaskFirstToolHint(prompt: string): string | undefined {
   const p = (prompt || "").toLowerCase();
   // Execution verbs. "test" alone is intentionally excluded: "find test files"
   // is a discovery task, not an execution task.
-  const hasExecVerb = /\b(run|running|execute|executing|build|building|compile|compiling|lint|linting|format|typecheck|type-check|deploy|install|start)\b/.test(p);
-  if (!hasExecVerb) return undefined;
+  EXEC_VERBS_RE.lastIndex = 0;
+  const exec = EXEC_VERBS_RE.exec(p);
+  if (!exec) return undefined;
   // Don't misdirect prompts that are really about locating/explaining/analyzing.
   if (/\b(find|list|show|where|definition|references|outline|inspect|explain|summarize|analyze|analyse|how (do|does|to)|what)\b/.test(p)) return undefined;
+  // A prerequisite read can precede execution in text or follow it in an "after"
+  // clause — but only within the FIRST execution clause: "run the tests, then
+  // deploy after reviewing" gates the deploy, not the tests.
+  if (/\b(read|open|review|check)\b/.test(p.slice(0, exec.index))) return undefined;
+  const rest = p.slice(exec.index + exec[0].length);
+  const nextClause = /\bthen\b|(?=(?:run|running|execute|executing|build|building|compile|compiling|lint|linting|format|typecheck|type-check|deploy|install|start)\b)/.exec(rest);
+  if (/\bafter\s+(?:you\s+)?(?:read|open|review|check|reading|opening|reviewing|checking)\b/.test(nextClause ? rest.slice(0, nextClause.index) : rest)) return undefined;
   return "⚠️ THIS request is a RUN / BUILD / EXECUTE task → your FIRST tool call MUST be bash (e.g. `npm test`, `cd <pkg> && npm test`, `pytest`, `make`, `npm run <script>`). Do NOT call find / ls / read / grep first — you do not need to locate anything to run a standard command.";
 }
 
