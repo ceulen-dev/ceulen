@@ -5,7 +5,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { classifyError, extractRemediation, formatRemediation } from "../lib/helpers.js";
 import { callMunin } from "../index.js";
-import { MuninClient } from "../lib/sdk.js";
+import { MuninClient } from "../lib/sdk/index.js";
 
 /** Build an SDK-like error carrying code + details.remediation. */
 function makeStaleError(remediation: Record<string, unknown>): Error & { code: string; details: unknown } {
@@ -450,6 +450,50 @@ describe("callMunin direct-method dispatch", () => {
     // search routes through the direct method, which must see this.invoke.
     await callMunin(client, "proj_x", "search", { query: "q" });
     assert.deepEqual(invoked, ["search"]);
+  });
+});
+
+describe("callMunin ERR_CLIENT_OUTDATED", () => {
+  it("replaces the server's npm-install remediation with a ceulen upgrade", async () => {
+    const original = new Error("ERR_CLIENT_OUTDATED") as Error & { code: string; details: unknown };
+    original.code = "ERR_CLIENT_OUTDATED";
+    original.details = {
+      remediation: { url: "https://munin.example/npm-install", version_to: "1.6.0" },
+    };
+    const { client } = makeFakeClient({ invoke: () => { throw original; } });
+
+    await assert.rejects(callMunin(client, "proj", "store", { key: "k" }), (e: unknown) => {
+      const err = e as Error & { code?: string; cause?: unknown };
+      assert.match(err.message, /ceulen vendors the Munin SDK/);
+      // The server's advice (install the npm package / open the setup guide)
+      // must never reach the model — it cannot fix a vendored SDK.
+      assert.doesNotMatch(err.message, /npm-install|Setup guide/);
+      assert.equal(err.code, "ERR_CLIENT_OUTDATED");
+      assert.equal(err.cause, original, "the original error is preserved as cause");
+      return true;
+    });
+  });
+
+  it("cuts the server's install advice from the head, keeping the diagnostic", async () => {
+    // The LIVE server message (2026-11-26) ends in npm/plugin install steps —
+    // relaying them after "ceulen vendors the SDK" would contradict itself.
+    const original = new Error(
+      "Munin client @kalera/munin-sdk 1.5.0 is too old to write to this server (minimum 1.6.0). This write was NOT saved. " +
+      "Update the Munin client, restart the agent session, then retry. " +
+      "Claude Code: npm install -g @kalera/munin-claude@latest && claude plugin update munin-claude-code. " +
+      "Other MCP configs: npx -y @kalera/munin-mcp-server@latest.",
+    ) as Error & { code: string };
+    original.code = "ERR_CLIENT_OUTDATED";
+    const { client } = makeFakeClient({ invoke: () => { throw original; } });
+
+    await assert.rejects(callMunin(client, "proj", "store", { key: "k" }), (e: unknown) => {
+      const message = (e as Error).message;
+      assert.match(message, /too old to write to this server \(minimum 1\.6\.0\)/, "diagnostic head kept");
+      assert.match(message, /This write was NOT saved\./);
+      assert.match(message, /ceulen vendors the Munin SDK/);
+      assert.doesNotMatch(message, /npm install|npx -y|claude plugin update|\/npm-install/, "install advice never relayed");
+      return true;
+    });
   });
 });
 

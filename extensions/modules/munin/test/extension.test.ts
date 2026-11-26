@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { projectSettingsPath, OUTPUT_MAX_BYTES } from "../lib/helpers.js";
-import { MuninClient } from "../lib/sdk.js";
+import { MuninClient } from "../lib/sdk/index.js";
 import muninExtension, { MUNIN_PROTOCOL_HEADER } from "../index.js";
 
 const ENV_KEYS = ["MUNIN_API_KEY", "MUNIN_PROJECT", "MUNIN_BASE_URL", "PI_CODING_AGENT_DIR"] as const;
@@ -213,6 +213,24 @@ describe("munin extension", () => {
     // Both stacked prefixes strip — the result never re-presents the stack.
     assert.doesNotMatch(out.content[0].text, /Munin auth error: Munin/);
     assert.match(out.content[0].text, /fetch failed/);
+  });
+
+  it("tool_result hook classifies a rewritten client_outdated error by its message (no code on the wire)", async () => {
+    const h = harness();
+    const hook = h.handlers.tool_result[0];
+    // callMunin's client_outdated branch rewrites the message and drops the
+    // advice; only the "too old to write" phrasing survives for the hook,
+    // which re-classifies from text alone.
+    const out = await hook({
+      toolName: "munin_store",
+      isError: true,
+      content: [{
+        type: "text",
+        text: "Munin client @kalera/munin-sdk 1.6.0 is too old to write to this server (minimum 99.0.0). This write was NOT saved. ceulen vendors the Munin SDK — this is fixed by upgrading ceulen, not by installing the npm package.",
+      }],
+    });
+    assert.equal(out.details.errorType, "client_outdated");
+    assert.match(out.content[0].text, /^Munin client_outdated error: /);
   });
 
   it("tool_result hook ignores non-munin tools and successful results", async () => {

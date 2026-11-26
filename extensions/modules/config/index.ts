@@ -136,6 +136,20 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
   // so a save that re-registers a provider stays the owner's claim.
   const factories = deps?.configContribs ?? new Map<string, () => ModuleConfig>();
 
+  // A contribution FACTORY that throws runs OUTSIDE `assemble()`, so it needs
+  // its own guard — otherwise one broken module's factory still costs the
+  // whole panel. Failures are collected once per /config open and seeded into
+  // assemble()'s `failed` list, so the "Failed sections" tab discloses them and
+  // assemble() stays rebuildable (rebuildOnCommit).
+  const factoryFailures: { name: string; message: string }[] = [];
+  const contributions: { name: string; cfg: ModuleConfig }[] = [];
+  for (const [name, factory] of factories) {
+    try {
+      contributions.push({ name, cfg: factory() });
+    } catch (e) {
+      factoryFailures.push({ name, message: e instanceof Error ? e.message : String(e) });
+    }
+  }
 
   pi.registerCommand("config", {
     description: "Central settings panel for all ceulen modules.",
@@ -157,15 +171,26 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
       // The loader skips a module named in the `ceulen.disabled` settings
       // escape hatch, so its factory (and section) never renders here — the
       // settings.json key is the only way back, by design (no UI toggles).
-      const contributions = [...factories.entries()].map(([name, factory]) => ({ name, cfg: factory() }));
-
       // Assemble in OMP taxonomy order: pi settings first (they own the
       // Appearance/Model/Interaction/Context/Shell spine), then ceulen module
       // sections (functional rows only — no Enable/tool toggles), then plugins.
       const assemble = (): PanelGroup[] => {
-        const modGroups = contributions.flatMap((c) => c.cfg.groups());
+        // One throwing factory (a module reading settings it cannot parse, a
+        // pi 1.6.x API the module has not caught up with) must never cost the
+        // user the whole panel: each build is isolated, and failures surface
+        // as a "Failed sections" tab instead of an exception out of /config.
+        const failed: { name: string; message: string }[] = [...factoryFailures];
+        const safe = (name: string, build: () => PanelGroup[]): PanelGroup[] => {
+          try {
+            return build();
+          } catch (e) {
+            failed.push({ name, message: e instanceof Error ? e.message : String(e) });
+            return [];
+          }
+        };
+        const modGroups = contributions.flatMap((c) => safe(c.name, () => c.cfg.groups()));
         // Plugins' package sections precede the config module's own switch.
-        const piGroups = buildPiSettingsGroups(piSettings, piMenuLookup(ctx));
+        const piGroups = safe("pi settings", () => buildPiSettingsGroups(piSettings, piMenuLookup(ctx)));
         // Built-in tools lead the Tools tab (before the extension-dirs rows).
         const toolsAt = piGroups.findIndex((g) => g.tab === "Tools");
         piGroups.splice(toolsAt === -1 ? piGroups.length : toolsAt, 0, {
@@ -174,7 +199,14 @@ export default function configModule(pi: ExtensionAPI, deps?: ModuleLoadDeps): v
           tab: "Tools",
           rows: builtinToolRows(workingStartup),
         });
-        const all = [...piGroups, ...buildPluginsGroups(pluginsWorking), ...modGroups];
+        const all = [...piGroups, ...safe("plugins", () => buildPluginsGroups(pluginsWorking)), ...modGroups];
+        if (failed.length) {
+          all.push({
+            key: "config-errors",
+            label: "Failed sections",
+            rows: failed.map((f) => row(`config-error.${f.name}`, f.name, "info", f.message, () => {})),
+          });
+        }
         const rank = (g: PanelGroup) => {
           const at = PI_TAB_ORDER.indexOf((g.tab ?? g.label) as (typeof PI_TAB_ORDER)[number]);
           return at === -1 ? PI_TAB_ORDER.length : at;

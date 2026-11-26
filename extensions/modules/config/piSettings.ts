@@ -96,6 +96,14 @@ const IMAGE_WIDTH_CHOICES = ["60", "80", "120"] as const;
 const withCurrent = (choices: readonly string[], current: string): string[] =>
   current && !choices.includes(current) ? [current, ...choices] : [...choices];
 
+/** pi 1.6.1's transcript notice kinds (stock settings-selector.js:33-53 order). */
+const NOTICE_TOGGLES = [
+  { key: "cacheMisses", label: "Cache misses", description: "Show a notice when a response re-bills a significant part of the prompt cache" },
+  { key: "cacheWarming", label: "Cache warming", description: "Show the cost of cache warming requests" },
+  { key: "compactionCosts", label: "Compaction costs", description: "Show the cost of compactions and branch summaries" },
+  { key: "reasoningDrops", label: "Reasoning drops", description: "Show a notice when a provider drops reasoning items from a request" },
+] as const;
+
 /** Per-model override clear sentinel (stock's stepped-submenu "(clear
  *  override)" — a menu value, removed from the map on commit). */
 const CLEAR_OVERRIDE = "(clear override)";
@@ -426,12 +434,13 @@ function piRowSpecs(m: SettingsManager, lookup?: PiMenuLookup): PiRowSpec[] {
       description: "off: never; streaming: while the agent runs; idle: also between runs while continuation stays profitable.",
       set: (v) => m.setCacheWarmingMode(str(v) as never),
     },
-    {
-      key: "pi.showCacheMissNotices", tab: "Model", section: "Efficiency", label: "Cache miss notices",
-      kind: "toggle", value: m.getShowCacheMissNotices(), defaultValue: false,
-      description: "Show transcript notices for cache costs and provider recovery diagnostics.",
-      set: (v) => m.setShowCacheMissNotices(Boolean(v)),
-    },
+    // pi 1.6.1 replaced showCacheMissNotices with one toggle per notice kind.
+    ...NOTICE_TOGGLES.map((notice) => ({
+      key: `pi.notices.${notice.key}`, tab: "Model", section: "Efficiency", label: notice.label,
+      kind: "toggle" as const, value: m.getNotices()[notice.key], defaultValue: false,
+      description: notice.description,
+      set: (v: unknown) => m.setNotice(notice.key, Boolean(v)),
+    })),
     {
       key: "pi.warnings.anthropicExtraUsage", tab: "Model", section: "Warnings", label: "Anthropic extra usage",
       kind: "toggle", value: Boolean(m.getWarnings().anthropicExtraUsage), defaultValue: false,

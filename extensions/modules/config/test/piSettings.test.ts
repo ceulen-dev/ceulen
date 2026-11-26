@@ -34,6 +34,31 @@ describe("pi settings contribution", () => {
     }
   });
 
+  it("pi 1.6.1 notice kinds are four independent toggle rows", () => {
+    const m = SettingsManager.inMemory();
+    const keys = ["cacheMisses", "cacheWarming", "compactionCosts", "reasoningDrops"] as const;
+    for (const key of keys) {
+      const row = rowAt(m, `pi.notices.${key}`);
+      assert.ok(row, `row present: pi.notices.${key}`);
+      assert.equal(row.kind, "toggle");
+      assert.equal(row.value, false);
+      assert.equal(row.defaultValue, false);
+      assert.ok(row.description && row.description.length > 0, "stock description present");
+    }
+    // setNotice writes only that key — the other three keep following defaults.
+    rowAt(m, "pi.notices.cacheMisses").set(true);
+    assert.deepEqual(m.getNotices(), {
+      cacheMisses: true,
+      cacheWarming: false,
+      compactionCosts: false,
+      reasoningDrops: false,
+    });
+  });
+
+  it("the removed pi.showCacheMissNotices row is gone (pi 1.6.1 deleted the setter)", () => {
+    assert.ok(!rowsOf(SettingsManager.inMemory()).some((r) => r.key === "pi.showCacheMissNotices"));
+  });
+
   it("builds OMP-taxonomy tabs with unique keys and sections", () => {
     const groups = buildPiSettingsGroups(SettingsManager.inMemory());
     const keys = groups.flatMap((g) => g.rows.map((r) => r.key));

@@ -1,3 +1,88 @@
+## 0.32.0 — 2026-11-26
+
+**Pi 1.6.1 compatibility + the Munin server write gate.** Everything here was
+found by running against the real packages, not by reading them.
+
+- **Peer range** `>=0.99.1 <1.6.0` → `>=0.99.1 <1.7.0` for
+  `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui`; the lockfile
+  now resolves both to 1.6.1 (peer auto-installs, not devDependencies).
+- **One broken pi-settings row, one broken test cast.** pi 1.6.1 deleted
+  `getShowCacheMissNotices`/`setShowCacheMissNotices` in favour of four
+  independent notice toggles, so `/config` carried a row whose getter no longer
+  existed; and pi-tui's `render()` now returns `readonly string[]`, which broke
+  one `as` cast in `steering/test/think.test.ts` (runtime unchanged).
+- **`/config` now renders the four notice toggles** — `pi.notices.cacheMisses`,
+  `.cacheWarming`, `.compactionCosts`, `.reasoningDrops` on Model → Efficiency,
+  labels/descriptions taken verbatim from stock, each writing ONLY its own key
+  through `setNotice(key, …)`.
+- **`/config` no longer dies with one broken section.** The build path is
+  isolated per section (`safe(name, build)` in `assemble()`): a contribution
+  whose `groups()` throws loses only its own rows and is disclosed in a trailing
+  **Failed sections** tab, while the rest of the panel — pi settings, plugins,
+  healthy modules — still renders. `rebuildOnCommit` inherits it. A contribution
+  FACTORY that throws is guarded separately where the factories are built (it
+  runs outside `assemble()`, so the per-section wrap alone would not catch it)
+  and its message is seeded into the same **Failed sections** tab. The save path
+  already isolated per module.
+- **Munin SDK re-vendored 1.5.0 → 1.6.0 at `extensions/modules/munin/lib/sdk/`**
+  (upstream dist/*.js + *.d.ts translated one file per JS/d.ts pair, zero deps),
+  with five marked local deltas: a cache keyed `${baseUrl}|${apiKey}` (upstream
+  cached ONE un-keyed global, so switching servers read the wrong server's
+  capabilities), a `timeoutMs` on `fetchCapabilities` (upstream still has none),
+  an exported `CLIENT_VERSION`, a new pre-write version gate, and the
+  `ERR_CLIENT_OUTDATED`/`clients` type additions.
+- **The server gates writes on the envelope client version** — measured:
+  `/api/mcp/capabilities` advertises `clients["@kalera/munin-sdk"].minimum =
+  1.6.0`, and a write whose envelope says `1.5.0` is rejected with
+  `ERR_CLIENT_OUTDATED` ("This write was NOT saved") no matter how correct the
+  rest of the request is. Reads are NOT gated, which is why only storing failed.
+  The vendored constant is now `CLIENT_VERSION = "1.6.0"`, and `test/sdk.test.ts`
+  parses the vendor header in `lib/sdk/index.ts` so the two can never drift
+  again.
+- **`ERR_CLIENT_OUTDATED` gets its own error path**: `callMunin` replaces the
+  server's "install the npm package / update the Claude Code plugin" advice with
+  "ceulen vendors the SDK — upgrade ceulen", preserving `cause` and `code`, and
+  never routing it through `remediatedError` (a vendored SDK cannot be fixed by
+  npm). The SDK also refuses such a write BEFORE the POST when capabilities
+  advertise a higher minimum (missing/malformed minimum fails open — the server
+  stays authoritative). The gate is keyed on `isWriteAction`, not on
+  `ensureCapability`, so `delete` — a real write that skips the capability
+  check — is gated too. `munin_capabilities` prints each client's minimum/latest
+  so the gate is observable.
+- **`writeQueue: false` is documented as a ceiling**, not an accident: a write
+  during a maintenance window fails loudly instead of being saved to `~/.munin`
+  and replayed. `maintenance.ts`/`writeQueue.ts`/`node/fileWriteQueue.ts` are
+  vendored so flipping that one boolean turns the queue on.
+- `classifyError` now names `client_outdated` and `maintenance` (so `withRetry`
+  never retries a maintenance window, and the `tool_result` sanitizer — which
+  re-classifies from TEXT alone — names the failure class instead of
+  "Munin unknown error").
+
+## 0.31.0 — 2026-11-23
+
+DeepSeek V4 tool-selection guidance stops overriding a prerequisite read, and
+the `bash`-first hint stops mis-firing on "after" clauses.
+
+- **Selection guidance** (`steering.selectionGuidance`, DeepSeek V4 only) no
+  longer pushes one `codemode` script for every batch. It now says "use a
+  direct call for one simple step; batch independent calls in one round
+  (parallel direct calls, **or** codemode with `Promise.allSettled` to filter
+  or compute in place)". Live Herdr run on `router/combo/deepseek-v4.1-flash`:
+  the four-file sum task dropped from 2 tool rounds to 1 (four parallel
+  `read` calls, then one `bash`), which the previous codemode-first wording
+  never produced.
+- **`runTaskFirstToolHint`** used to fire on any execution verb anywhere in the
+  prompt, so "Read `fixtures/runbook.txt`, then run its command" got a
+  "FIRST tool call MUST be bash … Do NOT call read first" hint that directly
+  contradicted the read the task requires (live-observed: Flash read the file,
+  then re-read it because the reminder demanded compliance). Suppressed when a
+  read/open/review/check precedes the first execution verb, and when an
+  `after you read` / `after reading` clause makes the read a prerequisite.
+- **Scoped to the first execution clause**: "Run the tests, then deploy after
+  reviewing the results" keeps the `bash`-first hint — the review gates the
+  deploy, not the tests. An earlier revision scanned the whole suffix and
+  silently dropped the hint there.
+
 ## 0.30.0 — 2026-11-22
 
 Three DeepSeek Harness enrichments in the **repair** module — all-model, all
@@ -203,7 +288,6 @@ tool_search instruction, and unprompted behavior calling `serena_find_symbol`
 then `serena_find_referencing_symbols`. Bridge actions 10/10 pass end-to-end
 through the real `SerenaWorkerClient`; `tsc --noEmit` clean; `npm test`
 **3020 pass / 0 fail / 3 env-gated skips**.
-
 
 ## 0.28.0 — 2026-11-18
 
@@ -1628,28 +1712,3 @@ Wave 1: first two production modules merged into the bundle.
 ## 0.1.0 — 2026-09-21
 
 Name reservation + bundle scaffold.
-## 0.31.0 — 2026-11-23
-
-DeepSeek V4 tool-selection guidance stops overriding a prerequisite read, and
-the `bash`-first hint stops mis-firing on "after" clauses.
-
-- **Selection guidance** (`steering.selectionGuidance`, DeepSeek V4 only) no
-  longer pushes one `codemode` script for every batch. It now says "use a
-  direct call for one simple step; batch independent calls in one round
-  (parallel direct calls, **or** codemode with `Promise.allSettled` to filter
-  or compute in place)". Live Herdr run on `router/combo/deepseek-v4.1-flash`:
-  the four-file sum task dropped from 2 tool rounds to 1 (four parallel
-  `read` calls, then one `bash`), which the previous codemode-first wording
-  never produced.
-- **`runTaskFirstToolHint`** used to fire on any execution verb anywhere in the
-  prompt, so "Read `fixtures/runbook.txt`, then run its command" got a
-  "FIRST tool call MUST be bash … Do NOT call read first" hint that directly
-  contradicted the read the task requires (live-observed: Flash read the file,
-  then re-read it because the reminder demanded compliance). Suppressed when a
-  read/open/review/check precedes the first execution verb, and when an
-  `after you read` / `after reading` clause makes the read a prerequisite.
-- **Scoped to the first execution clause**: "Run the tests, then deploy after
-  reviewing the results" keeps the `bash`-first hint — the review gates the
-  deploy, not the tests. An earlier revision scanned the whole suffix and
-  silently dropped the hint there.
-

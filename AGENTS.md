@@ -4,7 +4,7 @@ Agent-facing guide to this repo.
 
 ## What ceulen is
 
-One **Pi bundle extension** (npm: `ceulen`): a single install whose feature modules are loaded by one entry (the `ceulen.disabled` settings key is a settings-only escape hatch; cold tools are `deferred` — `tool_search` loads them on demand). Users install with `pi install npm:ceulen` — never `npm install -g`. Every module registers only through Pi's public extension API (peer dep `@earendil-works/pi-coding-agent >=0.99.1 <1.6.0`), so upstream Pi upgrades stay drop-in.
+One **Pi bundle extension** (npm: `ceulen`): a single install whose feature modules are loaded by one entry (the `ceulen.disabled` settings key is a settings-only escape hatch; cold tools are `deferred` — `tool_search` loads them on demand). Users install with `pi install npm:ceulen` — never `npm install -g`. Every module registers only through Pi's public extension API (peer dep `@earendil-works/pi-coding-agent >=0.99.1 <1.7.0`), so upstream Pi upgrades stay drop-in.
 
 ## Layout
 
@@ -146,10 +146,54 @@ dampener (read tools: 3rd identical-args or 6th same-tool consecutive call
 returns guidance instead of executing; ANY non-munin tool_call resets the run —
 protocol-compliant sessions never dampen), `/munin-status`, the Munin Memory
 Protocol injection (`before_agent_start`, only when configured), the `tool_result`
-error sanitizer, and the `munin` skill (own `resources_discover` dir). The SDK is
-VENDORED to `lib/sdk.ts` (`// ponytail: vendored from @kalera/munin-sdk 1.5.0`;
-local change: capabilities cache keyed by `baseUrl|apiKey` — upstream cached one
-global). dotenv was dropped: the bundle's `env.ts` already ingests trusted `.env`.
+error sanitizer, and the `munin` skill (own `resources_discover` dir).
+
+**The SDK is VENDORED to `lib/sdk/`** (`// ponytail: vendored from
+@kalera/munin-sdk 1.6.0`, dist/*.js + *.d.ts translated one-file-per-pair;
+zero deps). FIVE local deltas, each marked inline: (1) the capabilities cache is
+keyed `${baseUrl}|${apiKey}` — upstream cached ONE un-keyed global, so a session
+that switched munin servers read the other server's capabilities (and so its
+write gate); single-slot on purpose, B's fetch evicts A's slot and A pays one
+extra GET, which is cheaper than unbounded module-scope state. (2)
+`fetchCapabilities` takes a `timeoutMs` and arms `AbortSignal.timeout` — upstream
+had no signal and could hang forever on a dead capabilities endpoint. (3)
+`CLIENT_VERSION` is exported and is `"1.6.0"`. (4) a NEW pre-write version gate
+in `invoke()`: when capabilities advertise `clients["@kalera/munin-sdk"].minimum`
+above `CLIENT_VERSION`, a write throws `ERR_CLIENT_OUTDATED` **before** the POST
+(a missing/malformed minimum fails open — the server stays authoritative). The
+gate is keyed on `isWriteAction`, NOT on `ensureCapability`: `callMunin`
+dispatches `delete` with `ensureCapability: false` (the server does not
+advertise it) and delete IS a write, so an unadvertised write is still gated —
+and delta 1's keyed cache means that costs no extra GET once capabilities are
+warm. `classifyError` also recognizes the rewritten message ("too old to write"),
+because the `tool_result` sanitizer re-classifies from TEXT with no `code`. (5)
+`ERR_CLIENT_OUTDATED` in `MuninError["code"]` + optional `clients` on
+`MuninCapabilities`.
+
+**The server write gate is real and version-keyed** (measured 2026-11-26):
+`GET /api/mcp/capabilities` returns
+`clients: {"@kalera/munin-sdk": {minimum: "1.6.0", latest: "1.6.0"}}`, and
+`/api/mcp/action` rejects any write whose envelope `client.version` is below the
+minimum. The envelope version comes from `CLIENT_VERSION`, so **bumping the
+vendored SDK means bumping that constant in the same commit** — `test/sdk.test.ts`
+case 1 parses the `lib/sdk/index.ts` vendor header and fails when the two drift
+(the 1.5.0 era had no such check, which is how a live `munin_store` came to fail
+with "client 1.5.0 is too old"). `callMunin` handles `ERR_CLIENT_OUTDATED` with
+its OWN branch, deliberately NOT through `remediatedError`/`formatRemediation`:
+the server's remediation says "install the npm package / update the Claude Code
+plugin", which cannot fix a vendored SDK, so the message instead says ceulen
+vendors the SDK and the write was NOT saved (the original error rides as `cause`,
+`code` copied). `lib/helpers.ts` `classifyError` maps `ERR_CLIENT_OUTDATED →
+client_outdated` and `MAINTENANCE_READ_ONLY → maintenance` (so `withRetry` never
+retries a maintenance window and the `tool_result` hook prints a named error),
+and `formatCapabilities` prints each `clients` entry's minimum/latest so the gate
+is observable via `munin_capabilities`.
+
+**`writeQueue: false` ceiling** (`withMuninClient`): every write fails loudly
+("NOT saved") instead of being saved to `~/.munin` and replayed. `maintenance.ts`,
+`writeQueue.ts` and `node/fileWriteQueue.ts` are vendored so flipping that ONE
+boolean turns local queueing on with no other change; they are dormant
+otherwise. dotenv was dropped: the bundle's `env.ts` already ingests trusted `.env`.
 
 Config is PROJECT-level (unlike router's global writes): `munin.apiKey`,
 `munin.project`, `munin.baseUrl` live in `<repo>/.pi/settings.json` under a
@@ -1540,8 +1584,12 @@ Mechanism (registry + loader):
   Coverage is full stock-`/settings` parity plus the setter-only extras:
   per-model thinking overrides (one row per override — `pi.modelThinkingLevels.
   <provider/id>` — plus an **Add model override** menu row; the clear option
-  reverts to the default), Fullscreen wheel scrolling, and the extra
-  resource-dir lists (extensions/skills/prompts/themes). Friendly choice forms
+  reverts to the default), Fullscreen wheel scrolling, the extra
+  resource-dir lists (extensions/skills/prompts/themes), and pi 1.6.1's four
+  transcript notice toggles — `pi.notices.{cacheMisses,cacheWarming,
+  compactionCosts,reasoningDrops}`, Model → Efficiency, each writing ONLY its
+  own key through `setNotice(key, …)` (they replace the deleted
+  `pi.showCacheMissNotices` single row). Friendly choice forms
   mirror stock (`30 sec`…`disabled`, `Ask`/`Always trust`/`Never trust`, the
   padding/autocomplete/image-width sets, per-level thinking descriptions) —
   those constants are replicated locally because pi does not export them from
@@ -1557,7 +1605,20 @@ Mechanism (registry + loader):
   without a contribution render nothing) + plugins, sorted by `PI_TAB_ORDER`.
   On save it flushes the pi SettingsManager, saves plugins, then runs each
   contribution's `save()` in its own try/catch — one failure never blocks the
-  others.
+  others. The BUILD path is isolated the same way: each contribution's
+  `groups()`, the pi-settings build and the plugins build run inside a local
+  `safe(name, build)` in `assemble()`, so one throwing section (a module reading
+  settings it cannot parse, a pi API it has not caught up with) costs only its
+  own rows instead of the whole panel; the failures are disclosed as one
+  trailing `Failed sections` group (`config-error.<name>` info rows carrying the
+  message label + error text — no `tab`, so it becomes its own tab sorted last).
+  The contribution FACTORY call is guarded too, one scope up: a factory that
+  throws builds no contribution and its message is collected in a
+  `factoryFailures` array seeded into `assemble()`'s `failed` list — a factory
+  runs outside `assemble()` (and `assemble()` must stay rebuildable), so a
+  plain `safe()` call cannot cover it. `rebuildOnCommit` rebuilds inherit both
+  guards. Failed sections render no rows, so their keys can never be edited and
+  the save path needs no change.
 
 Plugins group (`extensions/modules/config/plugins.ts`) — Pi-package on/off,
 the "whole PI plugins" tab. Pi stores installed packages in the `packages`

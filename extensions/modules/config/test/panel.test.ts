@@ -214,6 +214,69 @@ describe("config module", () => {
     assert.ok(text.indexOf("[Appearance]") < text.indexOf("[Model]"), "taxonomy order");
     assert.ok(text.indexOf("[Model]") < text.indexOf("[Interaction]"));
   });
+
+  it("/config show survives a contribution whose groups() throws (isolated per section)", async () => {
+    let handler: ((args: string, ctx: never) => Promise<void>) | undefined;
+    const pi = {
+      registerCommand: (_name: string, opts: { handler: typeof handler }) => { handler = opts.handler; },
+    } as never;
+    const factories = new Map<string, () => never>([
+      ["busted", () => ({ groups: () => { throw new Error("boom"); }, save: async () => {} }) as never],
+      [
+        "router",
+        () => ({
+          groups: () => [
+            { key: "router", label: "Router", tab: "Providers", rows: [{ key: "router.baseUrl", label: "Base URL", kind: "string", value: "" }] },
+          ],
+          save: async () => {},
+        }) as never,
+      ],
+    ]);
+    const { default: configModule } = await import("../index.js");
+    configModule(pi, { configContribs: factories } as never);
+    assert.ok(handler, "handler registered");
+    const { notes, ctx } = ctxStub();
+    // Must resolve — a throwing section is disclosed, never propagated.
+    await (handler as never as (a: string, c: unknown) => Promise<void>)("show", ctx);
+    const text = notes.join("\n");
+    assert.ok(text.includes("Failed sections"), "failure tab rendered");
+    assert.ok(text.includes("busted"), "throwing module named");
+    assert.ok(text.includes("boom"), "underlying message shown");
+    assert.ok(text.includes("[Appearance]"), "pi settings still present");
+    assert.ok(text.includes("[Providers]") && text.includes("Router"), "healthy module still present");
+  });
+
+  it("/config show survives a contribution FACTORY that throws (guarded outside assemble)", async () => {
+    let handler: ((args: string, ctx: never) => Promise<void>) | undefined;
+    const pi = {
+      registerCommand: (_name: string, opts: { handler: typeof handler }) => { handler = opts.handler; },
+    } as never;
+    const factories = new Map<string, () => never>([
+      ["exploding", () => { throw new Error("factory boom"); }],
+      [
+        "router",
+        () => ({
+          groups: () => [
+            { key: "router", label: "Router", tab: "Providers", rows: [{ key: "router.baseUrl", label: "Base URL", kind: "string", value: "" }] },
+          ],
+          save: async () => {},
+        }) as never,
+      ],
+    ]);
+    const { default: configModule } = await import("../index.js");
+    // Registration must not throw either — the factory throws while the
+    // contributions are built, and that is inside the guarded loop.
+    configModule(pi, { configContribs: factories } as never);
+    assert.ok(handler, "handler registered");
+    const { notes, ctx } = ctxStub();
+    await (handler as never as (a: string, c: unknown) => Promise<void>)("show", ctx);
+    const text = notes.join("\n");
+    assert.ok(text.includes("Failed sections"), "factory failure lands in the failure tab");
+    assert.ok(text.includes("exploding"), "throwing factory's module named");
+    assert.ok(text.includes("factory boom"), "underlying factory message shown");
+    assert.ok(text.includes("[Appearance]"), "pi settings still present");
+    assert.ok(text.includes("[Providers]") && text.includes("Router"), "healthy module still present");
+  });
 });
 
 // ── router contribution ─────────────────────────────────────────────────────

@@ -276,6 +276,11 @@ export function formatCapabilities(caps: Record<string, unknown>): string {
   if (actions?.optional?.length) lines.push(`Optional Actions: ${actions.optional.join(", ")}`);
   const features = Object.entries(caps.features as Record<string, { supported: boolean }> || {});
   if (features.length) lines.push(`Features: ${features.map(([n, i]) => `${n} ${i?.supported ? "✓" : "✗"}`).join(", ")}`);
+  // The server's write gate: a client below a minimum cannot write at all.
+  const clients = Object.entries((caps.clients as Record<string, { minimum?: string; latest?: string }> | undefined) ?? {});
+  for (const [name, info] of clients) {
+    lines.push(`Client ${name}: minimum ${info?.minimum ?? "unset"}, latest ${info?.latest ?? "unset"}`);
+  }
   return lines.join("\n");
 }
 
@@ -365,6 +370,8 @@ export function classifyError(error: unknown): { type: string; message: string; 
     FEATURE_DISABLED: "feature_disabled",
     RATE_LIMITED: "rate_limit",
     ERR_STALE_PROTOCOL: "stale_protocol",
+    ERR_CLIENT_OUTDATED: "client_outdated",
+    MAINTENANCE_READ_ONLY: "maintenance",
     NOT_FOUND: "not_found",
   };
   if (structuredTypes[code]) return { type: structuredTypes[code], message: err.message, remediation };
@@ -383,6 +390,9 @@ export function classifyError(error: unknown): { type: string; message: string; 
   if (message.includes("rate limit") || message.includes("too many requests") || /\b429\b/.test(message)) return { type: "rate_limit", message: err.message };
   if (message.includes("e2ee") || message.includes("encryption")) return { type: "e2ee", message: err.message };
   if (message.includes("stale protocol")) return { type: "stale_protocol", message: err.message };
+  // The tool_result sanitizer re-classifies from TEXT (no `code`), and
+  // callMunin's client_outdated branch writes "too old to write" without one.
+  if (message.includes("too old to write")) return { type: "client_outdated", message: err.message };
   if (message.includes("not found")) return { type: "not_found", message: err.message };
   return { type: "unknown", message: err.message };
 }

@@ -267,6 +267,8 @@ describe("classifyError", () => {
       ["FEATURE_DISABLED", "feature_disabled"],
       ["RATE_LIMITED", "rate_limit"],
       ["ERR_STALE_PROTOCOL", "stale_protocol"],
+      ["ERR_CLIENT_OUTDATED", "client_outdated"],
+      ["MAINTENANCE_READ_ONLY", "maintenance"],
       ["NOT_FOUND", "not_found"],
     ] as const;
     for (const [code, type] of cases) {
@@ -519,5 +521,12 @@ describe("formatCapabilities", () => {
     });
     assert.match(result, /experimental/);
     assert.match(result, /✗/);
+  });
+
+  it("prints the client write gate (minimum/latest) so it is observable", () => {
+    const result = formatCapabilities({
+      clients: { "@kalera/munin-sdk": { minimum: "1.6.0", latest: "1.7.2" } },
+    });
+    assert.match(result, /Client @kalera\/munin-sdk: minimum 1\.6\.0, latest 1\.7\.2/);
   });
 });

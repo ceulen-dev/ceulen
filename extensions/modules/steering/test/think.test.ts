@@ -44,7 +44,7 @@ describe("think tool", () => {
       for (const c of [call, result]) {
         assert.equal(typeof c, "object");
         assert.equal(typeof (c as { render?: unknown }).render, "function", "must be a pi-tui Component");
-        const rendered = (c as { render(width?: number): string[] }).render(80);
+        const rendered = (c as unknown as { render(width?: number): readonly string[] }).render(80);
         assert.ok(Array.isArray(rendered) && rendered.every((l) => typeof l === "string"));
       }
       assert.match((call as unknown as { render(w: number): string[] }).render(80).join(""), /· think \(4 chars\)/);

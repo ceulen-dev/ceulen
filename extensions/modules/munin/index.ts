@@ -1,7 +1,7 @@
 // munin module — Munin long-term memory tools for Pi.
 //
 // Ported from @bacnh85/pi-munin 0.5.12 extensions/index.ts (SDK vendored to
-// lib/sdk.ts; dotenv dropped — ceulen's bundle env.ts ingests trusted .env).
+// lib/sdk/; dotenv dropped — ceulen's bundle env.ts ingests trusted .env).
 // Registers the 8 munin_* tools (search/get/store direct; the other five
 // deferred — tool_search loads them), the consecutive-call loop dampener,
 // /munin-status, the Munin Memory Protocol injection (only when configured),
@@ -17,7 +17,7 @@ import type {
 import fs from "node:fs";
 import path from "node:path";
 import { Type } from "typebox";
-import { MuninClient } from "./lib/sdk.js";
+import { MuninClient, type MuninAction } from "./lib/sdk/index.js";
 import {
   formatCapabilities,
   parseTags,
@@ -140,7 +140,12 @@ function withMuninClient<T extends Record<string, unknown>>(
     ctx?.cwd,
     ctx?.isProjectTrusted?.() === true,
   );
-  const client = new MuninClient({ apiKey, baseUrl });
+  // ponytail: ceiling — writeQueue:false keeps every write synchronous and
+  // honest ("the write was NOT saved" during a maintenance window). Flipping
+  // this boolean to the default turns on the vendored local queue
+  // (lib/sdk/writeQueue.ts + node/fileWriteQueue.ts), which saves a refused
+  // write to ~/.munin and replays it later; it is the one-line upgrade path.
+  const client = new MuninClient({ apiKey, baseUrl, writeQueue: false });
   return callback(client, projectId);
 }
 
@@ -184,10 +189,31 @@ export async function callMunin(
   try {
     return await withRetry(async () => invokeMuninAction(client, projectId, directAction, payload, invokeOptions));
   } catch (error) {
+    const caught = error instanceof Error ? error : new Error(String(error));
+    // The server's write gate: our vendored SDK is older than the advertised
+    // minimum. The server's message ends in "install the npm package / update
+    // the Claude Code plugin" advice — wrong here, ceulen SHIPS the SDK (live
+    // 2026-11-26: "…npm install -g @kalera/munin-claude@latest…"). So the
+    // diagnostic head is kept and the install advice is cut, instead of being
+    // relayed by remediatedError/formatRemediation.
+    if (classifyError(caught).type === "client_outdated") {
+      const advice = /\s*(?:Update the Munin client|Claude Code:|Other MCP configs:|npm install|npx -y)\b/i;
+      let diagnostic = caught.message.split(advice)[0]!.trim();
+      if (!/NOT saved/i.test(diagnostic)) diagnostic += " This write was NOT saved.";
+      const outdated = new Error(
+        sanitizeErrorMessage(new Error(
+          `${diagnostic} ceulen vendors the Munin SDK — this is fixed by upgrading ceulen, not by installing the npm package.`,
+        )),
+        { cause: caught },
+      );
+      const code = (caught as Error & { code?: unknown }).code;
+      if (code !== undefined) (outdated as Error & { code?: unknown }).code = code;
+      throw outdated;
+    }
     // Layer 1: auto-recover from ERR_STALE_PROTOCOL via the server's
     // acknowledge_setup handshake, then retry the original call exactly once.
     // ponytail: single retry — no loop; ack is idempotent and server-side remembered.
-    const err = error instanceof Error ? error : new Error(String(error));
+    const err = caught;
     const remediation = extractRemediation(err);
     const ack = remediation?.acknowledge_after_reading;
     const isStale =
@@ -203,7 +229,7 @@ export async function callMunin(
       let ackFailed = false;
       try {
         // ack is a real action even when not advertised in capabilities.
-        const ackResult = await client.invoke(projectId, ackAction, { version }, { ensureCapability: false });
+        const ackResult = await client.invoke(projectId, ackAction as MuninAction, { version }, { ensureCapability: false });
         ackFailed = !!ackResult && typeof ackResult === "object" &&
           ((ackResult as { ok?: boolean }).ok === false || (ackResult as { success?: boolean }).success === false || (ackResult as { acknowledged?: boolean }).acknowledged === false);
       } catch {
@@ -251,7 +277,7 @@ function invokeMuninAction(
     return (direct as (this: MuninClient, projectId: string, payload: Record<string, unknown>) => Promise<unknown>).call(client, projectId, payload);
   }
   if (typeof client.invoke === "function") {
-    return client.invoke(projectId, directAction, payload, invokeOptions);
+    return client.invoke(projectId, directAction as MuninAction, payload, invokeOptions);
   }
   throw new Error(`Munin SDK does not support action: ${directAction}`);
 }
